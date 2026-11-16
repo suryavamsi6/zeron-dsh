@@ -242,10 +242,10 @@ class VoiceController(
     fun callable(device: DeviceView): Boolean = compatible(device) || (forced && device.isExecutionHost)
 
     /** Voice controls appear once any registered host can run them. */
-    val available: Boolean get() = forced || _snapshot.value.previewing || allDevices().any(::compatible)
+    val available: Boolean get() = false
 
     /** [available] against a collected device list, so composables recompose with it. */
-    fun availableAmong(devices: List<DeviceView>): Boolean = forced || _snapshot.value.previewing || devices.any(::compatible)
+    fun availableAmong(devices: List<DeviceView>): Boolean = false
 
     /** The host a plain tap calls: the chosen one, or the only one online. */
     fun startHost(): DeviceView? {

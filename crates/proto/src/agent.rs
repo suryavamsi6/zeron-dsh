@@ -69,6 +69,7 @@ fn intern(slug: &str) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HarnessId {
+    DeepSeek,
     ClaudeCode,
     Codex,
     Cursor,
@@ -113,6 +114,7 @@ impl<'de> Deserialize<'de> for HarnessId {
             serde::de::Error::unknown_variant(
                 &slug,
                 &[
+                    "deepseek",
                     "claude-code",
                     "codex",
                     "cursor",
@@ -135,7 +137,9 @@ impl<'de> Deserialize<'de> for HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 12] = [
+    pub const ALL: [HarnessId; 2] = [HarnessId::DeepSeek, HarnessId::Mock];
+
+    const LEGACY: [HarnessId; 11] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
@@ -147,12 +151,23 @@ impl HarnessId {
         HarnessId::Opencode,
         HarnessId::Antigravity,
         HarnessId::Muse,
-        HarnessId::Mock,
     ];
+
+    pub fn is_supported(self) -> bool {
+        matches!(self, HarnessId::DeepSeek | HarnessId::Mock)
+    }
+
+    /// Whether this build can actually run `self`: DeepSeek everywhere, Mock
+    /// only in debug builds (tests). Decode still accepts the legacy ids so an
+    /// old row reads back as what it was.
+    pub fn can_run(self) -> bool {
+        self == HarnessId::DeepSeek || (cfg!(debug_assertions) && self == HarnessId::Mock)
+    }
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
     pub fn as_str(self) -> &'static str {
         match self {
+            HarnessId::DeepSeek => "deepseek",
             HarnessId::ClaudeCode => "claude-code",
             HarnessId::Codex => "codex",
             HarnessId::Cursor => "cursor",
@@ -174,7 +189,7 @@ impl HarnessId {
         if let Some(agent) = RegistryAgent::from_slug(slug) {
             return Some(HarnessId::Registry(agent));
         }
-        Self::ALL.into_iter().find(|id| id.as_str() == slug)
+        Self::ALL.into_iter().chain(Self::LEGACY).find(|id| id.as_str() == slug)
     }
 
     /// The registry agent this is, if it is one.

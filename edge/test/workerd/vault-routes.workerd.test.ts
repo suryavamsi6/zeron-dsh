@@ -13,13 +13,13 @@ describe("/vault routes → VAULT service binding", () => {
     expect(await (await call("GET", "/vault/org1", bearer)).json()).toEqual({ connections: [], devices: [], available: true });
     expect((await lastCall("status")).args).toEqual([caller]);
 
-    const put = { material: { claudeAiOauth: { accessToken: "a" } }, authorizedDevices: ["cloud-1"] };
-    expect((await call("PUT", "/vault/org1/credentials/claude", bearer, put)).status).toBe(200);
-    expect((await lastCall("putCredential")).args).toEqual([caller, "claude", put]);
-    expect((await call("PATCH", "/vault/org1/credentials/codex", bearer, { authorizedDevices: ["cloud-1", "laptop-2"] })).status).toBe(200);
-    expect((await lastCall("authorize")).args).toEqual([caller, "codex", ["cloud-1", "laptop-2"]]);
-    expect((await call("DELETE", "/vault/org1/credentials/openai-key", bearer)).status).toBe(200);
-    expect((await lastCall("disconnect")).args).toEqual([caller, "openai-key"]);
+    const put = { material: { key: "deepseek-fixture-key" }, authorizedDevices: ["cloud-1"] };
+    expect((await call("PUT", "/vault/org1/credentials/deepseek-key", bearer, put)).status).toBe(200);
+    expect((await lastCall("putCredential")).args).toEqual([caller, "deepseek-key", put]);
+    expect((await call("PATCH", "/vault/org1/credentials/deepseek-key", bearer, { authorizedDevices: ["cloud-1", "laptop-2"] })).status).toBe(200);
+    expect((await lastCall("authorize")).args).toEqual([caller, "deepseek-key", ["cloud-1", "laptop-2"]]);
+    expect((await call("DELETE", "/vault/org1/credentials/deepseek-key", bearer)).status).toBe(200);
+    expect((await lastCall("disconnect")).args).toEqual([caller, "deepseek-key"]);
 
     const enroll = { deviceId: "laptop-2", kind: "laptop", publicKey: "a".repeat(43) };
     expect((await call("POST", "/vault/org1/devices/enroll", bearer, enroll)).status).toBe(200);
@@ -67,20 +67,18 @@ describe("/vault routes → VAULT service binding", () => {
     });
     expect((await lastCall("githubBranches")).args).toEqual([caller, "acme/app"]);
 
-    expect(await (await call("GET", "/vault/org1/accounts/claude", bearer)).json()).toMatchObject({
+    expect(await (await call("GET", "/vault/org1/accounts/deepseek-key", bearer)).json()).toMatchObject({
       accounts: [{ slot: "a1", active: true }]
     });
-    expect((await lastCall("accounts")).args).toEqual([caller, "claude"]);
-    expect((await call("POST", "/vault/org1/accounts/codex/active", bearer, { slot: "a1" })).status).toBe(200);
-    expect((await lastCall("activateAccount")).args).toEqual([caller, "codex", "a1"]);
-    expect((await call("POST", "/vault/org1/accounts/codex/active", bearer, { slot: null })).status).toBe(200);
-    expect((await lastCall("activateAccount")).args).toEqual([caller, "codex", null]);
-    expect(await (await call("DELETE", "/vault/org1/accounts/anthropic-key/a1", bearer)).json()).toEqual({ accounts: [] });
-    expect((await lastCall("forgetAccount")).args).toEqual([caller, "anthropic-key", "a1"]);
-    expect(await (await call("GET", "/vault/org1/accounts/claude/a1/usage", bearer)).json()).toMatchObject({
-      body: { five_hour: { utilization: 10 } }
-    });
-    expect((await lastCall("accountUsage")).args).toEqual([caller, "claude", "a1"]);
+    expect((await lastCall("accounts")).args).toEqual([caller, "deepseek-key"]);
+    expect((await call("POST", "/vault/org1/accounts/deepseek-key/active", bearer, { slot: "a1" })).status).toBe(200);
+    expect((await lastCall("activateAccount")).args).toEqual([caller, "deepseek-key", "a1"]);
+    expect((await call("POST", "/vault/org1/accounts/deepseek-key/active", bearer, { slot: null })).status).toBe(200);
+    expect((await lastCall("activateAccount")).args).toEqual([caller, "deepseek-key", null]);
+    expect(await (await call("DELETE", "/vault/org1/accounts/deepseek-key/a1", bearer)).json()).toEqual({ accounts: [] });
+    expect((await lastCall("forgetAccount")).args).toEqual([caller, "deepseek-key", "a1"]);
+    expect((await call("GET", "/vault/org1/accounts/deepseek-key/a1/usage", bearer)).status).toBe(200);
+    expect((await lastCall("accountUsage")).args).toEqual([caller, "deepseek-key", "a1"]);
   });
 
   it("validates shapes before calling the vault", async () => {
@@ -88,9 +86,10 @@ describe("/vault routes → VAULT service binding", () => {
     const bad = async (method: string, path: string, body?: unknown) =>
       expect((await call(method, path, bearer, body)).status, `${method} ${path}`).toBe(400);
     await bad("PUT", "/vault/org1/credentials/bogus", { material: {}, authorizedDevices: [] });
-    await bad("PUT", "/vault/org1/credentials/codex", { material: {} });
-    await bad("PUT", "/vault/org1/credentials/codex", { material: "x", authorizedDevices: [] });
-    await bad("PATCH", "/vault/org1/credentials/codex", { authorizedDevices: ["bad id!"] });
+    await bad("PUT", "/vault/org1/credentials/deepseek-key", { material: {} });
+    await bad("PUT", "/vault/org1/credentials/deepseek-key", { material: "x", authorizedDevices: [] });
+    await bad("PATCH", "/vault/org1/credentials/deepseek-key", { authorizedDevices: ["bad id!"] });
+    await bad("PUT", "/vault/org1/credentials/codex", { material: { key: "x" }, authorizedDevices: [] });
     await bad("POST", "/vault/org1/devices/enroll", { deviceId: "cloud-1", kind: "laptop", publicKey: "a".repeat(43) });
     await bad("POST", "/vault/org1/devices/enroll", { deviceId: "laptop-1", kind: "cloud", publicKey: "a".repeat(43) });
     await bad("POST", "/vault/org1/disable", { disabled: "yes" });
@@ -99,10 +98,10 @@ describe("/vault routes → VAULT service binding", () => {
     await bad("POST", "/vault/org1/grant", { provider: "github", deviceId: "d", ts: 1, sig: "c2ln", repo: 7 });
     await bad("GET", "/vault/org1/github/branches");
     await bad("GET", "/vault/org1/accounts/bogus");
-    await bad("POST", "/vault/org1/accounts/codex/active", { slot: "bad id!" });
-    await bad("POST", "/vault/org1/accounts/codex/active", {});
-    await bad("DELETE", "/vault/org1/accounts/codex/bad%20id");
-    await bad("PUT", "/vault/org1/credentials/codex", { material: { key: "x".repeat(70_000) }, authorizedDevices: [] });
+    await bad("POST", "/vault/org1/accounts/deepseek-key/active", { slot: "bad id!" });
+    await bad("POST", "/vault/org1/accounts/deepseek-key/active", {});
+    await bad("DELETE", "/vault/org1/accounts/deepseek-key/bad%20id");
+    await bad("PUT", "/vault/org1/credentials/deepseek-key", { material: { key: "x".repeat(70_000) }, authorizedDevices: [] });
     expect((await call("GET", "/vault/other-org", bearer)).status).toBe(403);
     expect((await call("GET", "/vault/org1/nope", bearer)).status).toBe(404);
   });

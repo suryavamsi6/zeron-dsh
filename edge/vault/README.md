@@ -1,8 +1,8 @@
 # zeron-vault
 
 The credential vault Worker (design: `docs/design/cloud-device.md`, "Credential vault"). It
-holds users' provider credentials (Codex, Claude, GitHub, API keys) encrypted, refreshes them,
-and hands enrolled devices short-lived **grants**: access tokens only, never refresh tokens.
+holds users' DeepSeek API keys and GitHub logins encrypted, refreshes the GitHub tokens, and
+hands enrolled devices short-lived **grants**: access tokens only, never refresh tokens.
 
 ## Trust boundary
 
@@ -100,11 +100,11 @@ the first 16 hex chars of SHA-256 of the key. Seals always use `VAULT_KEK`. Open
 
 ## Canary
 
-A daily cron (`0 6 * * *`) force-refreshes `CANARY_USER_ID`'s codex, claude and github
-credentials through the same gate real grants use, and checks the GitHub App's credentials
-(`GET /app` with an App JWT; status `app_valid` / `app_rejected`). For a Claude setup token, which cannot be
-refreshed, it checks that more than 30 days remain. Each result is stored in that account DO's
-`canary` table and logged as `{"event":"vault.canary","provider","ok","status"}`.
+A daily cron (`0 6 * * *`) reports (and refreshes when due) `CANARY_USER_ID`'s github login
+through the same gate real grants use, and checks the GitHub App's credentials (`GET /app` with
+an App JWT; status `app_valid` / `app_rejected`). DeepSeek API keys are static: no canary, no
+refresh and no upstream probe. Each result is stored in that account DO's `canary` table and
+logged as `{"event":"vault.canary","provider","ok","status"}`.
 
 To set it up, create a dedicated user, connect its credentials through the normal app flows,
 then set `CANARY_USER_ID` to that user's id. Alert on `vault.canary` lines with `ok=false` in

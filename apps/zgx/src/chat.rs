@@ -1287,9 +1287,8 @@ impl Chats {
             .flatten()
             .filter(|h| {
                 let id = h["id"].as_str().unwrap_or_default();
-                if id == "mock" {
-                    return mock;
-                }
+                if id == "mock" { return mock && cfg!(debug_assertions); }
+                if id != "deepseek" { return false; }
                 h["installed"].as_bool() != Some(false) && h["enabled"].as_bool() != Some(false)
             })
             .cloned()
@@ -1690,6 +1689,7 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
     let mut harnesses = Vec::new();
     let mut models = Vec::new();
     for h in listed {
+        if !offered(h, device.unwrap_or("")) { continue; }
         let id = h["id"].as_str().unwrap_or_default();
         let Some(list) = by.get(id).filter(|l| !l.is_empty()) else {
             continue;
@@ -2457,6 +2457,11 @@ impl View {
         if chat.is_null() && !fresh {
             return Err("missing");
         }
+        let config = merged_config(&chat["config"], &req);
+        let harness = config["harness"].as_str();
+        if harness != Some("deepseek") && !(harness == Some("mock") && cfg!(debug_assertions) && std::env::var("ZERON_ZGX_MOCK").as_deref() == Ok("1")) {
+            return Err("unsupported");
+        }
         let target = chats.target(&chat);
         let words = req.field("text").map(text).unwrap_or_default();
         // Its id: the page's (it shows the prompt at once) or a new one.
@@ -2891,6 +2896,7 @@ impl View {
         let id = args.field("id").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
         let config = merged_config(&chat["config"], &args);
+        if config["harness"].as_str() != Some("deepseek") { return Err("unsupported"); }
         // Shown at once; the engine's word follows.
         if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
             c["config"] = config.clone();
@@ -3805,7 +3811,7 @@ enum Change {
 /// when it isn't this one).
 fn build_context(open: &mut Open, chats: &Chats) -> Rc<RowContext> {
     let chat = chats.chat(&open.id).unwrap_or(Json::Null);
-    let harness = chat["config"]["harness"].as_str().unwrap_or("claude-code").to_owned();
+    let harness = chat["config"]["harness"].as_str().unwrap_or("unsupported").to_owned();
     let model = chat["config"]["model"].as_str().map(|m| chats.label_of(&harness, Some(m)).unwrap_or_else(|| m.to_owned()));
     if open.built_model.as_ref() != Some(&model) {
         // (Settled entries are the engine's now: the rows show the last name
@@ -5754,7 +5760,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let chat = chat.unwrap_or(Json::Null);
     let config = &chat["config"];
     let s = |j: &Json| j.as_str().map(Value::from).unwrap_or(Value::Nil);
-    let harness = config["harness"].as_str().unwrap_or("claude-code");
+    let harness = config["harness"].as_str().unwrap_or("unsupported");
     let model = config["model"]
         .as_str()
         .map(|m| Value::from(format!("{harness}/{m}").as_str()))
@@ -6078,7 +6084,7 @@ fn waiting_value(items: &[Json]) -> Value {
 /// device, still offers only those it can run).
 fn offered(h: &Json, device: &str) -> bool {
     let session_machine = device.starts_with("cloud-");
-    h["id"].as_str() != Some("mock")
+    h["id"].as_str() == Some("deepseek")
         && h["installed"].as_bool() != Some(false)
         && (session_machine || h["enabled"].as_bool() != Some(false))
 }
@@ -7789,17 +7795,11 @@ mod tests {
     }
 
     #[test]
-    fn a_cloud_chats_own_agent_stays_offered_without_an_account() {
-        let codex = json!({ "id": "codex", "installed": true, "enabled": false });
-        // On the chat's own machine: listed, so its model reads as itself.
-        assert!(super::offered(&codex, "cloud-s-chat-1"));
-        // Anywhere else (a computer, the logical Cloud device a new chat picks
-        // from): only what can run there.
-        assert!(!super::offered(&codex, "cloud"));
-        assert!(!super::offered(&codex, "mac"));
-        assert!(!super::offered(&json!({ "id": "mock" }), "cloud-s-chat-1"));
-        assert!(!super::offered(&json!({ "id": "claude-code", "installed": false }), "cloud-s-chat-1"));
-        assert!(super::offered(&json!({ "id": "claude-code" }), "mac"));
+    fn only_deepseek_is_offered() {
+        assert!(super::offered(&json!({ "id": "deepseek" }), "mac"));
+        assert!(!super::offered(&json!({ "id": "codex", "installed": true }), "mac"));
+        assert!(!super::offered(&json!({ "id": "claude-code" }), "cloud-s-chat-1"));
+        assert!(!super::offered(&json!({ "id": "mock" }), "mac"));
     }
 
     #[test]

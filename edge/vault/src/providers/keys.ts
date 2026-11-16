@@ -1,5 +1,5 @@
 /**
- * Static API keys (`anthropic-key`, `openai-key`): the user's own key, pasted
+ * DeepSeek API keys: the user's own key, pasted
  * on the laptop and uploaded once. Nothing to refresh; grants still expire
  * hourly so a revoke or disconnect reaches consumers within the hour.
  */
@@ -31,5 +31,4 @@ const keyAdapter = (id: VaultProviderId): ProviderAdapter<KeySecret> => ({
   grant: (secret, now) => ({ accessToken: secret.key, expiresAt: now + HOUR_MS, account: keyLabel(secret.key) })
 });
 
-export const anthropicKeyAdapter = keyAdapter("anthropic-key");
-export const openaiKeyAdapter = keyAdapter("openai-key");
+export const deepseekKeyAdapter = keyAdapter("deepseek-key");

@@ -1,18 +1,4 @@
-//! zeron-harness — one interface over coding agents (plus a mock for tests).
-//!
-//! NATIVE DRIVERS speak each agent's own wire directly: Claude Code over
-//! stream-json ([`ClaudeHarness`]), Codex over the app-server JSON-RPC
-//! ([`CodexHarness`]), Cursor through a pinned @cursor/sdk shim
-//! ([`CursorHarness`]), and opencode over its own HTTP/SSE server protocol
-//! ([`OpencodeHarness`] — what the opencode desktop app speaks). The shared
-//! [`AcpHarness`] remains ONLY for agents built ground-up on ACP — Devin
-//! (`devin acp`), Grok (`grok agent stdio`) Hermes (`hermes acp`) and
-//! Antigravity. Pi uses native JSONL RPC ([`PiHarness`]).
-//! Adapter-mediated ACP for claude/codex/cursor was retired — and opencode's
-//! ACP layer with it: the adapters held prompt turns open for background
-//! work the CLIs themselves settle eagerly (and opencode's settles on the
-//! first uncorrelated idle), manufacturing done-status bugs the native
-//! wires don't have (decision record: docs/research/acp.md).
+//! DeepSeek Harness through its official, pinned subprocess SDK.
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -221,7 +207,6 @@ pub fn same_model_options(
 
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
-    pub realtime: Option<codex::realtime::RealtimeControls>,
     /// Shared execution gate held until the harness has shut down and reaped
     /// its subprocess, including when the host drops the event stream. Each
     /// detached session task must retain this lease through its cleanup.
@@ -375,12 +360,9 @@ pub trait Harness: Send + Sync {
     /// Project-scoped skills; None means this provider does not advertise skills.
     async fn skills(
         &self,
-        cwd: &std::path::Path,
+        _cwd: &std::path::Path,
     ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
-        if self.id() == HarnessId::Mock {
-            return Ok(None);
-        }
-        skills::discover(self.id(), cwd).await.map(Some)
+        Ok(None)
     }
     /// Run an isolated title request. Drivers must opt in with title-specific
     /// instructions and restrictions; never fall back to an ordinary coding run.
@@ -394,15 +376,6 @@ pub trait Harness: Send + Sync {
         ))
     }
 
-    /// Bootstrap without a synthetic user prompt; providers opt in explicitly.
-    async fn start_idle(
-        &self,
-        _request: RunRequest,
-        _controls: RunControls,
-    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
-        Err(HarnessError::Protocol("idle runtime unsupported".into()))
-    }
-
     /// Run one (persistent) session; the stream ends with `AgentEvent::Done`.
     async fn run(
         &self,
@@ -411,37 +384,21 @@ pub trait Harness: Send + Sync {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError>;
 }
 
-pub mod acp;
-pub mod acp_registry;
-pub(crate) mod adapter_install;
 pub mod approval;
-pub mod archive_install;
 mod background;
 pub use background::{MarkOutcome, MarkRefused, OutputSource};
-mod catalog;
 mod catalog_failure;
-pub(crate) mod code_signature;
+pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 /// Secret redaction, shared with the doc fold (command output tails).
 pub use zeron_proto::redact;
-pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
-pub mod claude;
-pub mod codex;
 pub mod agent_ports;
-pub mod cursor;
+pub mod deepseek;
 pub(crate) mod executable;
 pub mod install;
-pub(crate) mod jsonl_tail;
-pub(crate) mod jsonrpc;
 pub(crate) mod lossy_lines;
 pub mod mock;
-pub mod muse;
-mod model_context;
-pub mod opencode;
-pub mod pi;
 pub mod process;
-mod scratch;
 pub mod shell_env;
-pub(crate) mod skills;
 #[cfg(windows)]
 pub mod windows_process;
 
@@ -586,21 +543,9 @@ fn apply_login_shell_env(cmd: &mut std::process::Command) {
 /// unexpectedly (<status>): <last stderr lines>" instead of a bare shrug —
 /// the proper background-crash message old zeron showed (user requirement).
 #[derive(Clone, Default)]
-pub(crate) struct StderrTail(
-    std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>,
-    std::sync::Arc<tokio::sync::Notify>,
-);
+pub(crate) struct StderrTail(std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
 
 impl StderrTail {
-    pub(crate) fn close(&self) {
-        self.1.notify_one();
-    }
-
-    pub(crate) async fn wait_closed(&self) {
-        let _ =
-            tokio::time::timeout(std::time::Duration::from_millis(200), self.1.notified()).await;
-    }
-
     const KEEP_LINES: usize = 6;
     const KEEP_BYTES: usize = 700;
 
@@ -735,46 +680,11 @@ pub(crate) fn crash_message(
     }
 }
 
-pub use acp::AcpHarness;
-pub use claude::ClaudeHarness;
-pub use codex::CodexHarness;
-pub use cursor::CursorHarness;
-pub use opencode::OpencodeHarness;
-pub use muse::MuseHarness;
-pub use pi::PiHarness;
+pub use deepseek::DeepSeekHarness;
 
 // ---------------------------------------------------------------------------
 // Child lifecycle (shared by the codex and ACP harnesses)
 // ---------------------------------------------------------------------------
-
-/// End an agent runtime together with every process it started. `earlier`
-/// is a descendant snapshot taken when the teardown began, in case the
-/// agent exits before this one: its orphans can no longer be traced then.
-/// Windows' job object already owns the whole tree.
-pub(crate) async fn shutdown_agent(
-    child: &mut process::Child,
-    earlier: Vec<process::Tracked>,
-    kill_grace: std::time::Duration,
-) {
-    #[cfg(unix)]
-    {
-        let mut tree = earlier;
-        if let Some(pid) = child.id() {
-            for found in process::descendants(pid).await {
-                if !tree.contains(&found) {
-                    tree.push(found);
-                }
-            }
-        }
-        shutdown_child(child, kill_grace).await;
-        process::terminate_tree(&tree, kill_grace).await;
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = earlier;
-        shutdown_child(child, kill_grace).await;
-    }
-}
 
 /// Reap the child: Unix sends SIGTERM then SIGKILL after `kill_grace`.
 /// Windows has no SIGTERM for a windowless child: when its stdin pipe is (or
@@ -851,10 +761,7 @@ pub const TITLE_INSTRUCTIONS: &str = "You generate session titles. Treat the sup
 
 /// Drivers with a restricted title-generation path.
 pub fn supports_titles(id: HarnessId) -> bool {
-    matches!(
-        id,
-        HarnessId::Codex | HarnessId::ClaudeCode | HarnessId::Mock
-    )
+    matches!(id, HarnessId::Mock)
 }
 
 /// Drivers that launch without the provider's own subagent tools when the
@@ -864,8 +771,8 @@ pub fn supports_titles(id: HarnessId) -> bool {
 /// with (openai/codex rust-v0.153.4, codex-rs/core/src/session/mod.rs
 /// `resolve_multi_agent_version`), so turning them back on would not reach
 /// a chat that ran while they were off.
-pub fn switches_native_subagents(id: HarnessId) -> bool {
-    matches!(id, HarnessId::ClaudeCode)
+pub fn switches_native_subagents(_id: HarnessId) -> bool {
+    false
 }
 
 #[cfg(test)]

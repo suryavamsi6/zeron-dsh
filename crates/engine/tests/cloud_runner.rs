@@ -16,10 +16,12 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
-use zeron_engine::credentials::{BrokerConfig, CredentialBroker, GITHUB_NOT_CONNECTED};
+use zeron_engine::credentials::{
+    BrokerConfig, CredentialBroker, GITHUB_NOT_CONNECTED, GrantOutcome,
+};
 use zeron_engine::runner::{self, RunnerIdentity};
 use zeron_engine::{Auth, AuthConfig, AuthState, Engine};
-use zeron_proto::{HarnessId, RunRequest};
+use zeron_proto::{HarnessId, RunRequest, VaultProvider};
 use zeron_rpc::{TokenError, TokenSource};
 
 // ---------------------------------------------------------------------------
@@ -341,10 +343,6 @@ impl Rig {
             data_dir: self.data_dir.clone(),
             home: self.home.clone(),
             github_api: github_api.into(),
-            claude_config_dir: self.home.join(".claude"),
-            claude_config_file: self.home.join(".claude.json"),
-            claude_env_login: false,
-            codex_env_login: false,
             github_repo: Some("acme/app".into()),
         }
     }
@@ -486,20 +484,12 @@ async fn copied_identity_with_a_new_enroll_code_reenrolls_as_the_new_device() {
     let rig = Rig::new().await;
     let old = rig.enrolled().await;
     // The forked disk also carries the old device's managed credentials.
-    let codex_home = rig.data_dir.join("cloud/codex-home");
-    std::fs::create_dir_all(&codex_home).unwrap();
-    std::fs::write(codex_home.join("auth.json"), r#"{"tokens":{}}"#).unwrap();
+    let historical = rig.data_dir.join("cloud/historical-agent-home");
+    std::fs::create_dir_all(&historical).unwrap();
+    std::fs::write(historical.join("auth.json"), r#"{"tokens":{}}"#).unwrap();
     std::fs::write(
         rig.data_dir.join("cloud/git-credentials"),
         "https://x-access-token:old@github.com\n",
-    )
-    .unwrap();
-    std::fs::create_dir_all(rig.home.join(".claude")).unwrap();
-    std::fs::write(
-        rig.home.join(".claude/.credentials.json"),
-        json!({"claudeAiOauth": {"accessToken": "old-at", "refreshToken": "", "expiresAt": 1},
-               "mcpOAuth": {"server": "keep"}})
-        .to_string(),
     )
     .unwrap();
     let repo = rig.data_dir.join("repos/app/README.md");
@@ -528,43 +518,13 @@ async fn copied_identity_with_a_new_enroll_code_reenrolls_as_the_new_device() {
     let runner_json: Value =
         serde_json::from_slice(&std::fs::read(rig.data_dir.join("runner.json")).unwrap()).unwrap();
     assert_eq!(runner_json["deviceId"], "cloud-b");
-    assert!(!codex_home.exists(), "managed CODEX_HOME discarded");
-    assert!(!rig.data_dir.join("cloud/git-credentials").exists());
-    let claude: Value =
-        serde_json::from_slice(&std::fs::read(rig.home.join(".claude/.credentials.json")).unwrap())
-            .unwrap();
-    assert!(
-        claude.get("claudeAiOauth").is_none(),
-        "managed Claude login dropped"
+    assert_eq!(
+        std::fs::read_to_string(historical.join("auth.json")).unwrap(),
+        r#"{"tokens":{}}"#
     );
-    assert_eq!(claude["mcpOAuth"]["server"], "keep");
+    assert!(!rig.data_dir.join("cloud/git-credentials").exists());
     assert_eq!(std::fs::read_to_string(&repo).unwrap(), "user file");
 }
-
-#[tokio::test]
-async fn discarding_a_copied_identity_keeps_a_native_claude_login() {
-    let rig = Rig::new().await;
-    rig.enrolled().await;
-    std::fs::create_dir_all(rig.home.join(".claude")).unwrap();
-    let native = json!({"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt-native", "expiresAt": 1}});
-    std::fs::write(
-        rig.home.join(".claude/.credentials.json"),
-        native.to_string(),
-    )
-    .unwrap();
-    rig.bootstrap(Some(&format!("{ORG}.{USER}.cloud-b.fresh-code")))
-        .await
-        .unwrap()
-        .unwrap();
-    let after: Value =
-        serde_json::from_slice(&std::fs::read(rig.home.join(".claude/.credentials.json")).unwrap())
-            .unwrap();
-    assert_eq!(after, native);
-}
-
-// ---------------------------------------------------------------------------
-// Runner auth
-// ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn runner_auth_is_signed_in_and_mints_signed_monotonic_tokens() {
@@ -782,99 +742,6 @@ async fn heartbeat_speeds_up_while_a_turn_runs() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn codex_grant_becomes_a_managed_codex_home() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    std::fs::create_dir_all(rig.home.join(".codex")).unwrap();
-    std::fs::write(rig.home.join(".codex/config.toml"), "model = \"gpt-6\"\n").unwrap();
-    rig.grant(
-        "codex",
-        200,
-        json!({"provider": "codex", "accessToken": "chatgpt-at", "expiresAt": in_ms(86_400),
-               "accountId": "acct_1", "idToken": "h.p.s", "generation": 1}),
-    );
-    let broker = rig.broker(identity, "http://127.0.0.1:9");
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::Codex, &mut request)
-        .await
-        .unwrap();
-
-    let home = rig.data_dir.join("cloud/codex-home");
-    assert_eq!(
-        request.env.get("CODEX_HOME").map(String::as_str),
-        Some(home.to_str().unwrap())
-    );
-    assert!(
-        !request.env.contains_key("GH_TOKEN"),
-        "github not connected"
-    );
-    let auth: Value =
-        serde_json::from_slice(&std::fs::read(home.join("auth.json")).unwrap()).unwrap();
-    assert_eq!(auth["OPENAI_API_KEY"], Value::Null);
-    assert_eq!(auth["tokens"]["access_token"], "chatgpt-at");
-    assert_eq!(auth["tokens"]["id_token"], "h.p.s");
-    assert_eq!(auth["tokens"]["account_id"], "acct_1");
-    assert_eq!(auth["tokens"]["refresh_token"], "");
-    assert!(auth["last_refresh"].is_string());
-    assert_eq!(mode(&home.join("auth.json")), 0o600);
-    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
-    assert!(config.contains("cli_auth_credentials_store = \"file\""));
-    assert!(config.contains("model = \"gpt-6\""));
-    // The secret never serializes with the request.
-    assert!(
-        !serde_json::to_string(&request)
-            .unwrap()
-            .contains("chatgpt-at")
-    );
-}
-
-#[tokio::test]
-async fn openai_key_backs_codex_when_no_chatgpt_grant_and_revocation_removes_it() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    rig.grant(
-        "openai-key",
-        200,
-        json!({"provider": "openai-key", "accessToken": "sk-own", "expiresAt": in_ms(86_400 * 365), "generation": 1}),
-    );
-    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::Codex, &mut request)
-        .await
-        .unwrap();
-    let auth_file = rig.data_dir.join("cloud/codex-home/auth.json");
-    let auth: Value = serde_json::from_slice(&std::fs::read(&auth_file).unwrap()).unwrap();
-    assert_eq!(auth, json!({"OPENAI_API_KEY": "sk-own"}));
-
-    // Disconnected later (fresh broker: no cache): the stale file goes away,
-    // and with no login of the sandbox's own the run is refused up front,
-    // saying where to sign in.
-    rig.state.lock().unwrap().grants.clear();
-    let broker = rig.broker(identity, "http://127.0.0.1:9");
-    let mut request = run_request();
-    assert_eq!(
-        broker
-            .prepare(HarnessId::Codex, &mut request)
-            .await
-            .unwrap_err(),
-        zeron_engine::credentials::CODEX_NOT_SIGNED_IN
-    );
-    assert!(!request.env.contains_key("CODEX_HOME"));
-    assert!(!auth_file.exists());
-    // A sandbox `codex login` is used as is.
-    std::fs::create_dir_all(rig.home.join(".codex")).unwrap();
-    std::fs::write(rig.home.join(".codex/auth.json"), "{}").unwrap();
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::Codex, &mut request)
-        .await
-        .unwrap();
-    assert!(!request.env.contains_key("CODEX_HOME"));
-}
-
-#[tokio::test]
 async fn a_boots_timeline_goes_to_the_edge_once_at_the_runs_first_output() {
     use zeron_engine::wake_trace::{self, Stage};
     let reports: Arc<Mutex<Vec<Value>>> = Default::default();
@@ -919,7 +786,14 @@ async fn a_boots_timeline_goes_to_the_edge_once_at_the_runs_first_output() {
     let report = &reports[0];
     assert_eq!(report["sent"], 1_000);
     // The names edge/src/cloud/wake.ts reads.
-    for stage in ["engineRun", "token", "command", "agentSpawn", "agentStarted", "firstOutput"] {
+    for stage in [
+        "engineRun",
+        "token",
+        "command",
+        "agentSpawn",
+        "agentStarted",
+        "firstOutput",
+    ] {
         assert!(report[stage].as_i64().is_some(), "{stage}: {report}");
     }
 }
@@ -929,26 +803,31 @@ async fn a_boot_fetches_what_the_first_run_will_ask_for() {
     let rig = Rig::new().await;
     let identity = rig.enrolled().await;
     rig.grant(
-        "claude",
+        "deepseek-key",
         200,
-        json!({"provider": "claude", "accessToken": "sk-ant-oat-x", "expiresAt": in_ms(4 * 3600), "generation": 2}),
+        json!({"provider": "deepseek-key", "accessToken": "fixture-deepseek-key", "expiresAt": in_ms(4 * 3600), "generation": 2}),
     );
     let broker = rig.broker(identity, "http://127.0.0.1:9");
     broker.start();
     let requests = |provider: &str| {
-        rig.state.lock().unwrap().grant_requests.get(provider).copied().unwrap_or(0)
+        rig.state
+            .lock()
+            .unwrap()
+            .grant_requests
+            .get(provider)
+            .copied()
+            .unwrap_or(0)
     };
     for _ in 0..500 {
-        if requests("claude") == 1 && requests("codex") == 1 {
+        if requests("deepseek-key") == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(requests("claude"), 1, "fetched without a run asking");
-    assert_eq!(requests("codex"), 1, "either agent may be the one to run");
+    assert_eq!(requests("deepseek-key"), 1, "fetched without a run asking");
     // The run finds it cached: no round trip of its own before the spawn.
-    assert!(broker.credential(HarnessId::ClaudeCode).await.is_some());
-    assert_eq!(requests("claude"), 1);
+    assert!(broker.credential(HarnessId::DeepSeek).await.is_some());
+    assert_eq!(requests("deepseek-key"), 1);
     broker.shutdown();
 }
 
@@ -976,99 +855,6 @@ async fn a_runner_retries_a_failed_first_token_within_a_second() {
 }
 
 #[tokio::test]
-async fn claude_grant_is_written_to_the_cli_credentials_without_a_refresh_token() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    std::fs::create_dir_all(rig.home.join(".claude")).unwrap();
-    std::fs::write(
-        rig.home.join(".claude/.credentials.json"),
-        json!({"mcpOAuth": {"srv": {"accessToken": "mcp"}}}).to_string(),
-    )
-    .unwrap();
-    let expires = in_ms(4 * 3600);
-    rig.grant(
-        "claude",
-        200,
-        json!({"provider": "claude", "accessToken": "sk-ant-oat-x", "expiresAt": expires,
-               "scopes": ["user:inference"], "subscriptionType": "max", "generation": 2}),
-    );
-    rig.grant(
-        "anthropic-key",
-        200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant-api", "expiresAt": in_ms(86_400), "generation": 1}),
-    );
-    let broker = rig.broker(identity, "http://127.0.0.1:9");
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
-        .await
-        .unwrap();
-
-    // The grant goes to the CLI's own credential file, never the env.
-    assert!(!request.env.contains_key("ANTHROPIC_API_KEY"));
-    assert!(!request.env.contains_key("CLAUDE_CODE_OAUTH_TOKEN"));
-    let path = rig.home.join(".claude/.credentials.json");
-    let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(
-        creds["claudeAiOauth"],
-        json!({"accessToken": "sk-ant-oat-x", "refreshToken": "", "expiresAt": expires,
-               "scopes": ["user:inference"], "subscriptionType": "max"})
-    );
-    assert_eq!(
-        creds["mcpOAuth"]["srv"]["accessToken"], "mcp",
-        "siblings kept"
-    );
-    assert_eq!(mode(&path), 0o600);
-    let state: Value =
-        serde_json::from_slice(&std::fs::read(rig.home.join(".claude.json")).unwrap()).unwrap();
-    assert_eq!(state["hasCompletedOnboarding"], true);
-    // A Codex run never receives the Claude credential (and has no login).
-    let mut codex = run_request();
-    assert!(broker.prepare(HarnessId::Codex, &mut codex).await.is_err());
-    assert!(codex.env.values().all(|v| !v.contains("sk-ant")));
-}
-
-#[tokio::test]
-async fn native_claude_login_is_left_alone_then_api_key_is_the_fallback() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    rig.grant(
-        "anthropic-key",
-        200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant-api", "expiresAt": in_ms(86_400), "generation": 1}),
-    );
-    std::fs::create_dir_all(rig.home.join(".claude")).unwrap();
-    let path = rig.home.join(".claude/.credentials.json");
-    let native = json!({"claudeAiOauth": {"accessToken": "at", "refreshToken": "rt-native", "expiresAt": 1}});
-    std::fs::write(&path, native.to_string()).unwrap();
-
-    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
-        .await
-        .unwrap();
-    assert!(request.env.is_empty(), "{:?}", request.env.keys());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&std::fs::read(&path).unwrap()).unwrap(),
-        native
-    );
-
-    std::fs::remove_file(&path).unwrap();
-    let broker = rig.broker(identity, "http://127.0.0.1:9");
-    let mut request = run_request();
-    broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
-        .await
-        .unwrap();
-    assert_eq!(
-        request.env.get("ANTHROPIC_API_KEY").map(String::as_str),
-        Some("sk-ant-api")
-    );
-    assert!(!path.exists(), "no credential file is ever invented");
-}
-
-#[tokio::test]
 async fn github_grant_sets_env_git_store_helper_and_gh_hosts() {
     let rig = Rig::new().await;
     let identity = rig.enrolled().await;
@@ -1080,15 +866,10 @@ async fn github_grant_sets_env_git_store_helper_and_gh_hosts() {
     );
     let broker = rig.broker(identity, "http://127.0.0.1:9");
     let mut request = run_request();
-    // No Claude login here, so the run itself is refused; GitHub is wired
-    // regardless (terminals use it too).
-    assert_eq!(
-        broker
-            .prepare(HarnessId::ClaudeCode, &mut request)
-            .await
-            .unwrap_err(),
-        zeron_engine::credentials::CLAUDE_NOT_SIGNED_IN
-    );
+    broker
+        .prepare(HarnessId::DeepSeek, &mut request)
+        .await
+        .unwrap();
     // Never in the run's environment: fixed at spawn, it would outlive the
     // hour-long token (and `gh` prefers it over the refreshed hosts.yml).
     assert!(!request.env.contains_key("GH_TOKEN"));
@@ -1136,9 +917,9 @@ async fn runs_commit_as_the_signed_in_github_user() {
                "account": "octo", "generation": 1}),
     );
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+        json!({"provider": "deepseek-key", "accessToken": "fixture-deepseek-key", "expiresAt": in_ms(3600), "generation": 1}),
     );
     let github = Stub::start(|req: &Req| {
         if req.path == "/users/octo" {
@@ -1154,7 +935,7 @@ async fn runs_commit_as_the_signed_in_github_user() {
     let broker = rig.broker(identity, &github.url());
     let mut request = run_request();
     broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
+        .prepare(HarnessId::DeepSeek, &mut request)
         .await
         .unwrap();
     let email = "583231+octo@users.noreply.github.com";
@@ -1185,7 +966,7 @@ async fn runs_commit_as_the_signed_in_github_user() {
     // Looked up once per login.
     let mut again = run_request();
     broker
-        .prepare(HarnessId::ClaudeCode, &mut again)
+        .prepare(HarnessId::DeepSeek, &mut again)
         .await
         .unwrap();
     assert_eq!(
@@ -1208,9 +989,9 @@ async fn runs_commit_as_the_login_the_vault_names_for_this_session() {
                "account": "work-me", "installationId": 100, "generation": 7}),
     );
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+        json!({"provider": "deepseek-key", "accessToken": "fixture-deepseek-key", "expiresAt": in_ms(3600), "generation": 1}),
     );
     let github = Stub::start(|req: &Req| match req.path.as_str() {
         "/users/work-me" => (
@@ -1223,7 +1004,7 @@ async fn runs_commit_as_the_login_the_vault_names_for_this_session() {
     let broker = rig.broker(identity, &github.url());
     let mut request = run_request();
     broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
+        .prepare(HarnessId::DeepSeek, &mut request)
         .await
         .unwrap();
     assert_eq!(
@@ -1264,9 +1045,9 @@ async fn a_run_on_a_login_that_cant_serve_its_session_fails_naming_it() {
         let rig = Rig::new().await;
         let identity = rig.enrolled().await;
         rig.grant(
-            "anthropic-key",
+            "deepseek-key",
             200,
-            json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+            json!({"provider": "deepseek-key", "accessToken": "fixture-deepseek-key", "expiresAt": in_ms(3600), "generation": 1}),
         );
         // Four minutes left: inside the slack, so each run asks the vault.
         rig.grant(
@@ -1283,7 +1064,7 @@ async fn a_run_on_a_login_that_cant_serve_its_session_fails_naming_it() {
         let broker = rig.broker(identity, &github.url());
         let store = zeron_engine::credentials::git_credentials_path(&rig.data_dir);
         broker
-            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .prepare(HarnessId::DeepSeek, &mut run_request())
             .await
             .unwrap();
         assert!(store.exists(), "the first run has its token");
@@ -1294,7 +1075,7 @@ async fn a_run_on_a_login_that_cant_serve_its_session_fails_naming_it() {
             json!({"error": error, "message": message}),
         );
         let refused = broker
-            .prepare(HarnessId::ClaudeCode, &mut run_request())
+            .prepare(HarnessId::DeepSeek, &mut run_request())
             .await
             .unwrap_err();
         assert_eq!(refused, shown);
@@ -1310,9 +1091,9 @@ async fn a_run_without_a_github_grant_for_other_reasons_still_starts() {
     let rig = Rig::new().await;
     let identity = rig.enrolled().await;
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "sk-ant", "expiresAt": in_ms(3600), "generation": 1}),
+        json!({"provider": "deepseek-key", "accessToken": "fixture-deepseek-key", "expiresAt": in_ms(3600), "generation": 1}),
     );
     rig.grant(
         "github",
@@ -1322,10 +1103,17 @@ async fn a_run_without_a_github_grant_for_other_reasons_still_starts() {
     let broker = rig.broker(identity, "http://127.0.0.1:9");
     let mut request = run_request();
     broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
+        .prepare(HarnessId::DeepSeek, &mut request)
         .await
         .unwrap();
     assert!(!request.env.contains_key("GIT_AUTHOR_EMAIL"));
+}
+
+async fn grant_token(broker: &CredentialBroker) -> Option<String> {
+    match broker.grant(VaultProvider::DeepseekKey).await {
+        GrantOutcome::Granted(grant) => Some(grant.access_token),
+        _ => None,
+    }
 }
 
 #[tokio::test]
@@ -1334,81 +1122,34 @@ async fn grants_are_cached_fall_back_offline_and_drop_on_revocation() {
     let identity = rig.enrolled().await;
     // 4 minutes left: inside the 5-minute slack, so every use re-asks.
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "k1", "expiresAt": in_ms(240), "generation": 1}),
+        json!({"provider": "deepseek-key", "accessToken": "k1", "expiresAt": in_ms(240), "generation": 1}),
     );
     let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    assert_eq!(grant_token(&broker).await.as_deref(), Some("k1"));
 
     // Vault unreachable (503): the cached, still-valid grant keeps working.
-    rig.grant("anthropic-key", 503, json!({"error": "unavailable"}));
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    rig.grant("deepseek-key", 503, json!({"error": "unavailable"}));
+    assert_eq!(grant_token(&broker).await.as_deref(), Some("k1"));
 
     // Revoked (403): the cached grant is dropped immediately.
-    rig.grant("anthropic-key", 403, json!({"error": "device_revoked"}));
-    assert_eq!(broker.prepare_claude().await, None);
+    rig.grant("deepseek-key", 403, json!({"error": "device_revoked"}));
+    assert_eq!(grant_token(&broker).await, None);
 
     // A long-lived grant is served from cache without asking again.
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "k2", "expiresAt": in_ms(86_400), "generation": 2}),
+        json!({"provider": "deepseek-key", "accessToken": "k2", "expiresAt": in_ms(86_400), "generation": 2}),
     );
     // (Same identity: one process has one strictly increasing ts counter.)
     let broker2 = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker2.prepare_claude().await.as_deref(), Some("k2"));
+    assert_eq!(grant_token(&broker2).await.as_deref(), Some("k2"));
     let asked = rig.edge.requests("/vault/").len();
-    assert_eq!(broker2.prepare_claude().await.as_deref(), Some("k2"));
-    // Both the key and the (briefly cached) "claude not connected" answer
-    // come from cache: no new vault round trip.
+    assert_eq!(grant_token(&broker2).await.as_deref(), Some("k2"));
+    // The valid key comes from cache: no new vault round trip.
     assert_eq!(rig.edge.requests("/vault/").len(), asked);
-}
-
-/// The credential a run would use, as the broker fingerprints it for
-/// replacing a parked session: the login first, then the key; unknown while
-/// the vault is down. (A fresh broker per step: no cached answers.)
-#[tokio::test]
-async fn the_run_credential_follows_the_active_account() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    rig.grant(
-        "claude",
-        200,
-        json!({"provider": "claude", "accessToken": "at", "expiresAt": in_ms(86_400), "generation": 3}),
-    );
-    rig.grant(
-        "anthropic-key",
-        200,
-        json!({"provider": "anthropic-key", "accessToken": "k1", "expiresAt": in_ms(86_400 * 365), "generation": 1}),
-    );
-    let fingerprint = || async {
-        rig.broker(identity.clone(), "http://127.0.0.1:9")
-            .credential(HarnessId::ClaudeCode)
-            .await
-    };
-    assert_eq!(fingerprint().await.as_deref(), Some("claude:3"));
-    // The key became the active account (the login was cleared).
-    rig.grant(
-        "claude",
-        404,
-        json!({"error": "not_found", "message": "no claude account is active"}),
-    );
-    assert_eq!(fingerprint().await.as_deref(), Some("anthropic-key:1"));
-    rig.grant(
-        "anthropic-key",
-        404,
-        json!({"error": "not_found", "message": "no anthropic-key credential"}),
-    );
-    assert_eq!(fingerprint().await.as_deref(), Some("none"));
-    rig.grant("claude", 503, json!({"error": "unavailable"}));
-    assert_eq!(fingerprint().await, None, "unknown is not a change");
-    assert_eq!(
-        rig.broker(identity, "http://127.0.0.1:9")
-            .credential(HarnessId::Cursor)
-            .await,
-        None
-    );
 }
 
 #[tokio::test]
@@ -1416,13 +1157,13 @@ async fn a_stale_grant_timestamp_is_retried_once_with_a_larger_ts() {
     let rig = Rig::new().await;
     let identity = rig.enrolled().await;
     rig.grant(
-        "anthropic-key",
+        "deepseek-key",
         200,
-        json!({"provider": "anthropic-key", "accessToken": "k1", "expiresAt": in_ms(86_400), "generation": 1}),
+        json!({"provider": "deepseek-key", "accessToken": "k1", "expiresAt": in_ms(86_400), "generation": 1}),
     );
     rig.state.lock().unwrap().stale_once = true;
     let broker = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await.as_deref(), Some("k1"));
+    assert_eq!(grant_token(&broker).await.as_deref(), Some("k1"));
     let ts: Vec<i64> = rig
         .edge
         .requests("/vault/")
@@ -1555,20 +1296,15 @@ async fn list_github_repos_on_a_local_engine_asks_for_a_signed_in_account() {
 }
 
 // ---------------------------------------------------------------------------
-// Background refresh + native-login safety
+// Background refresh
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn background_refresh_rewrites_claude_and_github_credentials_before_expiry() {
+async fn background_refresh_rewrites_github_credentials_before_expiry() {
     let rig = Rig::new().await;
     let identity = rig.enrolled().await;
     // 8 minutes left: valid for a spawn (5-min slack), due for the refresher
     // (10-min lead).
-    rig.grant(
-        "claude",
-        200,
-        json!({"provider": "claude", "accessToken": "oat-v1", "expiresAt": in_ms(480), "generation": 1}),
-    );
     rig.grant(
         "github",
         200,
@@ -1577,31 +1313,15 @@ async fn background_refresh_rewrites_claude_and_github_credentials_before_expiry
     let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
     let mut request = run_request();
     broker
-        .prepare(HarnessId::ClaudeCode, &mut request)
+        .prepare(HarnessId::DeepSeek, &mut request)
         .await
         .unwrap();
-    let creds = rig.home.join(".claude/.credentials.json");
-    let read_token = || {
-        serde_json::from_slice::<Value>(&std::fs::read(&creds).unwrap()).unwrap()["claudeAiOauth"]
-            ["accessToken"]
-            .clone()
-    };
-    assert_eq!(read_token(), "oat-v1");
-
-    rig.grant(
-        "claude",
-        200,
-        json!({"provider": "claude", "accessToken": "oat-v2", "expiresAt": in_ms(4 * 3600), "generation": 2}),
-    );
     rig.grant(
         "github",
         200,
         json!({"provider": "github", "accessToken": "ghu_v2", "expiresAt": in_ms(8 * 3600), "generation": 2}),
     );
     broker.refresh_due().await;
-    assert_eq!(read_token(), "oat-v2");
-    let creds_json: Value = serde_json::from_slice(&std::fs::read(&creds).unwrap()).unwrap();
-    assert_eq!(creds_json["claudeAiOauth"]["refreshToken"], "");
     assert_eq!(
         std::fs::read_to_string(rig.data_dir.join("cloud/git-credentials")).unwrap(),
         "https://x-access-token:ghu_v2@github.com\n"
@@ -1612,54 +1332,12 @@ async fn background_refresh_rewrites_claude_and_github_credentials_before_expiry
     let broker = rig.broker(identity, "http://127.0.0.1:9");
     // Seed the cache with a nearly-expired grant first so the pass is due.
     rig.grant(
-        "claude",
+        "github",
         200,
-        json!({"provider": "claude", "accessToken": "oat-v3", "expiresAt": in_ms(480), "generation": 3}),
+        json!({"provider": "github", "accessToken": "ghu_v3", "expiresAt": in_ms(480), "generation": 3}),
     );
-    broker.prepare_claude().await;
-    rig.grant("claude", 403, json!({"error": "device_revoked"}));
+    broker.ensure_git_credentials().await.unwrap();
+    rig.grant("github", 403, json!({"error": "device_revoked"}));
     broker.refresh_due().await;
-    let after: Value = serde_json::from_slice(&std::fs::read(&creds).unwrap()).unwrap();
-    assert!(after.get("claudeAiOauth").is_none(), "{after}");
-}
-
-#[tokio::test]
-async fn a_claude_grant_displacing_a_native_login_backs_it_up_and_restores_it() {
-    let rig = Rig::new().await;
-    let identity = rig.enrolled().await;
-    std::fs::create_dir_all(rig.home.join(".claude")).unwrap();
-    let path = rig.home.join(".claude/.credentials.json");
-    let native = json!({"accessToken": "native-at", "refreshToken": "rt-native", "expiresAt": 5});
-    std::fs::write(
-        &path,
-        json!({"claudeAiOauth": native, "mcpOAuth": {}}).to_string(),
-    )
-    .unwrap();
-    rig.grant(
-        "claude",
-        200,
-        json!({"provider": "claude", "accessToken": "oat", "expiresAt": in_ms(3600), "generation": 1}),
-    );
-    let broker = rig.broker(identity.clone(), "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await, None);
-    let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(creds["claudeAiOauth"]["accessToken"], "oat");
-    assert!(
-        rig.data_dir
-            .join("cloud/claude-native-credentials.json")
-            .exists()
-    );
-
-    // Grant revoked: the native login comes back, untouched.
-    rig.state.lock().unwrap().grants.clear();
-    let broker = rig.broker(identity, "http://127.0.0.1:9");
-    assert_eq!(broker.prepare_claude().await, None, "native login: no env");
-    let creds: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-    assert_eq!(creds["claudeAiOauth"], native);
-    assert!(creds.get("mcpOAuth").is_some());
-    assert!(
-        !rig.data_dir
-            .join("cloud/claude-native-credentials.json")
-            .exists()
-    );
+    assert!(!rig.data_dir.join("cloud/git-credentials").exists());
 }

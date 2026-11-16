@@ -1,7 +1,6 @@
 //! What the sidebar registry writes per streaming turn and per parked hour,
 //! measured through a real RegistryRoom on `wrangler dev`: a host engine runs
-//! a steerable turn that streams for a while and then parks (as Claude and
-//! Codex do), a second engine of the same user watches, and a raw socket
+//! a steerable turn that streams for a while and then parks, a second engine of the same user watches, and a raw socket
 //! records every row the room broadcasts.
 //!
 //! ```sh

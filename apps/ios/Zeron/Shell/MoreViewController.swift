@@ -200,7 +200,7 @@ final class MoreViewController: UIViewController, UICollectionViewDelegate {
         // Agents and where they run, as the desktop groups them: Providers,
         // then Cloud and Billing when this account is offered Cloud.
         s.appendSections(["Agents"])
-        var agents = [Row(id: "providers", title: "Providers", subtitle: "Agents and their accounts on each device", symbol: "cpu")]
+        var agents = [Row(id: "providers", title: "DeepSeek", subtitle: "SDK setup and API key on each device", symbol: "cpu")]
         let demoCloud = app.isDemo && ProcessInfo.processInfo.arguments.contains("-cloud")
         if (!app.isDemo && app.cloud.available) || demoCloud {
             let cloud = app.cloud

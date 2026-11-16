@@ -108,22 +108,11 @@ async fn cloud_rpcs_without_an_edge_are_unavailable_and_offline() {
     assert!(!vault.available);
 
     // Credential uploads refuse before anything starts (no browser, no CLI).
-    for method in [methods::VAULT_CONNECT_CODEX, methods::VAULT_CONNECT_CLAUDE] {
-        let error = client
-            .call(
-                method,
-                serde_json::json!({ "authorizedDevices": ["cloud-1"] }),
-            )
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("signed-in"), "{method}: {error}");
-    }
     assert!(
         client
             .call(
                 methods::VAULT_PUT_API_KEY,
-                serde_json::json!({ "provider": "anthropic-key", "key": "sk-1" }),
+                serde_json::json!({ "provider": "deepseek-key", "key": "sk-1" }),
             )
             .await
             .is_err()
@@ -406,7 +395,7 @@ fn cloud_edge(request: &str, body: &str) -> (u16, String) {
         }
         return (
             200,
-            r#"{"models":{"claude-code":[{"id":"cloud-opus","label":"Cloud Opus","reasoningLevels":["low","high","ultrathink"],"options":[]}],"codex":[{"id":"cloud-codex","label":"Cloud Codex","reasoningLevels":["low"],"options":[]}]}}"#
+            r#"{"models":{"deepseek":[{"id":"cloud-deepseek","label":"Cloud DeepSeek","reasoningLevels":["low","high"],"options":[]}]}}"#
                 .into(),
         );
     }
@@ -677,7 +666,7 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     });
     let client = memory_client(core.rpc_service());
 
-    // Harnesses for any Cloud device: Codex and Claude Code, both usable
+    // Harnesses for any Cloud device: DeepSeek, usable
     // there, without dialing anything (no peer links exist here).
     for target in ["cloud-acct", "cloud-s-chat-1"] {
         let harnesses: Vec<serde_json::Value> = client
@@ -688,11 +677,7 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
             .await
             .unwrap();
         let ids: Vec<&str> = harnesses.iter().filter_map(|h| h["id"].as_str()).collect();
-        assert_eq!(ids.len(), 2, "{harnesses:?}");
-        assert!(
-            ids.contains(&"codex") && ids.contains(&"claude-code"),
-            "{ids:?}"
-        );
+        assert_eq!(ids, ["deepseek"], "{harnesses:?}");
         assert!(harnesses.iter().all(|h| h["installed"] == true));
     }
     let refused = client
@@ -702,18 +687,14 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
         )
         .await
         .unwrap_err();
-    assert!(
-        refused.to_string().contains("Codex and Claude Code only"),
-        "{refused}"
-    );
+    assert!(refused.to_string().contains("DeepSeek only"), "{refused}");
 
     // Models for a chat on a session machine (asleep, or gone): Cloud's, as
     // the edge lists them, whatever this computer has installed or signed in.
     // Nothing dials the machine.
     for (target, harness, id) in [
-        ("cloud-s-chat-1", "codex", "cloud-codex"),
-        ("cloud-s-chat-1", "claude-code", "cloud-opus"),
-        ("cloud-acct", "claude-code", "cloud-opus"),
+        ("cloud-s-chat-1", "deepseek", "cloud-deepseek"),
+        ("cloud-acct", "deepseek", "cloud-deepseek"),
     ] {
         let models: Vec<serde_json::Value> = client
             .call_as(
@@ -730,12 +711,12 @@ async fn catalogs_for_cloud_devices_are_answered_here() {
     let kept: Vec<serde_json::Value> = client
         .call_as(
             methods::LIST_MODELS,
-            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "codex" }),
+            serde_json::json!({ "targetDeviceId": "cloud-s-chat-1", "harness": "deepseek" }),
         )
         .await
         .unwrap();
     MODELS_UP.store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(kept[0]["id"], "cloud-codex");
+    assert_eq!(kept[0]["id"], "cloud-deepseek");
     assert!(
         seen.lock()
             .unwrap()
@@ -823,51 +804,6 @@ async fn deleting_a_cloud_chat_deletes_its_machine() {
 /// A chat hosted by an engine that can't switch provider (a Cloud machine
 /// on an older build) keeps its provider: the switch is refused here rather
 /// than handing the new provider the old one's session id.
-#[tokio::test]
-async fn provider_switch_is_refused_for_a_host_that_cannot_switch() {
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(
-        dir.path(),
-        Arc::new(default_registry()),
-        HarnessId::Mock,
-        None,
-    )
-    .unwrap();
-    let client = memory_client(core.rpc_service());
-    let config =
-        |harness: &str| serde_json::json!({ "harness": harness, "sandbox": "workspace-write" });
-    let cwd = dir.path().display().to_string();
-    for (chat, device) in [
-        ("old-host-chat", "cloud-old-machine".to_string()),
-        ("own-chat", core.workspace.device_id().to_string()),
-    ] {
-        core.workspace
-            .create_chat(
-                chat,
-                None,
-                Some(&device),
-                Some(serde_json::from_value(config("claude-code")).unwrap()),
-                Some(cwd.clone()),
-            )
-            .unwrap();
-    }
-    let switch = |chat: &str, harness: &str| {
-        client.call_as::<serde_json::Value>(
-            methods::MUTATE,
-            serde_json::json!({ "op": "setChatConfig", "chatId": chat, "config": config(harness) }),
-        )
-    };
-    let refused = switch("old-host-chat", "codex")
-        .await
-        .unwrap_err()
-        .to_string();
-    assert!(refused.contains("newer Zeron"), "{refused}");
-    // The same provider (a model or effort change) still goes through.
-    switch("old-host-chat", "claude-code").await.unwrap();
-    // This engine hosts its own chats and switches them.
-    switch("own-chat", "codex").await.unwrap();
-    core.shutdown().await;
-}
 
 /// GitHub's logins through the engine: listed, one disconnected, one made the
 /// first new sessions try; a repository names who reaches it; and an edge from
@@ -1127,7 +1063,11 @@ async fn a_message_that_waited_days_for_its_machine_goes_once_when_woken() {
         again.effective_expiry() > chrono::Utc::now().timestamp_millis() + DAY / 2,
         "a full clock from now: {again:?}"
     );
-    assert_eq!(attempts("m-nearly").len(), 2, "one about to run out goes again too");
+    assert_eq!(
+        attempts("m-nearly").len(),
+        2,
+        "one about to run out goes again too"
+    );
     assert_eq!(
         attempts("m-an-hour").len(),
         1,

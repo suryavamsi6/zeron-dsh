@@ -554,6 +554,7 @@ fn method_value(m: &Json) -> Value {
 /// The design system's mark for a harness (ds/mark.luau's names).
 pub(crate) fn mark(id: &str) -> Option<&'static str> {
     Some(match id {
+        "deepseek" => "provider-deepseek",
         "claude-code" => "claude",
         "codex" => "openai",
         "cursor" => "cursor",
@@ -739,7 +740,7 @@ impl Agents {
             .harnesses
             .borrow()
             .iter()
-            .filter(|h| h["id"].as_str().is_some_and(|id| id != "mock"))
+            .filter(|h| h["id"].as_str() == Some("deepseek"))
             .map(|h| {
                 let id = h["id"].as_str().unwrap_or_default();
                 let rows: Vec<Value> = accounts
@@ -1494,6 +1495,7 @@ impl Agents {
         if self.target.borrow().is_some() {
             return Err("remote".into());
         }
+        if id != "deepseek" || provider != "deepseek" { return Err("unsupported".into()); }
         let params = json!({ "harness": id, "provider": provider, "key": key, "name": name });
         match engine::get().call("AddAgentApiKey", params).await {
             Ok(snapshot) => {
@@ -1667,10 +1669,9 @@ fn reset_state(outcome: Option<&str>) -> (&'static str, Option<&'static str>) {
     }
 }
 
-/// Why the engine refused a reset (crates/engine agent_accounts.rs
-/// `consume_codex_reset_credit`'s words), as an outcome: Codex answered for
-/// another account than the one saved, the saved login can't be checked,
-/// the account is no longer saved, or the device can't be reached.
+/// Why the engine refused a legacy credit reset (a compatibility RPC the
+/// engine now rejects), as an outcome: the device can't be reached or the
+/// request was refused.
 fn reset_failure(error: &str) -> &'static str {
     let lower = error.to_ascii_lowercase();
     if engine::outcome(error) == "offline" {

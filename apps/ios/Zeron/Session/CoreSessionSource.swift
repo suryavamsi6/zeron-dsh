@@ -103,7 +103,7 @@ final class CoreSessionSource: SessionSource {
         next.placeholder = "Message \(row?.harnessLabel ?? "the agent")"
         var chips: [ComposerChip] = []
         if let model = row?.modelLabel ?? row.flatMap({ defaultModel(for: $0)?.label }) ?? row?.harnessLabel {
-            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "claude-code", side: 13)))
+            chips.append(ComposerChip(id: "model", title: model, symbol: nil, icon: BrandMarks.image(for: row?.harness ?? "unsupported", side: 13)))
         }
         if let r = row?.reasoning, !r.isEmpty {
             chips.append(ComposerChip(id: "effort", title: reasoningLabel(level: r), symbol: "gauge.with.dots.needle.67percent"))
@@ -271,7 +271,7 @@ final class CoreSessionSource: SessionSource {
 
     func chipMenu(_ id: String) -> UIMenu? {
         guard let row = app?.row(chatId) else { return nil }
-        let harness = row.harness ?? "claude-code"
+        let harness = row.harness ?? "unsupported"
         switch id {
         case "model":
             // The picker sheet takes the tap (see `modelPicker`).
@@ -302,26 +302,13 @@ final class CoreSessionSource: SessionSource {
 
     func modelPicker() -> UIViewController? {
         guard let row = app?.row(chatId) else { return nil }
-        let harness = row.harness ?? "claude-code"
+        let harness = row.harness ?? "unsupported"
         let rows: (String) async -> [ModelPickerRow] = { [weak self] id in
             guard let self else { return [] }
             let models = (try? await self.client.listModels(deviceId: self.hostDevice, harness: id)) ?? fallbackModels(harness: id)
             return models.map { ModelPickerRow(id: $0.id, label: $0.label, detail: $0.description) }
         }
-        var tabs = [ModelPickerTab(harness: harness, label: row.harnessLabel ?? HarnessNames.label(harness)) { await rows(harness) }]
-        if canSwitchProvider {
-            tabs += providers(cloud: row.isCloud).filter { $0.id != harness }.map { h in
-                ModelPickerTab(harness: h.id, label: h.label, footer: "Your next message continues this chat with \(h.label).") { await rows(h.id) }
-            }
-        }
-        #if DEBUG
-        // Screenshots: `-all-providers` offers every agent there is.
-        if ProcessInfo.processInfo.arguments.contains("-all-providers") {
-            tabs = [tabs[0]] + ["claude-code", "codex", "opencode", "cursor", "devin", "grok", "hermes", "fx", "pi", "antigravity", "muse"]
-                .filter { $0 != harness }
-                .map { id in ModelPickerTab(harness: id, label: HarnessNames.label(id)) { await rows(id) } }
-        }
-        #endif
+        let tabs = [ModelPickerTab(harness: "deepseek", label: "DeepSeek") { await rows("deepseek") }]
         let note: String? = canSwitchProvider ? nil
             : turnRunning ? "You can switch provider when this turn ends."
             : hostSwitchesProviders ? nil
@@ -350,7 +337,7 @@ final class CoreSessionSource: SessionSource {
     /// else the computer hosting it.
     func signInTarget() -> AgentAccountsViewController.Target? {
         guard let row = app?.row(chatId) else { return nil }
-        let harness = row.harness ?? "claude-code"
+        let harness = row.harness ?? "unsupported"
         if row.isCloud {
             return CloudStore.agents.first { $0.harness == harness }.map { .cloud($0) }
         }
@@ -362,7 +349,7 @@ final class CoreSessionSource: SessionSource {
     /// provider. The built-in list answers at once; the host's (or Cloud's)
     /// own list replaces it when it arrives.
     private func defaultModel(for row: SessionRow) -> ModelPickerRow? {
-        let harness = row.harness ?? "claude-code"
+        let harness = row.harness ?? "unsupported"
         let key = "\(hostDevice)|\(harness)"
         if defaultModels[key] == nil, let first = fallbackModels(harness: harness).first {
             defaultModels[key] = ModelPickerRow(id: first.id, label: first.label, detail: first.description)
@@ -391,7 +378,7 @@ final class CoreSessionSource: SessionSource {
     }
 
     private func setConfig(_ change: (inout ChatConfig) -> Void) {
-        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "claude-code", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
+        var config = client.sessionConfig(chatId: chatId) ?? ChatConfig(harness: app?.row(chatId)?.harness ?? "unsupported", model: nil, reasoning: nil, modelOptions: [:], sandbox: .workspaceWrite)
         change(&config)
         try? client.setSessionConfig(chatId: chatId, config: config)
     }

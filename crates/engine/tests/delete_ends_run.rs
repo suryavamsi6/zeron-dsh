@@ -1,6 +1,6 @@
 //! Deleting a chat ends its live run, and the agent's process with it
-//! (2026-11-11, beta.6 staging: a deleted Claude Code chat's `claude --print`
-//! and its MCP servers, ≈550 MB, stayed warm under the engine until the
+//! (2026-11-11, beta.6 staging: a deleted chat's agent process and its MCP
+//! servers, ≈550 MB, stayed warm under the engine until the
 //! 30-minute idle reaper). Whatever removes the row — Delete here, a delete
 //! on another device that syncs in, a deleted project's sweep — and whether
 //! the run is mid-turn, parked, or held by background work, the process

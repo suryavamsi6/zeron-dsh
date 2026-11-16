@@ -139,13 +139,13 @@ jobs:
       browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
 
-  cursor:
+  deepseek:
     needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).cursor
-    uses: ./.github/workflows/cursor-compatibility.yml
+    if: fromJSON(needs.plan.outputs.suites).deepseek
+    uses: ./.github/workflows/deepseek-compatibility.yml
     with:
       rust-tests: false
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).cursor || '' }}
+      pass-key: ${{ fromJSON(needs.plan.outputs.keys).deepseek || '' }}
 
   edge:
     needs: [plan, admit]
@@ -233,7 +233,7 @@ jobs:
 
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, cursor, edge, installer, voice, windows, macos, frame-source, ios, android, zgx]
+    needs: [plan, admit, linux-core, linux-ui, deepseek, edge, installer, voice, windows, macos, frame-source, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

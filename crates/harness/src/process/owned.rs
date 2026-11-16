@@ -1,38 +1,7 @@
 //! Process ownership, including descendants that outlive their agent.
 use std::ops::{Deref, DerefMut};
 
-use crate::process::{Child as ProcessChild, Command};
-
-/// A private process group, and none of the markers a Claude Code session
-/// leaves in its children's environment. Zeron is often launched from one
-/// (or runs inside one, on a Cloud machine): inherited, they make an agent's
-/// own Claude believe it is nested in that session — it reports to its
-/// socket, IDE port and session id, and takes its effort level. The user's
-/// own configuration (`CLAUDE_CONFIG_DIR`, `CLAUDE_CODE_USE_BEDROCK`/`VERTEX`,
-/// `CLAUDE_CODE_GIT_BASH_PATH`, `ANTHROPIC_*`) is kept. Every Claude Zeron
-/// starts, directly or through an adapter, reports Zeron as its entrypoint.
-pub(crate) fn configure(command: &mut Command) {
-    #[cfg(unix)]
-    command.process_group(0);
-    for key in INHERITED_SESSION_MARKERS {
-        command.env_remove(key);
-    }
-    command.env("CLAUDE_CODE_ENTRYPOINT", "zeron");
-}
-
-const INHERITED_SESSION_MARKERS: [&str; 11] = [
-    "CLAUDECODE",
-    "CLAUDE_CODE_SESSION_ID",
-    "CLAUDE_CODE_CHILD_SESSION",
-    "CLAUDE_CODE_SESSION_ATTENDED",
-    "CLAUDE_CODE_MESSAGING_SOCKET",
-    "CLAUDE_CODE_MESSAGING_TOKEN",
-    "CLAUDE_CODE_EXECPATH",
-    "CLAUDE_CODE_SSE_PORT",
-    "CLAUDE_PID",
-    "CLAUDE_EFFORT",
-    "CLAUDE_AGENT_SDK_VERSION",
-];
+use crate::process::Child as ProcessChild;
 
 pub(crate) struct Child {
     inner: ProcessChild,
@@ -101,13 +70,6 @@ impl Child {
         crate::process::terminate_tree(&tree, grace).await;
     }
 
-    pub(crate) fn request_group_shutdown(&self) {
-        #[cfg(unix)]
-        if let Some(group) = self.group {
-            crate::send_signal(&group, crate::Signal::Term);
-        }
-    }
-
     pub(crate) fn terminate_group(&mut self) {
         #[cfg(unix)]
         if let Some(group) = self.group.take() {
@@ -140,52 +102,7 @@ impl Drop for Child {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-
-    #[test]
-    fn acp_environment_removes_nested_claude_markers() {
-        let mut command = Command::new("unused");
-        configure(&mut command);
-        let removed: Vec<_> = command
-            .as_std()
-            .get_envs()
-            .filter(|(_, value)| value.is_none())
-            .map(|(key, _)| key.to_str().unwrap())
-            .collect();
-        assert_eq!(
-            removed,
-            vec![
-                "CLAUDECODE",
-                "CLAUDE_AGENT_SDK_VERSION",
-                "CLAUDE_CODE_CHILD_SESSION",
-                "CLAUDE_CODE_EXECPATH",
-                "CLAUDE_CODE_MESSAGING_SOCKET",
-                "CLAUDE_CODE_MESSAGING_TOKEN",
-                "CLAUDE_CODE_SESSION_ATTENDED",
-                "CLAUDE_CODE_SESSION_ID",
-                "CLAUDE_CODE_SSE_PORT",
-                "CLAUDE_EFFORT",
-                "CLAUDE_PID",
-            ]
-        );
-        assert_eq!(
-            command
-                .as_std()
-                .get_envs()
-                .find(|(key, _)| *key == "CLAUDE_CODE_ENTRYPOINT")
-                .and_then(|(_, value)| value),
-            Some(std::ffi::OsStr::new("zeron"))
-        );
-        // The user's own configuration is never touched.
-        for kept in [
-            "CLAUDE_CONFIG_DIR",
-            "CLAUDE_CODE_USE_BEDROCK",
-            "CLAUDE_CODE_USE_VERTEX",
-            "CLAUDE_CODE_GIT_BASH_PATH",
-            "ANTHROPIC_API_KEY",
-        ] {
-            assert!(!removed.contains(&kept), "{kept}");
-        }
-    }
+    use crate::process::Command;
 
     /// A child that has exited and been reaped can no longer be traced:
     /// what was snapshotted while it ran is still ended.
@@ -199,7 +116,7 @@ mod tests {
             .unwrap();
         let orphan_pid = orphan.id() as i32;
         let mut command = Command::new("true");
-        configure(&mut command);
+        command.process_group(0);
         let mut child = Child::new(command.spawn().unwrap());
         child.wait().await.unwrap();
         child

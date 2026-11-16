@@ -7,7 +7,7 @@ struct NewSessionDraft: Equatable, Codable {
     var hostId: String?
     var branch: String?
     var worktree = false
-    var harness = "claude-code"
+    var harness = "deepseek"
     var model: String?
     var effort: String?
     /// Run on its own Cloud machine (optional: drafts saved before Cloud).
@@ -240,11 +240,6 @@ final class NewSessionViewController: UIViewController, UIGestureRecognizerDeleg
         if cloud {
             // Cloud runs the agents it has accounts for: Claude Code, Codex.
             models = Self.modelCache[device] ?? Self.catalogModels().filter { AppModel.cloudHarnesses.contains($0.harness) }
-            if !models.contains(where: { $0.harness == draft.harness }), let first = models.first {
-                draft.harness = first.harness
-                draft.model = nil
-                draft.effort = nil
-            }
         } else {
             models = Self.modelCache[device] ?? Self.catalogModels()
         }

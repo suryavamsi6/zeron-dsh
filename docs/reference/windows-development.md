@@ -37,17 +37,15 @@ set `GPUI_FXC_PATH` to the Windows SDK's `fxc.exe`.
 | Setting | Behavior |
 | --- | --- |
 | Application data | `%LOCALAPPDATA%\Zeron`, falling back to `%USERPROFILE%\AppData\Local\Zeron`. Override with `ZERON_DATA_DIR`. |
-| Managed adapters | `ZERON_ADAPTERS_DIR`, then `ZERON_DATA_DIR/adapters`, then the default application's `adapters` directory. |
-| Provider credentials | Keep their provider-owned locations; changing Zeron's data root does not migrate them. |
-| `CODEX_EXECUTABLE` | Executable override. `.exe` (and `.com`) launch directly; `.cmd`/`.bat` shims launch through a wrapped `cmd.exe` with literal, individually escaped arguments. The override must exist on disk. |
+| DeepSeek API key | `%ZERON_DEEPSEEK_HOME%\api-key`, defaulting under the data root at `deepseek\api-key`. `DEEPSEEK_API_KEY` in the launching environment is the fallback; a key saved in settings wins. |
+| DeepSeek SDK | `ZERON_DEEPSEEK_SDK_DIR`, otherwise `<data root>\deepseek-sdk\<pinned version>`. The engine runs `dsh` from that directory. |
 
-ACP, Claude, Codex, and opencode search PATH and known native installation
-directories. Discovery is PATHEXT-aware: npm's `.cmd` shims (and any `.bat`)
-resolve like `cmd.exe` would — per directory, extensions in PATHEXT order —
-and spawn through `cmd.exe /e:ON /v:OFF /d /c` inside the same Job Object, so npm-
-installed agents (`codex`, `opencode`, `pi`, a bare `npm i -g grok`)
-work without following `node_modules` payloads. Batch arguments containing
-CR/LF and batch executable paths containing percent expansion syntax are rejected.
+Node 24.9 or newer must be on PATH. Node and npm `.cmd` shims (and any `.bat`)
+resolve like `cmd.exe` would — per directory, extensions in PATHEXT order — and
+spawn through `cmd.exe /e:ON /v:OFF /d /c` inside the same Job Object, so an
+npm-installed runtime works without following `node_modules` payloads. Batch
+arguments containing CR/LF and batch executable paths containing percent
+expansion syntax are rejected.
 GUI launches additionally
 backfill `%APPDATA%\npm`, `%LOCALAPPDATA%\{pnpm,Programs\nodejs,Volta\bin}`,
 scoop shims, and `%USERPROFILE%\{.local\bin,.bun\bin}` from PATH. Managed
@@ -108,8 +106,8 @@ on Linux and macOS. To run the engine and harness checks locally:
 
 ```powershell
 cargo test --locked -p zeron-engine -p zeron-harness --lib
-cargo test --locked -p zeron-harness --features native-fixture --test codex_availability --test windows_native
-cargo test --locked -p zeron-engine --test codex_catalog --test codex_login_resolution --test auth
+cargo test --locked -p zeron-harness --test deepseek_sdk
+cargo test --locked -p zeron-engine --test auth --test cloud_rpc
 ```
 
 Fixtures use synthetic agents, so these tests do not establish authenticated

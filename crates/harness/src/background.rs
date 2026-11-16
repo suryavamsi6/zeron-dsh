@@ -156,7 +156,13 @@ impl BackgroundWork {
             }
             for id in ids {
                 let id = id.trim();
-                if id.is_empty() || outcome.matched.iter().chain(&outcome.unmatched).any(|seen| seen == id) {
+                if id.is_empty()
+                    || outcome
+                        .matched
+                        .iter()
+                        .chain(&outcome.unmatched)
+                        .any(|seen| seen == id)
+                {
                     continue;
                 }
                 if listed.iter().any(|t| t.id == id) {
@@ -448,7 +454,11 @@ mod tests {
     }
 
     fn agent(id: &str) -> WaitingOn {
-        WaitingOn { id: id.into(), kind: WaitingKind::Agent, label: format!("agent {id}") }
+        WaitingOn {
+            id: id.into(),
+            kind: WaitingKind::Agent,
+            label: format!("agent {id}"),
+        }
     }
 
     #[test]
@@ -466,10 +476,21 @@ mod tests {
         work.set_wakes(true);
         work.set(vec![task("dev"), task("tests")]);
         let waiting = work.watch_waiting();
-        assert!(waiting.borrow().is_empty(), "a process left running is no wait");
+        assert!(
+            waiting.borrow().is_empty(),
+            "a process left running is no wait"
+        );
         work.set_agents(vec![agent("x")]);
-        let outcome = work.mark(&["tests".into(), "gone".into(), "tests".into()], true).unwrap();
-        assert_eq!(outcome, MarkOutcome { matched: vec!["tests".into()], unmatched: vec!["gone".into()] });
+        let outcome = work
+            .mark(&["tests".into(), "gone".into(), "tests".into()], true)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            MarkOutcome {
+                matched: vec!["tests".into()],
+                unmatched: vec!["gone".into()]
+            }
+        );
         let ids: Vec<String> = waiting.borrow().iter().map(|w| w.id.clone()).collect();
         assert_eq!(ids, ["x", "tests"]);
         assert_eq!(waiting.borrow()[1].label, "run tests");

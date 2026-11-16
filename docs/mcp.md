@@ -8,13 +8,12 @@ install, a few MB resident.
 
 Crate: `crates/mcp` (`zeron-mcp`). The protocol layer is hand-rolled
 (`initialize`, `ping`, `tools/list`, `tools/call`; newline-delimited JSON-RPC
-2.0) — the repo already owns JSON-RPC framing for the Codex and ACP drivers and
+2.0) — the repo already owns JSON-RPC framing for the DeepSeek SDK bridge and
 the stdio tool-server subset is tiny, so no SDK dependency was taken.
 
 ## Identity
 
-The engine can inject this server into a harness's MCP config with the
-originating chat in the environment:
+The engine injects this server into the DeepSeek Harness SDK run, with the originating chat in the environment:
 
 | Variable                | Meaning                                                  |
 | ----------------------- | -------------------------------------------------------- |
@@ -24,10 +23,7 @@ originating chat in the environment:
 | `ZERON_DEVICE_ID`       | That chat's host device.                                 |
 | `ZERON_SIDE_CHATS_ONLY` | `1`: the agent has no subagent tools of its own (below). |
 
-`ZERON_SIDE_CHATS_ONLY=1`: the host device turned the provider's native
-subagents off (Settings → Providers), so `initialize` tells the agent to
-delegate with `create_chats`. Never set for a chat that has a parent, nor
-for one whose host doesn't know its parent yet.
+`ZERON_SIDE_CHATS_ONLY=1`: the host device turned native subagents off (Settings → DeepSeek), so `initialize` tells the agent to delegate with `create_chats`. Never set for a chat that has a parent, nor for one whose host doesn't know its parent yet.
 
 ### IPC authentication
 
@@ -44,11 +40,7 @@ unaffected.
 Clients resolve the token at every dial — `$ZERON_IPC_TOKEN`, then the file
 named by `$ZERON_IPC_TOKEN_FILE`, then `{ZERON_DATA_DIR or ~/.zeron}/ipc-token`
 (`zeron_rpc::connect_ipc`) — so they follow the rotation across engine
-restarts. The engine hands injected servers the file PATH
-(`ZERON_IPC_TOKEN_FILE`), never the token itself: Claude receives this env on
-its command line (`--mcp-config <inline json>`), which other local users can
-read with `ps`. A client run against a different data dir (e.g. a viewport on
-a daemon's port) sets `ZERON_IPC_TOKEN_FILE` to the daemon's file.
+restarts. The engine hands injected servers the file PATH (`ZERON_IPC_TOKEN_FILE`), never the token itself. The DeepSeek SDK receives each server's configuration through a private environment variable (`ZERON_DEEPSEEK_MCP_SECRET_<index>`), not through argv that other local users could read with `ps`. A client run against a different data dir (e.g. a viewport on a daemon's port) sets `ZERON_IPC_TOKEN_FILE` to the daemon's file.
 
 When `ZERON_CHAT_ID` is set, every `send_message` is prefixed with a
 `[Message from Zeron chat <title> (<id8>) …]` line so the receiving agent and the
@@ -74,13 +66,12 @@ The creation result includes the effective `kind`, `chatId`, `deviceId`,
 `project` and `parentChatId`. Kind is derived from the parent; it is not persisted.
 
 Children record `Chat.parent_chat_id` (proto) ⇄ `parentChatId` on the registry
-row (`Mutate createChat { parentChatId? }`). Any chat may delegate to any provider.
+row (`Mutate createChat { parentChatId? }`). Any chat may delegate to a new DeepSeek chat.
 Delegation is one level deep: a chat that has a parent creates no chats at all,
 and a new chat's parent (the origin, or an explicit `parent`) must be top-level.
 Standalone sessions have no parent.
 
-`cloud: true` runs the child on a Cloud machine of its own (Codex or Claude
-Code), cloning the project's GitHub repository; from a Cloud chat, the parent's
+`cloud: true` runs the child on a Cloud machine of its own (DeepSeek), cloning the project's GitHub repository; from a Cloud chat, the parent's
 repository. Without it, a child of a Cloud chat shares the parent's machine. A
 Cloud machine starts children only for the chat it runs, and sees and manages
 only those children (docs/design/cloud-device.md, "Delegation").
@@ -97,33 +88,32 @@ finds them.
 
 ### Injection
 
-The host engine stamps this server onto every run it drives
+The host engine stamps this server onto every DeepSeek run it drives
 (`RunRequest.mcp`, additive): the same `zeron` binary with `args: ["mcp"]`
-and the variables above, pointed at the port the engine itself serves
-(never a port it lost the bind race for). Each driver spells it in its own
-dialect and leaves the user's configured servers alone:
+and the variables above, pointed at the port the engine itself serves (never
+a port it lost the bind race for). The DeepSeek SDK driver (Sidecar in
+`crates/harness/src/deepseek/`) writes the run configuration
+into `cordis.patch.yml` and inserts one [`@deepseek-ai/dsh-mcp-client`] plugin
+per server:
 
-| Harness | Where |
-| ------- | ----- |
-| Claude  | `--mcp-config <inline json>` (no `--strict-mcp-config`)             |
-| ACP (Devin, Grok, Hermes, Antigravity) | `session/new` and `session/load` → `mcpServers: [{name, command, args, env}]` |
-| Pi | Per-run `--extension` bridges stdio MCP into Pi tools in the native RPC process |
-| OpenCode | Child-only `OPENCODE_CONFIG_CONTENT`: `mcp.zeron` on 1.x, `mcp.servers.zeron` on 2.x |
-| Codex   | `thread/start` config overrides `mcp_servers.zeron.{command,args,env}` |
-| Cursor  | SDK `Agent.create` / `Agent.resume` → inline `mcpServers.zeron`, plus `local.settingSources: ["user", "team", "mdm", "plugins"]` so `~/.cursor/mcp.json` and plugin servers load (not `project`: the SDK skips MCP approvals, so repo-defined servers would run unprompted) |
+```yaml
+- insert:
+    id: zeron-mcp-0
+    name: '@deepseek-ai/dsh-mcp-client'
+    config: !!js JSON.parse(process.env.ZERON_DEEPSEEK_MCP_SECRET_0)
+```
 
-OpenCode preserves inherited inline configuration and other servers. Its config
-shape follows the installed binary's major version. Cursor uses the SDK's
-[inline MCP configuration](https://cursor.com/docs/sdk/typescript); OpenCode's
-[1.x config layer](https://opencode.ai/docs/config/) and
-[2.x MCP format](https://opencode.ai/v2/docs/mcp-servers) differ.
-Pi's temporary extension lives only for the native RPC process lifetime;
-user settings, extensions, and session arguments remain intact. The bridge
-registers `zeron_<tool>` tools, propagates cancellation and errors, and closes
-the MCP child when the Pi session shuts down.
+The variable holds the stdio server description (`serverName`, `command`,
+`args`, `env`, `cwd`, `failOnStartupError`, `startupTimeoutMs`). Server names
+must match `[A-Za-z0-9_-]{1,32}` and be unique. Zeron's runtime disables the
+SDK's own plugin manager, so no user-level plugin or MCP configuration from
+the isolated Harness home is loaded on a run; Zeron's injected server is the only
+MCP entry the host adds to a run.
 
 Title runs never carry it. A run with no served port (embedded engine that
-lost the bind) gets no Zeron tools rather than a dead server.
+lost the bind) gets no Zeron tools rather than a dead server. A missing
+Node >=24.9 or the pinned SDK fails the run as `NotInstalled` before any
+MCP server starts.
 
 ### Forks and the session card
 
@@ -185,27 +175,12 @@ creates a held queue row. `awaitingInput` refuses and points at
 `respond_to_input`. Quiet, long-running turns still receive steering; the host
 falls back to starting a turn if the live runtime has already exited.
 
-Claude uses `priority: "next"` and confirms consumption through replayed user
-messages. Cursor uses the SDK's native `Run.steer`, waits for active tools to
-finish, and retains input until its delivery acknowledgment. New injections do
-not wait for earlier delivery acknowledgments; that wait serializes responses
-even when the SDK reports a single active turn. These are mid-turn
-paths; they do not terminate the harness process. Adapters that only accept input
-between turns are labeled **Send next** in the composer.
-
-The opt-in `steering_live` engine test checks a rapid burst, foreground and
-background process survival, retained context, exactly-once effects, and ordered
-normal queue delivery. For Claude, Cursor and Codex it additionally requires the
-burst to finish within the original turn. Set `ZERON_TEST_BURST=6` to reproduce a
-six-message burst; select an inexpensive model with `ZERON_TEST_MODEL` and the
-harness with `ZERON_TEST_HARNESS`. Codex is checked for child survival during
-the active tool: its runtime cleans up background jobs on normal tool completion
-even without steering. Other providers also check a job that outlives that tool.
-
-For conversational redirection, run `cargo run -p zeron-harness --example
-cursor_steering_probe -- gemini-3-flash`. It sends six bare digits during streamed
-prose and requires only the latest requested answer. Counting turn completions
-alone cannot distinguish real steering from serial responses inside one run.
+DeepSeek Harness accepts steering at a turn boundary: the send is queued to
+the SDK session and starts after the current turn settles. A steer that changes
+`model`, `reasoning`, `access`, `sandbox`, `cwd`, or model options is kept out
+of the live run; the composer labels the agent **Send next**. There is no
+mid-turn cancel RPC in the official SDK: Stop closes and reaps Zeron's owned
+sidecar process, and the next run resumes through persisted `session/resume`.
 
 `wait_for_turn` after a send is edge-triggered on the `Session` row captured
 before the send: it returns on a new `last_completed_turn`, an
@@ -277,22 +252,19 @@ without rerunning the script.
 
 `show_image {path}` is listed under the same condition: it shows an image file
 (a screenshot, a rendered PNG) inline in the calling chat as the same `image`
-doc part Codex's generated images use, so every client already renders it
+doc part generated replies use, so every client already renders it
 (the desktop's image row with its lightbox, iOS's image row). The MCP server
 reads the file from the agent's working directory with the agent's own access
 (at most 10 MB) and sends it base64 in `PublishImage {chatId, name, data}`. The
 engine refuses anything but a PNG, JPEG, WebP, or GIF the desktop can preview
 (at most 4096 pixels on a side, read from the header), stores it in uploads as
 `{id}-image.{ext}`, and folds the part into the live turn through the run's
-engine event channel, past the generated-image intake (whose root is Codex's
-own folder). The doc carries the stored path and the file's name, never the
+engine event channel, past the generated-image intake. The doc carries the stored path and the file's name, never the
 original path, and the image stays viewable after the source file changes or
-is deleted. Codex rarely finds `show_image` (it defers MCP tools behind its
-tool search) and answers "show me" with `![alt](/abs/path.png)`, the way its
-own app displays local files; the transcript draws such an image in place,
-from the chat's own folder only and never copied (see
-[image-preview.md](image-preview.md#images-in-agent-replies)). Nothing tells
-an agent about that: the tool description and server instructions name only
+is deleted. An agent may also answer "show me" with `![alt](/abs/path.png)`;
+the transcript draws such an image in place, from the chat's own folder only and
+never copied (see [image-preview.md](image-preview.md#images-in-agent-replies)).
+Nothing tells an agent about that: the tool description and server instructions name only
 `show_image`, and no harness prompt changes.
 
 ## Selecting a host and project
@@ -309,9 +281,8 @@ Neither argument means a projectless session on the local engine. Repeated names
 or paths are errors with candidate ids and devices; use ids from discovery.
 
 Before writing, creation checks the chosen engine's harness catalog, chooses
-its connected default (Claude Code when connected, otherwise the first connected
-non-mock harness, falling back to an available provider), and validates any
-explicit model against that host's catalog.
+its connected default (DeepSeek when available), and validates any explicit
+model against that host's catalog.
 An explicit harness must be offered, installed and enabled. Catalog failures,
 including model lookup failures, are returned with the device id; there is no
 fallback to the local catalog. A successful remote query checks reachability;
@@ -328,7 +299,7 @@ create_chat {
   kind: "chat",
   device: "<device-id>",
   project: "<project-id>",
-  harness: "codex",
+  harness: "deepseek",
   model: "<model-id from that host's catalog>",
   title: "Implement feature",
   prompt: "Implement the feature...",
@@ -339,7 +310,7 @@ create_chat {
 Without a project (the host uses its home directory unless `cwd` is given):
 
 ```json
-{"kind":"chat", "device":"<device-id>", "harness":"codex", "prompt":"Reply with pong", "wait":true}
+{"kind":"chat", "device":"<device-id>", "harness":"deepseek", "prompt":"Reply with pong", "wait":true}
 ```
 
 A mixed `create_chats` batch, with an origin chat or explicit top-level parent:
@@ -364,45 +335,30 @@ assistant response to arrive within the **same timeout**. A previous response
 is never substituted for a missing response to a new send. An unfinished
 transcript or missing response at the deadline returns `timedOut`.
 
-## Delegating across providers
+## Delegating within DeepSeek
 
-The `zeron` server is injected into every real harness (table above), and
-`create_chat` takes any `harness`, so every provider agent can hand work to any
-other: Claude Code → Codex and the reverse, or to Cursor, OpenCode, and so on.
-`list_harnesses` marks each provider:
+The `zeron` server is injected into every DeepSeek run, and `create_chat` takes
+a `harness` for compatibility; it must name DeepSeek. `list_harnesses` returns
+only DeepSeek (plus Mock under a test/development opt-in):
 
 - `available` — installed and enabled on this device.
-- `signedIn` — whether a login for it is present on the selected host
+- `signedIn` — whether a DeepSeek key is present on the selected host
   (`ListAgentAccounts`), or `null` when that could not be determined.
-- `connected` — available and not known to be signed out. This is what a
+- `connected` — available and not known to be missing a key. This is what a
   delegating agent should choose from; `create_chat` without a `harness` also
-  prefers a connected provider (claude-code first).
+  prefers DeepSeek.
 
-`signedIn` is advisory: credential detection does not see every source (an API
-key in the environment, say), so only an explicit `false` counts against a
-provider. `create_chat` still creates the chat but returns a `warning` when the
-chosen provider looks signed out, rather than refusing.
+`signedIn` is advisory: credential detection does not see every source (a key
+in the environment, say), so only an explicit `false` counts against it.
+`create_chat` still creates the chat but returns a `warning` when DeepSeek
+looks unconfigured, rather than refusing.
 
-## Switching a chat's provider
+## Historical harness ids
 
-A chat is not tied to the provider it started on. Picking another provider in
-the composer (or `Mutate setChatConfig` with a different `harness`) moves the
-conversation between turns; it is refused while a turn is running.
-
-- A harness-native resume id only means something to the harness that minted
-  it, so the chat row stores which one that was
-  (`Chat.harness_session_harness`). `resume_for` turns away an id owned by a
-  different harness; rows from before the tag are attributed from the run
-  journal on first use.
-- On the first run after a switch the host writes a `switch` part (a system
-  entry: `from`, `to` display names) into the transcript, sets the session doc's
-  `providerSwitched` flag, and hands the new provider's fresh session the prior
-  conversation once (`Inner::fork_history_prompt`, the side-chat bootstrap,
-  generalised). That replay is capped (about 80k characters, newest messages
-  win; long messages and tool output are clipped), so a long chat continues
-  with its recent context and a note that earlier messages were omitted.
-- Later turns on the new provider resume its own session natively; switching
-  back starts a fresh session there and replays again.
+Legacy `HarnessId` values decode so existing rows and transcripts keep their
+labels and marks. They are read-only: `create_chat` and `Mutate setChatConfig`
+refuse them with an explicit unsupported error, and no run, switch, or resume
+is attempted.
 
 ## Parallel side chats
 
@@ -450,7 +406,7 @@ project, an origin coordinator and a scripted `codex` adapter (`smoke-1`) return
 `pong`. Discover its ids with the list tools, create `kind: "chat"` with a prompt
 and `wait: true`, then check `read_chat`, `send_message` and a mixed batch. The
 profile is removed on exit. This checks MCP dispatch and engine execution without
-changing your running app's sessions or requiring provider credentials.
+changing your running app's sessions or requiring a DeepSeek key.
 
 The `mcp_standalone_session_executes_on_the_selected_device` test in
 `device_routing` additionally runs two engines with a shared registry and device

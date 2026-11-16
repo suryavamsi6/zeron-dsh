@@ -33,7 +33,7 @@ struct AccountList {
 use zeron_rpc::{RpcError, RpcReply, TokenError, TokenSource, methods, parse_params};
 
 use crate::EngineError;
-use crate::agent_accounts::{AgentAccounts, CaptureSink};
+use crate::agent_accounts::AgentAccounts;
 use crate::http_error::describe_http_error;
 
 /// Edge calls here are a few DO hops; the vault adds, for GitHub polls and
@@ -388,6 +388,11 @@ impl CloudClient {
             body["branch"] = serde_json::Value::String(branch.to_owned());
         }
         if let Some(config) = config {
+            if config.harness != HarnessId::DeepSeek {
+                return Err(EngineError::Other(
+                    "This legacy provider is no longer supported; select DeepSeek.".into(),
+                ));
+            }
             body["config"] = serde_json::to_value(config)
                 .map_err(|e| EngineError::Other(format!("chat config: {e}")))?;
         }
@@ -420,7 +425,7 @@ impl CloudClient {
     }
 
     /// `GET /cloud/{orgId}/models`: the models Cloud's machines run, by agent
-    /// (`claude-code`, `codex`), kept on the edge by hand so a new one needs no
+    /// (`deepseek`), kept on the edge by hand so a new one needs no
     /// app release. Each model is as the edge wrote it; [`cloud_models`] reads
     /// them leniently.
     pub async fn models(
@@ -442,7 +447,11 @@ impl CloudClient {
             )
             .await
             .map_err(Failure::into_error)?;
-        Ok(reply.models)
+        Ok(reply
+            .models
+            .into_iter()
+            .filter(|(harness, _)| harness == HarnessId::DeepSeek.as_str())
+            .collect())
     }
 
     /// `GET /vault/{orgId}/github/repos[?q=]` — the vault calls GitHub with
@@ -603,20 +612,16 @@ impl CloudClient {
         key: &str,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
-        if !matches!(
-            provider,
-            VaultProvider::AnthropicKey | VaultProvider::OpenaiKey
-        ) {
+        if !matches!(provider, VaultProvider::DeepseekKey) {
             return Err(EngineError::Other(format!(
-                "{} is not an API-key provider (use anthropic-key or openai-key)",
+                "{} is not a supported API-key provider (use deepseek-key)",
                 provider.as_str()
             )));
         }
-        let key = key.trim();
         if key.is_empty() {
             return Err(EngineError::Other("Paste an API key first.".into()));
         }
-        if key.chars().any(char::is_whitespace) {
+        if key.len() > 512 || key.chars().any(|c| c.is_whitespace() || c.is_control()) {
             return Err(EngineError::Other(
                 "That doesn't look like an API key (it contains spaces).".into(),
             ));
@@ -625,39 +630,6 @@ impl CloudClient {
             provider,
             serde_json::json!({ "key": key }),
             authorized_devices,
-        )
-        .await
-    }
-
-    /// `PUT /vault/{orgId}/credentials/codex` with
-    /// `{material: {authJson}, authorizedDevices}` — a `codex login` result.
-    pub async fn put_codex_auth(
-        &self,
-        auth_json: serde_json::Value,
-        authorized_devices: Vec<String>,
-    ) -> Result<VaultStatus, EngineError> {
-        self.put_credential(
-            VaultProvider::Codex,
-            serde_json::json!({ "authJson": auth_json }),
-            authorized_devices,
-        )
-        .await
-    }
-
-    /// `PUT /vault/{orgId}/credentials/claude` with
-    /// `{material: {claudeAiOauth}, authorizedDevices}` — a Claude sign-in
-    /// through Claude's own OAuth flow.
-    pub async fn put_claude_auth(
-        &self,
-        claude_ai_oauth: serde_json::Value,
-        authorized_devices: Vec<String>,
-        profile: Option<VaultAccountProfile>,
-    ) -> Result<VaultStatus, EngineError> {
-        self.put_credential_with(
-            VaultProvider::Claude,
-            serde_json::json!({ "claudeAiOauth": claude_ai_oauth }),
-            authorized_devices,
-            profile,
         )
         .await
     }
@@ -679,6 +651,7 @@ impl CloudClient {
         authorized_devices: Vec<String>,
         profile: Option<VaultAccountProfile>,
     ) -> Result<VaultStatus, EngineError> {
+        require_provider(provider)?;
         let mut body = serde_json::json!({
             "material": material,
             "authorizedDevices": authorized_devices,
@@ -704,6 +677,7 @@ impl CloudClient {
         &self,
         provider: VaultProvider,
     ) -> Result<Vec<VaultAccount>, EngineError> {
+        require_provider(provider)?;
         self.target()?
             .call::<AccountList>(
                 reqwest::Method::GET,
@@ -724,6 +698,7 @@ impl CloudClient {
         provider: VaultProvider,
         slot: Option<&str>,
     ) -> Result<Vec<VaultAccount>, EngineError> {
+        require_provider(provider)?;
         self.target()?
             .call::<AccountList>(
                 reqwest::Method::POST,
@@ -743,6 +718,7 @@ impl CloudClient {
         provider: VaultProvider,
         slot: &str,
     ) -> Result<Vec<VaultAccount>, EngineError> {
+        require_provider(provider)?;
         self.target()?
             .call::<AccountList>(
                 reqwest::Method::DELETE,
@@ -753,30 +729,6 @@ impl CloudClient {
             )
             .await
             .map(|list| list.accounts)
-            .map_err(Failure::into_error)
-    }
-
-    /// `GET /vault/{orgId}/accounts/{provider}/{slot}/usage` — the provider's
-    /// usage reply for one login, read by the vault.
-    pub async fn vault_usage(
-        &self,
-        provider: VaultProvider,
-        slot: &str,
-    ) -> Result<serde_json::Value, EngineError> {
-        #[derive(Deserialize)]
-        struct Usage {
-            body: serde_json::Value,
-        }
-        self.target()?
-            .call::<Usage>(
-                reqwest::Method::GET,
-                &["vault", "accounts", provider.as_str(), slot, "usage"],
-                &[],
-                None,
-                "Cloud account usage",
-            )
-            .await
-            .map(|usage| usage.body)
             .map_err(Failure::into_error)
     }
 
@@ -800,6 +752,7 @@ impl CloudClient {
         provider: VaultProvider,
         authorized_devices: Vec<String>,
     ) -> Result<VaultStatus, EngineError> {
+        require_provider(provider)?;
         self.target()?
             .call::<VaultStatus>(
                 reqwest::Method::PATCH,
@@ -815,6 +768,7 @@ impl CloudClient {
 
     /// `DELETE /vault/{orgId}/credentials/{provider}`.
     pub async fn disconnect(&self, provider: VaultProvider) -> Result<VaultStatus, EngineError> {
+        require_provider(provider)?;
         self.target()?
             .call::<VaultStatus>(
                 reqwest::Method::DELETE,
@@ -1028,7 +982,7 @@ fn failed(error: EngineError) -> RpcError {
 /// Answer one Cloud / vault method for this runtime's user.
 pub(crate) async fn dispatch(
     cloud: CloudClient,
-    accounts: &AgentAccounts,
+    _accounts: &AgentAccounts,
     method: &str,
     raw: serde_json::Value,
 ) -> Result<RpcReply, RpcError> {
@@ -1114,21 +1068,13 @@ pub(crate) async fn dispatch(
         ),
         methods::VAULT_STATUS => RpcReply::value(&cloud.vault_status().await.map_err(failed)?),
         methods::VAULT_PUT_API_KEY => {
-            let p: PutKeyParams = params(raw)?;
+            let p: PutKeyParams = serde_json::from_value(raw).map_err(|_| {
+                RpcError::BadParams("Expected {provider, key, authorizedDevices?}.".into())
+            })?;
             let status = cloud
                 .put_api_key(p.provider, &p.key, p.authorized_devices)
                 .await
                 .map_err(failed)?;
-            // A new key is the account Cloud uses from now on — machines
-            // prefer an active subscription login, so clear that one.
-            let login = match p.provider {
-                VaultProvider::AnthropicKey => Some(VaultProvider::Claude),
-                VaultProvider::OpenaiKey => Some(VaultProvider::Codex),
-                _ => None,
-            };
-            if let Some(login) = login {
-                cloud.vault_activate(login, None).await.map_err(failed)?;
-            }
             RpcReply::value(&status)
         }
         methods::VAULT_AUTHORIZE => {
@@ -1178,65 +1124,10 @@ pub(crate) async fn dispatch(
             let accounts = cloud.github_activate(&p.slot).await.map_err(failed)?;
             RpcReply::value(&serde_json::json!({ "accounts": accounts }))
         }
-        methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE => {
-            let p: DevicesParams = params(raw)?;
-            // Refuse before any browser opens: nowhere to upload to.
-            if !cloud.is_available() {
-                return Err(RpcError::Failed(UNAVAILABLE.into()));
-            }
-            let harness = if method == methods::VAULT_CONNECT_CODEX {
-                HarnessId::Codex
-            } else {
-                HarnessId::ClaudeCode
-            };
-            let capture = vault_upload_sink(cloud, harness, p.authorized_devices);
-            let start = accounts
-                .start_capture_login(harness, capture)
-                .await
-                .map_err(failed)?;
-            RpcReply::value(&start)
-        }
+        methods::VAULT_CONNECT_CODEX | methods::VAULT_CONNECT_CLAUDE => Err(RpcError::Failed(
+            "Legacy provider sign-ins are no longer supported; add a DeepSeek API key.".into(),
+        )),
         other => Err(RpcError::UnknownMethod(other.to_string())),
-    }
-}
-
-/// Where a capture-only sign-in on this device lands: the vault, as a login
-/// of `harness`'s subscription provider usable by `devices`.
-pub(crate) fn vault_upload_sink(
-    cloud: CloudClient,
-    harness: HarnessId,
-    devices: Vec<String>,
-) -> CaptureSink {
-    Arc::new(move |captured| {
-        let cloud = cloud.clone();
-        let devices = devices.clone();
-        Box::pin(async move {
-            let uploaded = if harness == HarnessId::Codex {
-                cloud.put_codex_auth(captured, devices).await
-            } else {
-                let (credential, profile) = split_capture(captured);
-                cloud.put_claude_auth(credential, devices, profile).await
-            };
-            uploaded.map(drop).map_err(|e| e.to_string())
-        })
-    })
-}
-
-/// A captured sign-in: `{credential, profile}` (Claude's, with the identity
-/// its profile reported) or the bare credential (Codex's `auth.json`, whose
-/// id token names the account).
-pub(crate) fn split_capture(
-    captured: serde_json::Value,
-) -> (serde_json::Value, Option<VaultAccountProfile>) {
-    match captured {
-        serde_json::Value::Object(mut map) if map.contains_key("credential") => {
-            let credential = map.remove("credential").unwrap_or_default();
-            let profile = map
-                .remove("profile")
-                .and_then(|p| serde_json::from_value::<VaultAccountProfile>(p).ok());
-            (credential, profile)
-        }
-        other => (other, None),
     }
 }
 
@@ -1332,7 +1223,6 @@ impl Target {
     }
 }
 
-
 /// The edge's models, as this engine's catalog takes them: each read alone, so
 /// one this build can't read (a reasoning level it doesn't know, say) drops
 /// that level or that model, never the list.
@@ -1351,7 +1241,22 @@ pub fn cloud_models(listed: &[serde_json::Value]) -> Vec<zeron_proto::Model> {
         .collect()
 }
 
-fn available_vault(status: VaultStatus) -> VaultStatus {
+fn require_provider(provider: VaultProvider) -> Result<(), EngineError> {
+    if !matches!(provider, VaultProvider::DeepseekKey | VaultProvider::Github) {
+        return Err(EngineError::Other(
+            "This legacy LLM provider is no longer supported; use DeepSeek.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn available_vault(mut status: VaultStatus) -> VaultStatus {
+    status.connections.retain(|connection| {
+        matches!(
+            connection.provider,
+            VaultProvider::DeepseekKey | VaultProvider::Github
+        )
+    });
     VaultStatus {
         available: true,
         ..status
@@ -1425,7 +1330,7 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use zeron_proto::{CloudState, GithubConnectState, VaultConnectionStatus};
+    use zeron_proto::{CloudState, GithubConnectState};
 
     #[derive(Debug, Clone)]
     struct Recorded {
@@ -1537,7 +1442,7 @@ mod tests {
     fn vault_view() -> serde_json::Value {
         serde_json::json!({
             "connections": [{
-                "provider": "anthropic-key",
+                "provider": "deepseek-key",
                 "status": "connected",
                 "authorizedDevices": ["cloud-1"],
                 "account": "…abcd",
@@ -1600,7 +1505,9 @@ mod tests {
                 serde_json::json!({"chatId": "chat-1", "deviceId": "cloud-s1",
                     "spaceId": "sp-1", "state": "deleting", "createdAt": 3}),
             ),
-            ("DELETE", "/cloud/org_1") => (200, serde_json::json!({"state": "off", "available": true})),
+            ("DELETE", "/cloud/org_1") => {
+                (200, serde_json::json!({"state": "off", "available": true}))
+            }
             ("GET", "/cloud/org_1/usage?from=2026-09-29&to=2026-09-30") => (
                 200,
                 serde_json::json!({
@@ -1640,15 +1547,17 @@ mod tests {
                     "credits": 0.0, "balance": 500.0}),
             ),
             ("GET", "/vault/org_1") => (200, vault_view()),
-            ("PUT", "/vault/org_1/credentials/anthropic-key") => {
-                assert_eq!(body["material"]["key"], "sk-ant-secret");
+            ("PUT", "/vault/org_1/credentials/deepseek-key") => {
+                if body["material"]["key"] == "sk-bad" {
+                    return (
+                        400,
+                        serde_json::json!({"error": "bad_request", "message": "That key was rejected by the vault."}),
+                    );
+                }
+                assert_eq!(body["material"]["key"], "deepseek-test-fixture");
                 (200, vault_view())
             }
-            ("PUT", "/vault/org_1/credentials/openai-key") => (
-                400,
-                serde_json::json!({"error": "bad_request", "message": "That key was rejected by OpenAI."}),
-            ),
-            ("PATCH", "/vault/org_1/credentials/codex") => {
+            ("PATCH", "/vault/org_1/credentials/deepseek-key") => {
                 (403, serde_json::json!({"error": "forbidden"}))
             }
             ("POST", "/vault/org_1/devices/cloud-1/revoke") => (200, vault_view()),
@@ -1697,7 +1606,6 @@ mod tests {
         assert_eq!(status.last_active_at, Some(5));
         assert_eq!((status.awake_sessions, status.max_awake_sessions), (1, 5));
         assert!(status.available, "edge replies are available");
-
         let enabled = client.enable().await.unwrap();
         assert_eq!(enabled.state, CloudState::Ready);
         assert!(enabled.available);
@@ -1745,7 +1653,9 @@ mod tests {
         );
         // The size picked rides the wake, and only then.
         let _ = client.wake_session("chat-1", Some("xlarge"), None).await;
-        let _ = client.wake_session("chat-1", Some("large"), Some(false)).await;
+        let _ = client
+            .wake_session("chat-1", Some("large"), Some(false))
+            .await;
         let _ = client.retry_session("chat-1", Some("large")).await;
         let _ = client.set_machine("small").await;
         let sent: Vec<(String, serde_json::Value)> = edge
@@ -1756,8 +1666,15 @@ mod tests {
             .map(|r| (r.target.clone(), r.body.clone()))
             .collect();
         assert_eq!(sent[3].1, serde_json::json!({ "machine": "xlarge" }));
-        assert_eq!(sent[2].1, serde_json::json!({ "machine": "large", "wake": false }));
-        assert!(sent[1].0.ends_with("/sessions/chat-1/retry"), "{}", sent[1].0);
+        assert_eq!(
+            sent[2].1,
+            serde_json::json!({ "machine": "large", "wake": false })
+        );
+        assert!(
+            sent[1].0.ends_with("/sessions/chat-1/retry"),
+            "{}",
+            sent[1].0
+        );
         assert_eq!(sent[1].1, serde_json::json!({ "machine": "large" }));
         assert!(sent[0].0.ends_with("/machine"), "{}", sent[0].0);
         assert_eq!(sent[0].1, serde_json::json!({ "machine": "small" }));
@@ -1884,18 +1801,14 @@ mod tests {
 
         let status = client.vault_status().await.unwrap();
         assert!(status.available);
-        assert_eq!(status.connections.len(), 2);
-        assert_eq!(status.connections[0].provider, VaultProvider::AnthropicKey);
-        assert_eq!(
-            status.connections[1].status,
-            VaultConnectionStatus::NeedsReconnect
-        );
+        assert_eq!(status.connections.len(), 1);
+        assert_eq!(status.connections[0].provider, VaultProvider::DeepseekKey);
         assert_eq!(status.devices[0].device_id, "cloud-1");
 
         let saved = client
             .put_api_key(
-                VaultProvider::AnthropicKey,
-                "  sk-ant-secret\n",
+                VaultProvider::DeepseekKey,
+                "deepseek-test-fixture",
                 vec!["cloud-1".into()],
             )
             .await
@@ -1909,7 +1822,7 @@ mod tests {
         assert_eq!(
             put.body,
             serde_json::json!({
-                "material": {"key": "sk-ant-secret"},
+                "material": {"key": "deepseek-test-fixture"},
                 "authorizedDevices": ["cloud-1"]
             })
         );
@@ -1919,8 +1832,10 @@ mod tests {
         for (provider, key) in [
             (VaultProvider::Codex, "sk-1"),
             (VaultProvider::Github, "ghp_1"),
-            (VaultProvider::AnthropicKey, "   "),
-            (VaultProvider::OpenaiKey, "sk 1"),
+            (VaultProvider::DeepseekKey, "   "),
+            (VaultProvider::DeepseekKey, "sk 1"),
+            (VaultProvider::AnthropicKey, "legacy-key"),
+            (VaultProvider::OpenaiKey, "legacy-key"),
         ] {
             assert!(
                 client.put_api_key(provider, key, vec![]).await.is_err(),
@@ -1931,12 +1846,12 @@ mod tests {
 
         // Error mapping: edge message, then code/status fallbacks.
         let rejected = client
-            .put_api_key(VaultProvider::OpenaiKey, "sk-bad", vec![])
+            .put_api_key(VaultProvider::DeepseekKey, "sk-bad", vec![])
             .await
             .unwrap_err();
-        assert_eq!(rejected.to_string(), "That key was rejected by OpenAI.");
+        assert_eq!(rejected.to_string(), "That key was rejected by the vault.");
         let forbidden = client
-            .authorize(VaultProvider::Codex, vec!["cloud-1".into()])
+            .authorize(VaultProvider::DeepseekKey, vec!["cloud-1".into()])
             .await
             .unwrap_err();
         assert_eq!(
@@ -2027,7 +1942,7 @@ mod tests {
             assert!(!client.usage(None, None).await.unwrap().available);
             assert!(!client.vault_status().await.unwrap().available);
             let error = client
-                .put_api_key(VaultProvider::AnthropicKey, "sk-1", vec![])
+                .put_api_key(VaultProvider::DeepseekKey, "sk-1", vec![])
                 .await
                 .unwrap_err();
             assert!(error.to_string().contains("sign"), "{error}");

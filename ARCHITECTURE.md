@@ -1,7 +1,7 @@
 # zeron — Architecture
 
 A ground-up native rewrite of [zeron](../zeron) — a multi-device controller for coding agents
-(Claude Code / Codex) — in Rust, with a gpui UI. Fresh app; no backwards compatibility required.
+(DeepSeek, through the official DeepSeek Harness JSON-RPC SDK) — in Rust, with a gpui UI. Fresh app; no backwards compatibility required.
 
 **Pillars (from the goal):**
 - Optional sync uses Loro CRDT docs (loro-mirror model) through Cloudflare Durable Objects; the same docs persist locally when sync is disabled.
@@ -169,8 +169,8 @@ zeron/
     sync/         zeron-sync     # loro room client (join/VV backfill/fragments/backoff),
                                  # ephemeral presence, DocsStore (SQLite snapshots +
                                  # processed-command ledger)
-    harness/      zeron-harness  # Harness trait + claude-code (stream-json subprocess),
-                                 # codex (app-server JSON-RPC), mock; steering mailbox,
+    harness/      zeron-harness  # Harness trait + DeepSeek (official Harness JSON-RPC
+                                 # SDK sidecar), mock (debug only); steering mailbox,
                                  # requestInput, models/reasoning/options catalogs
     engine/       zeron-engine   # sessions engine (pub/sub, run journal, recovery, stall
                                  # watchdog), doc host + command executor, repos/worktrees,
@@ -267,10 +267,10 @@ Direct ports of zeron behaviors (spec: feature-inventory §3):
   segments at 120ms commits, drain commands host-only with processed-ledger idempotence, publish
   diff sidecar, presence); warm-open recent chats (14d/cap 30); nudge-driven cold open; SQLite
   snapshot store.
-- **Harness** (research pending — `docs/research/harness.md`): trait mirroring zeron's
-  `HarnessShape`; Claude Code via `claude` CLI stream-json in/out (control protocol for
-  permissions/AskUserQuestion→requestInput, resume, steering); Codex via app-server JSON-RPC or
-  `codex exec --json`; model/reasoning/option catalogs ported from `packages/harness`.
+- **Harness**: one supported harness, DeepSeek, driven through the official DeepSeek Harness
+  JSON-RPC SDK sidecar (pinned version; isolated Harness home). Other `HarnessId` variants remain
+  only to decode and display historical sessions and are rejected for new runs. The mock harness is
+  a debug fixture (`ZERON_HARNESS=mock`).
 - **Repos/diffs**: git2 or `git` subprocess (subprocess — matches zeron, avoids libgit2 edge
   cases); worktrees under `~/.zeron/worktrees`; fs watchers (`notify`) + 2min repair; diff
   capture (patch + numstat + untracked, 3MiB cap, sha256) → workspace registry summary + DO diff
@@ -320,7 +320,7 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
   two headless engines against a real edge — B queues a run into the chat doc, the durable
   nudge wakes host A, A executes (mock harness), transcript + session status sync back to B.
 - 🟡 **M5 Full surface** — terminals, diff pane, repo/branch/folder pickers + worktrees,
-  agent accounts UI, settings (devices/shortcuts/archived), Codex harness. Gaps: composer
+  agent accounts UI, settings (devices/shortcuts/archived), DeepSeek harness. Gaps: composer
   attachment UI (engine upload RPCs exist), Cursor harness.
 - 🟡 **M6 Polish** — wire reconciliation (proto AuthState on the wire, `LocalDevice`),
   two-device e2e smoke, keyboard map, clippy/fmt sweep, Linux packaging
@@ -333,7 +333,8 @@ Status legend: ✅ shipped · 🟡 shipped with named gaps (see `docs/PARITY.md`
 1. loro-protocol Rust client ⇄ TS edge interop — verify at M1; fallback is a ~300-line hand-rolled
    client (the frame protocol is small and we control both ends).
 2. `lorosurgeon` fit for the mirror write path vs hand-rolled reconcile.
-3. Cursor harness (zeron has it; CLI surface for Rust TBD) — parity item, scheduled after Codex.
+3. DeepSeek Harness SDK model catalog: the SDK exposes no model-list RPC; Zeron mirrors the two
+   published adapter models and never invents a discovery call.
 4. Text shaping performance for analytic row heights: gpui measures shaped text natively (Rust ⇒
    cheap), so we start with gpui `list()` measurement + memoization rather than porting pretext's
    full analytic kernel; revisit only if cold-open of huge transcripts measures slow.

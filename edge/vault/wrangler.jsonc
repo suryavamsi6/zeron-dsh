@@ -22,8 +22,8 @@
     ]
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["VaultDevices", "VaultAccount"] }],
-  // Daily canary: force-refresh CANARY_USER_ID's codex + github credentials so
-  // a provider changing its refresh contract alerts before users' grants fail.
+  // Daily canary: report/refresh CANARY_USER_ID's github login and check the
+  // GitHub App credentials before a contract change reaches users' grants.
   "triggers": { "crons": ["0 6 * * *"] },
   // No vars. Secrets (`wrangler secret put NAME`), see README.md:
   //   VAULT_KEK                 required; base64 of 32 random bytes (the KEK)

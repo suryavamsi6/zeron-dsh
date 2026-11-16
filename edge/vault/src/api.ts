@@ -6,14 +6,11 @@
  * it without pulling vault code into its bundle.
  */
 
-export type VaultProviderId = "codex" | "claude" | "github" | "anthropic-key" | "openai-key";
+export type VaultProviderId = "deepseek-key" | "github";
 
 export const VAULT_PROVIDERS: readonly VaultProviderId[] = [
-  "codex",
-  "claude",
-  "github",
-  "anthropic-key",
-  "openai-key"
+  "deepseek-key",
+  "github"
 ];
 
 /** Identity the main Worker verified (WorkOS JWT or runner JWT). */
@@ -172,26 +169,7 @@ export interface VaultStatusView {
   readonly githubInstallUrl?: string;
 }
 
-/**
- * Upload material per provider:
- * - `codex`: `{ authJson }` — the parsed `auth.json` written by `codex login`
- *   (`{ tokens: { id_token, access_token, refresh_token, account_id }, last_refresh }`).
- * - `claude`: either `{ claudeAiOauth }` — the Claude Code credential blob from a
- *   sign-in through Claude's own OAuth flow (`{ accessToken, refreshToken, expiresAt,
- *   scopes, subscriptionType? }`, refreshable) — or `{ oauthToken, expiresAt? }`, a
- *   long-lived token from `claude setup-token` (not refreshable; default expiry one year).
- *   Running Claude Code on the user's own Cloud device with their subscription is
- *   permitted for Zeron under its arrangement with Anthropic; grants go only to the
- *   unmodified Claude Code CLI on the user's own devices.
- * - `anthropic-key` / `openai-key`: `{ key }`.
- * - `github`: not uploadable; use the device flow. The resulting user token
- *   stays in the vault: `github` grants are App installation tokens.
- */
-export type VaultMaterial =
-  | { readonly authJson: Record<string, unknown> }
-  | { readonly claudeAiOauth: Record<string, unknown> }
-  | { readonly oauthToken: string; readonly expiresAt?: number }
-  | { readonly key: string };
+export type VaultMaterial = { readonly key: string };
 
 export interface PutCredentialRequest {
   readonly material: VaultMaterial;
@@ -246,14 +224,6 @@ export interface Grant {
   readonly accessToken: string;
   /** Unix ms. The consumer may cache the grant until then (offline fallback). */
   readonly expiresAt: number;
-  /** Codex: ChatGPT account id. */
-  readonly accountId?: string;
-  /** Claude: OAuth scopes and plan of the stored login (the CLI's credential
-   * file carries both). */
-  readonly scopes?: readonly string[];
-  readonly subscriptionType?: string;
-  /** Codex: id_token (the CLI's auth.json requires it). */
-  readonly idToken?: string;
   /** GitHub login / account email. For `github`, the session's login: the
    * author of its commits. */
   readonly account?: string;

@@ -9,6 +9,6 @@ Icon=zeron
 Terminal=false
 StartupNotify=true
 Categories=Development;Utility;
-Keywords=agent;claude;codex;ai;coding;
+Keywords=agent;deepseek;ai;coding;
 StartupWMClass=zeron
 MimeType=x-scheme-handler/zeron;

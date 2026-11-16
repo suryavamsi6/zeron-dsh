@@ -465,7 +465,7 @@ export const handleCloudRoute = async (
         if (typeof parentChatId !== "string" || !ID_RE.test(parentChatId)) return jsonError(400, "bad_request", "Bad parentChatId.");
         if (branch !== undefined && (typeof branch !== "string" || branch.length > 255)) return jsonError(400, "bad_request", "Bad branch.");
         if (config !== undefined && !isChildConfig(config)) {
-          return jsonError(400, "bad_request", "Expected config {harness: codex | claude-code, …}.");
+          return jsonError(400, "bad_request", "Expected config {harness: deepseek, …}.");
         }
         return sessionRpc(() => stub.createChildSession(caller, chatId, parentChatId, edgeUrl, branch, config));
       }
@@ -541,9 +541,9 @@ export const autoWakeCloudDevice = (
   );
 };
 
-/** A delegate's agent settings: Cloud runs Codex and Claude Code; the rest is
- * the host's to validate (it ignores what it doesn't know). Bounded. */
+/** A delegate's agent settings: Cloud runs only the DeepSeek harness; the rest
+ * is the host's to validate (it ignores what it doesn't know). Bounded. */
 const isChildConfig = (config: unknown): config is Record<string, unknown> =>
   isObject(config) &&
-  (config.harness === "codex" || config.harness === "claude-code") &&
+  config.harness === "deepseek" &&
   JSON.stringify(config).length <= 4096;

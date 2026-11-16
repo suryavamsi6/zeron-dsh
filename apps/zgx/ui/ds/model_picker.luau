@@ -164,11 +164,22 @@ end
 
 return ui.component(function(props: Props): Node
 	local function harness_list(): { Harness }
-		return read(props.harnesses) :: { Harness }
+		local out = {}
+		for _, h in read(props.harnesses) :: { Harness } do
+			if h.id == "deepseek" then table.insert(out, h) end
+		end
+		return out
+	end
+	local function model_list(): { Model }
+		local out = {}
+		for _, m in read(props.models) :: { Model } do
+			if m.harness == "deepseek" then table.insert(out, m) end
+		end
+		return out
 	end
 	local by_id = ui.computed(function(): { [string]: Model }
 		local out: { [string]: Model } = {}
-		for _, m in read(props.models) :: { Model } do
+		for _, m in model_list() do
 			out[m.value] = m
 		end
 		return out
@@ -316,7 +327,7 @@ return ui.component(function(props: Props): Node
 	local items = ui.computed(function(): { Dropdown.Item }
 		local out: { Dropdown.Item } = {}
 		local by_agent = agents:get()
-		local models = read(props.models) :: { Model }
+		local models = model_list()
 		for _, m in models do
 			local agent = by_agent[m.harness]
 			table.insert(out, {
@@ -389,14 +400,10 @@ return ui.component(function(props: Props): Node
 			size = 16,
 		}
 	)
-	-- An agent's tab each, following the agents as they come and go.
-	local agent_tabs = ui.each(ui.computed(harness_list), function(h: Harness): Node
-		return tab_of(h.id, h.label, AgentMark { label = h.label, seed = h.id, mark = if h.icon then nil else h.mark, icon = h.icon, size = 16, bare = true })
-	end, {
-		key = function(h: Harness): string
-			return h.id
-		end,
-	})
+	-- One provider now: its name where the agent tabs were, not a switch.
+	local agent_tabs = ui.show(function(): boolean
+		return #harness_list() > 0
+	end, ui.text { "DeepSeek", color = "$text.secondary" })
 
 	-- A row's star: shown under the pointer (or the keys), and always on a
 	-- starred model; a click stars it or takes the star off.

@@ -1,4 +1,7 @@
-# Rust harness integration: Claude Code + Codex (2026-07)
+# Historical research: early Claude Code + Codex harness integration (2026-07)
+
+> Historical only. Zeron now supports DeepSeek alone, through the official
+> DeepSeek Harness SDK. Nothing here describes a supported provider.
 
 ## Decision
 - Claude Code: spawn installed `claude` CLI, speak stream-json directly. NO crates.io SDK dep

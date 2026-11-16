@@ -20,8 +20,7 @@ final class CloudStore {
     }
 
     static let agents: [Agent] = [
-        Agent(harness: "claude-code", name: "Claude Code", login: "claude", key: "anthropic-key", signInTitle: "Sign in with Claude", keyName: "Anthropic API key"),
-        Agent(harness: "codex", name: "Codex", login: "codex", key: "openai-key", signInTitle: "Sign in with ChatGPT", keyName: "OpenAI API key"),
+        Agent(harness: "deepseek", name: "DeepSeek", login: "deepseek-key", key: "deepseek-key", signInTitle: "Add DeepSeek API key", keyName: "DeepSeek API key"),
     ]
 
     private(set) var info: CloudInfo?
@@ -178,7 +177,7 @@ final class CloudStore {
                 async let billing = try? client.billingStatus()
                 var lists: [String: [CloudAccountInfo]] = [:]
                 for agent in Self.agents {
-                    for provider in [agent.login, agent.key] {
+                    for provider in Set([agent.login, agent.key]) {
                         lists[provider] = (try? await client.vaultAccounts(provider: provider)) ?? []
                     }
                 }
@@ -216,7 +215,7 @@ final class CloudStore {
         Task { [weak self] in
             var lists: [String: [CloudAccountInfo]] = [:]
             for agent in Self.agents {
-                for provider in [agent.login, agent.key] {
+                for provider in Set([agent.login, agent.key]) {
                     lists[provider] = (try? await client.vaultAccounts(provider: provider)) ?? []
                 }
             }
@@ -354,41 +353,3 @@ final class CloudStore {
     }
 }
 
-/// Signs in to Claude or ChatGPT for Cloud: the provider's own page in the
-/// system auth sheet, which closes by itself once the provider answers; the
-/// login then lands in Cloud's vault (no token stays on the phone).
-@MainActor
-final class ProviderSignIn: NSObject, ASWebAuthenticationPresentationContextProviding {
-    private var session: ASWebAuthenticationSession?
-    private weak var anchor: UIView?
-
-    static let doneURL = "zeron://signed-in"
-
-    func run(_ agent: CloudStore.Agent, client: CoreClient, from view: UIView) async throws {
-        anchor = view
-        let start = try await client.providerLoginStart(provider: agent.login, doneUrl: Self.doneURL)
-        guard let url = URL(string: start.url) else { throw CoreError.Internal(message: "Bad sign-in link") }
-        let cancelled: Bool = await withCheckedContinuation { cont in
-            let s = ASWebAuthenticationSession(url: url, callback: .customScheme("zeron")) { _, error in
-                let wasCancelled = (error as? ASWebAuthenticationSessionError)?.code == .canceledLogin
-                cont.resume(returning: wasCancelled)
-            }
-            s.presentationContextProvider = self
-            // The browser's own cookies: already signed in to claude.ai or
-            // chatgpt.com there means one tap.
-            s.prefersEphemeralWebBrowserSession = false
-            session = s
-            if !s.start() { cont.resume(returning: true) }
-        }
-        session = nil
-        if cancelled {
-            client.providerLoginCancel(loginId: start.loginId)
-            throw CancellationError()
-        }
-        try await client.providerLoginFinish(loginId: start.loginId)
-    }
-
-    func presentationAnchor(for session: ASWebAuthenticationSession) -> ASPresentationAnchor {
-        anchor?.window ?? ASPresentationAnchor()
-    }
-}

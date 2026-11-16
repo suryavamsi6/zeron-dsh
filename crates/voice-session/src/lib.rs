@@ -1,4 +1,4 @@
-//! Shared call lifecycle. Platforms own media; the execution host owns Codex.
+//! Provider-independent call lifecycle and transport interfaces.
 mod view;
 use async_trait::async_trait;
 use futures::{StreamExt, stream::BoxStream};
@@ -510,7 +510,8 @@ mod tests {
         })
     }
     fn config() -> zeron_proto::ChatConfig {
-        serde_json::from_value(json!({"harness":"codex","sandbox":"danger-full-access"})).unwrap()
+        serde_json::from_value(json!({"harness":"deepseek","sandbox":"danger-full-access"}))
+            .unwrap()
     }
     #[tokio::test]
     async fn incompatible_host_never_requests_microphone() {

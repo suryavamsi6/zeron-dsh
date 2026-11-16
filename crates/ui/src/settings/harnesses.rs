@@ -75,27 +75,11 @@ fn offers_install(harness: HarnessId, installed: bool, can_install: bool) -> boo
     harness != HarnessId::Mock && !installed && can_install
 }
 
-fn install_hint(harness: HarnessId, enabled: bool, can_install: bool) -> String {
-    if harness == HarnessId::Antigravity {
-        return if can_install {
-            "Install Antigravity to enable"
-        } else {
-            "Set ANTIGRAVITY_ACP_EXECUTABLE to enable Antigravity"
-        }
-        .into();
-    }
-    let hint = if enabled {
-        format!(
-            "{} CLI not installed — turn it off or install it",
-            cli_name(harness)
-        )
+fn install_hint(harness: HarnessId, _enabled: bool, _can_install: bool) -> String {
+    if harness == HarnessId::DeepSeek {
+        "Install the pinned official DeepSeek Harness SDK runtime on this device; see the SDK setup guide.".into()
     } else {
-        format!("Install the {} CLI to enable", cli_name(harness))
-    };
-    if !can_install && let Some(command) = zeron_harness::install::manual_command(harness) {
-        format!("{hint}. Install with `{command}`")
-    } else {
-        hint
+        "Unsupported historical provider".into()
     }
 }
 
@@ -119,19 +103,9 @@ fn install_params(harness: HarnessId, target: &Option<String>) -> serde_json::Va
 /// The CLI named in the not-installed hint.
 pub fn cli_name(harness: HarnessId) -> &'static str {
     match harness {
-        HarnessId::ClaudeCode => "claude",
-        HarnessId::Codex => "codex",
-        HarnessId::Cursor => "cursor-agent",
-        HarnessId::Devin => "devin",
-        HarnessId::Grok => "grok",
-        HarnessId::Hermes => "hermes",
-        HarnessId::Fx => "fx",
-        HarnessId::Pi => "pi",
-        HarnessId::Opencode => "opencode",
-        HarnessId::Antigravity => "Antigravity",
-        HarnessId::Muse => "muse",
+        HarnessId::DeepSeek => "dsh",
         HarnessId::Mock => "mock",
-        HarnessId::Registry(agent) => agent.registry_id(),
+        _ => "unsupported",
     }
 }
 
@@ -266,7 +240,7 @@ pub struct HarnessesPage {
 impl HarnessesPage {
     pub fn new(state: Entity<AppState>, cx: &mut Context<Self>) -> Self {
         let mut page = Self {
-            state,
+            state: state.clone(),
             scroll: widgets::PageScroll::default(),
             harnesses: Loadable::Idle,
             updates: Loadable::Idle,
@@ -280,9 +254,9 @@ impl HarnessesPage {
             installing: None,
             install_task: None,
 
-            expanded_harness: None,
+            expanded_harness: Some(HarnessId::DeepSeek),
             pending_sign_in: None,
-            accounts_page: None,
+            accounts_page: Some(cx.new(|cx| AccountsPage::new_embedded(state.clone(), None, HarnessId::DeepSeek, cx))),
             _observe_accounts: None,
             update_task: None,
             update_action_task: None,
@@ -359,8 +333,8 @@ impl HarnessesPage {
             .rounded(px(6.0))
             .tab_index(0)
             .role(gpui::Role::Button)
-            .aria_label("Check for agents and updates")
-            .tooltip(widgets::text_tooltip("Check for agents and updates"))
+            .aria_label("Check DeepSeek SDK setup")
+            .tooltip(widgets::text_tooltip("Check DeepSeek SDK setup"))
             .focus_visible(|s| s.border_2().border_color(theme.accent))
             .cursor_pointer()
             .hover(|style| style.bg(crate::theme::ink(0.05)))
@@ -452,10 +426,7 @@ impl HarnessesPage {
         theme: &Theme,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let accounts = accounts::signs_in(harness)
-            .then(|| self.accounts_page.clone())
-            .flatten()
-            .map(|page| page.into_any_element());
+        let accounts: Option<gpui::AnyElement> = None;
         // No box of its own: the details continue the provider row on the
         // block's fill, indented to the row's title so they read as its
         // children, with switches and actions on the row's control edge.
@@ -1172,14 +1143,6 @@ impl HarnessesPage {
                             .into_any_element(),
                     );
                 }
-                if installed && harness == HarnessId::Fx {
-                    meta.push(
-                        div()
-                            .text_color(theme.text_muted)
-                            .child("Configure your model provider with fx login or fx setup.")
-                            .into_any_element(),
-                    );
-                }
                 // Not installed: the hint above says all there is.
                 if let Some(status) = update.filter(|_| installed) {
                     let (text, color) = harness_update_label(status, &theme);
@@ -1538,6 +1501,9 @@ impl Render for HarnessesPage {
                     .into_any_element()
             }
         };
+        let body = div().flex().flex_col().gap(px(16.0))
+            .children(self.accounts_page.clone())
+            .child(body).into_any_element();
         // A provider's own rows show once it is expanded: until then, a hit
         // on one lands on the list, to pick the provider.
         let body = body
@@ -1616,7 +1582,7 @@ impl Render for HarnessesPage {
                                         .flex_row()
                                         .items_center()
                                         .justify_between()
-                                        .child(widgets::page_header(&theme, "Providers", None))
+                                        .child(widgets::page_header(&theme, "DeepSeek", None))
                                         .child(toolbar),
                                 )
                                 .children(update_error)
@@ -1633,281 +1599,11 @@ impl Render for HarnessesPage {
 
 #[cfg(test)]
 mod tests {
-    /// A failed run's "Log in" waits for the rows, then opens that agent's
-    /// Accounts section (where its sign-in starts).
-    #[gpui::test]
-    fn sign_in_opens_the_agent_once_its_rows_land(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
-            gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::default());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            super::HarnessesPage::new(state, cx)
-        });
-        window
-            .update(cx, |page, _, cx| {
-                page.harnesses = super::Loadable::Loading;
-                page.sign_in(None, zeron_proto::HarnessId::Codex, cx);
-                assert_eq!(page.expanded_harness, None, "nothing to open yet");
-                page.harnesses =
-                    super::Loadable::Ready(vec![zeron_engine::registry::HarnessDescriptor {
-                        icon: None,
-                        id: zeron_proto::HarnessId::Codex,
-                        name: "Codex".into(),
-                        supports_steering: false,
-                        steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-                        reasoning_levels: Vec::new(),
-                        installed: true,
-                        can_install: false,
-                        enabled: Some(true),
-                        access_modes: Vec::new(),
-                        supports_plan: false,
-                    }]);
-                page.run_pending_sign_in(cx);
-                assert_eq!(page.expanded_harness, Some(zeron_proto::HarnessId::Codex));
-                assert_eq!(
-                    page.accounts_page
-                        .as_ref()
-                        .unwrap()
-                        .read(cx)
-                        .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Codex)
-                );
-                assert_eq!(page.pending_sign_in, None, "started once");
-            })
-            .unwrap();
+    use super::*;
+    #[test]
+    fn only_deepseek_has_install_guidance() {
+        assert_eq!(cli_name(HarnessId::DeepSeek), "dsh");
+        assert!(install_hint(HarnessId::DeepSeek, false, false).contains("SDK"));
+        assert_eq!(cli_name(HarnessId::Codex), "unsupported");
     }
-
-    #[gpui::test]
-    fn expanded_agent_preferences_render_inside_the_agent_row(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
-            gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::default());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| crate::state::AppState::new());
-            super::HarnessesPage::new(state, cx)
-        });
-        let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
-            icon: None,
-            id,
-            name: name.into(),
-            supports_steering: false,
-            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: false,
-            enabled: Some(true),
-            access_modes: Vec::new(),
-            supports_plan: false,
-        };
-        window
-            .update(cx, |page, _, cx| {
-                page.harnesses = super::Loadable::Ready(vec![
-                    descriptor(zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
-                    descriptor(zeron_proto::HarnessId::Codex, "Codex"),
-                ]);
-                page.toggle_agent_details(zeron_proto::HarnessId::ClaudeCode, cx);
-                assert_eq!(
-                    page.expanded_harness,
-                    Some(zeron_proto::HarnessId::ClaudeCode)
-                );
-                assert_eq!(
-                    page.accounts_page
-                        .as_ref()
-                        .unwrap()
-                        .read(cx)
-                        .embedded_harness(),
-                    Some(zeron_proto::HarnessId::ClaudeCode)
-                );
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        window
-            .update(cx, |page, _, cx| {
-                page.toggle_agent_details(zeron_proto::HarnessId::Codex, cx);
-                assert_eq!(page.expanded_harness, Some(zeron_proto::HarnessId::Codex));
-                assert_eq!(
-                    page.accounts_page
-                        .as_ref()
-                        .unwrap()
-                        .read(cx)
-                        .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Codex)
-                );
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        // Antigravity signs in through the very same Accounts section.
-        window
-            .update(cx, |page, _, cx| {
-                page.harnesses = super::Loadable::Ready(vec![descriptor(
-                    zeron_proto::HarnessId::Antigravity,
-                    "Antigravity",
-                )]);
-                page.toggle_agent_details(zeron_proto::HarnessId::Antigravity, cx);
-                assert_eq!(
-                    page.accounts_page
-                        .as_ref()
-                        .unwrap()
-                        .read(cx)
-                        .embedded_harness(),
-                    Some(zeron_proto::HarnessId::Antigravity)
-                );
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-    }
-
-    /// Providers opened on Cloud: its two harnesses, no toggles or installs,
-    /// and the expanded card's accounts follow the Cloud target.
-    #[gpui::test]
-    fn cloud_target_shows_accounts_without_device_controls(cx: &mut gpui::TestAppContext) {
-        use gpui::AppContext;
-        let dir = tempfile::tempdir().unwrap();
-        cx.update(|cx| {
-            crate::settings::init(Default::default(), dir.path(), cx);
-            gpui_base::init(cx);
-            cx.set_global(crate::theme::Theme::default());
-        });
-        let window = cx.add_window(|_, cx| {
-            let state = cx.new(|_| {
-                let mut state = crate::state::AppState::new();
-                state.cloud_status = Some(zeron_proto::CloudStatus {
-                    state: zeron_proto::CloudState::Ready,
-                    device_id: Some("cloud-1".into()),
-                    available: true,
-                    ..Default::default()
-                });
-                state
-            });
-            let mut page = super::HarnessesPage::new(state, cx);
-            page.set_target_device(Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into()), cx);
-            page
-        });
-        let descriptor = |id, name: &str| zeron_engine::registry::HarnessDescriptor {
-            icon: None,
-            id,
-            name: name.into(),
-            supports_steering: false,
-            steering_mode: zeron_proto::SteeringMode::TurnBoundary,
-            reasoning_levels: Vec::new(),
-            installed: true,
-            can_install: true,
-            enabled: Some(true),
-            access_modes: Vec::new(),
-            supports_plan: false,
-        };
-        window
-            .update(cx, |page, _, cx| {
-                assert!(page.targets_cloud());
-                assert!(!page.supports_updates(cx), "Cloud has no harness updates");
-                page.harnesses = super::Loadable::Ready(vec![
-                    descriptor(zeron_proto::HarnessId::ClaudeCode, "Claude Code"),
-                    descriptor(zeron_proto::HarnessId::Codex, "Codex"),
-                ]);
-                page.toggle_agent_details(zeron_proto::HarnessId::Codex, cx);
-                assert!(page.accounts_page.is_some());
-                // Rows count each provider's accounts from the shared list
-                // (drawn below: "1 account" for Claude, "No account" for Codex).
-                let account: zeron_proto::AgentAccount =
-                    serde_json::from_value(serde_json::json!({
-                        "id": "a", "harness": "claude-code", "email": "a@example.com",
-                        "planLabel": null, "active": true
-                    }))
-                    .unwrap();
-                cx.default_global::<crate::settings::accounts::AccountsSnapshotCache>()
-                    .0
-                    .insert(
-                        Some(zeron_proto::CLOUD_ACCOUNTS_DEVICE.into()),
-                        zeron_proto::AgentAccountsSnapshot {
-                            accounts: vec![account],
-                            warnings: Vec::new(),
-                        },
-                    );
-            })
-            .unwrap();
-        cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
-            .unwrap();
-        window
-            .update(cx, |page, _, cx| {
-                page.set_target_device(None, cx);
-                assert!(!page.targets_cloud());
-            })
-            .unwrap();
-    }
-}
-
-#[cfg(test)]
-#[test]
-fn account_counts_read_naturally() {
-    assert_eq!(account_count_label(1), "1 account");
-    assert_eq!(account_count_label(3), "3 accounts");
-}
-
-#[cfg(test)]
-#[test]
-fn install_visibility_and_hint_follow_target_capabilities() {
-    for id in [
-        HarnessId::Antigravity,
-        HarnessId::Codex,
-        HarnessId::Opencode,
-        HarnessId::ClaudeCode,
-        HarnessId::Cursor,
-        HarnessId::Pi,
-        HarnessId::Grok,
-        HarnessId::Hermes,
-        HarnessId::Devin,
-        HarnessId::Mock,
-    ] {
-        for installed in [false, true] {
-            for available in [false, true] {
-                assert_eq!(
-                    offers_install(id, installed, available),
-                    id != HarnessId::Mock && !installed && available
-                );
-            }
-        }
-    }
-    assert_eq!(cli_name(HarnessId::Antigravity), "Antigravity");
-    assert_eq!(
-        install_hint(HarnessId::Antigravity, false, true),
-        "Install Antigravity to enable"
-    );
-    assert!(
-        install_hint(HarnessId::Antigravity, false, false).contains("ANTIGRAVITY_ACP_EXECUTABLE")
-    );
-}
-
-#[cfg(test)]
-#[test]
-fn install_phase_copy_and_cancel_target_match_install() {
-    assert_eq!(install_label("Claude Code"), "Installing Claude Code…");
-    assert_eq!(install_label("Pi"), "Installing Pi…");
-    for target in [None, Some("remote-device".to_string())] {
-        let params = install_params(HarnessId::Pi, &target);
-        assert_eq!(params["harness"], "pi");
-        assert_eq!(
-            params["targetDeviceId"],
-            serde_json::to_value(&target).unwrap()
-        );
-    }
-    assert_eq!(
-        install_hint(HarnessId::Codex, false, false),
-        "Install the codex CLI to enable. Install with `npm install -g @openai/codex`"
-    );
-    assert!(
-        install_hint(HarnessId::Codex, true, false)
-            .starts_with("codex CLI not installed — turn it off or install it.")
-    );
 }

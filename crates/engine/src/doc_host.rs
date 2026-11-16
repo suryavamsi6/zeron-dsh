@@ -904,20 +904,6 @@ impl ChatDocHandle {
         &self.chat_id
     }
 
-    pub(crate) fn commit_voice(
-        &self,
-        transcript: &zeron_proto::voice::VoiceTranscript,
-    ) -> Result<Option<String>, EngineError> {
-        let _owner = lock(&self.transcript_import);
-        zeron_doc::voice::commit_voice_transcript(
-            &self.doc,
-            transcript,
-            &self.device_id,
-            chrono::Utc::now().timestamp_millis(),
-        )
-        .map_err(EngineError::from)
-    }
-
     pub fn doc(&self) -> &SessionDoc {
         &self.doc
     }
@@ -4265,6 +4251,15 @@ impl DocHost {
         payload: SessionCommandPayload,
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
+        match &payload {
+            SessionCommandPayload::Run { request, .. } => {
+                crate::sessions::ensure_run_harness(self.harness_for_request(chat_id, request))?;
+            }
+            SessionCommandPayload::Steer { .. } => {
+                crate::sessions::ensure_run_harness(self.harness_for(chat_id))?;
+            }
+            _ => {}
+        }
         let handle = self.open(chat_id)?;
         // A chat hosted on Cloud: the bytes go to the edge's store first, and
         // the message enters the chat only once they're there.
@@ -6370,6 +6365,7 @@ impl DocHost {
                 message_id,
             } => {
                 let mut request = request.clone();
+                crate::sessions::ensure_run_harness(self.harness_for_request(chat_id, &request))?;
                 // Queued-attachment refs (`pending://`) resolve to this
                 // host's absolute paths before anything persists or
                 // dispatches — the drain already gated on the bytes being
@@ -6823,6 +6819,7 @@ impl DocHost {
         request: zeron_proto::RunRequest,
         message_id: Option<String>,
     ) -> Result<String, EngineError> {
+        crate::sessions::ensure_run_harness(harness)?;
         if let Some(workspace) = self.workspace()
             && let Some(context) = self.capture_source_context(&request.cwd).await
             && let Err(err) = workspace.set_chat_source_context(chat_id, &context)
@@ -8148,7 +8145,7 @@ mod publication_eviction_tests {
             store.clone(),
             DocHostConfig {
                 device_id: "writer".into(),
-                default_harness: HarnessId::Codex,
+                default_harness: HarnessId::DeepSeek,
                 edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
             },
         );
