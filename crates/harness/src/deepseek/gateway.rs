@@ -28,6 +28,16 @@ const LAUNCH_PREFIX: &str = "dsh web: ";
 const LAUNCH_TIMEOUT: Duration = Duration::from_secs(30);
 const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Zeron's own ChatGPT sign-in plugin, loaded into the gateway's profile.
+///
+/// DSH's pi-ai adapter refuses that flow on purpose (`UNSERVED_OAUTH` holds
+/// `openai`, and `models.login` gets no `LoginOptions`), and the API-key flow
+/// already owns `llm-pi-ai/openai`, so a plugin cannot register a flow there
+/// either. This one runs pi-ai's login itself and lets it persist the grant
+/// through the credential seam, which is the only route the shipped adapter
+/// leaves open.
+const CHATGPT_PLUGIN: &str = include_str!("chatgpt.mjs");
+
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
     #[error("the DeepSeek Harness web surface is not installed: {0}")]
@@ -126,6 +136,32 @@ impl Gateway {
             .join("node_modules/@deepseek-ai/dsh/lib/bin.js")
     }
 
+    /// Write the ChatGPT plugin and the patch that inserts it, and answer the
+    /// patch path. The plugin is written beside the home rather than shipped
+    /// as a package: it is Zeron's own, and it must load from the same tree
+    /// the gateway resolves pi-ai from.
+    async fn chatgpt_patch(&self) -> Result<PathBuf, GatewayError> {
+        let directory = self.home.join(".zeron-gateway");
+        tokio::fs::create_dir_all(&directory)
+            .await
+            .map_err(|error| GatewayError::Start(error.to_string()))?;
+        let plugin = directory.join("chatgpt.mjs");
+        tokio::fs::write(&plugin, CHATGPT_PLUGIN)
+            .await
+            .map_err(|error| GatewayError::Start(error.to_string()))?;
+        let patch = directory.join("chatgpt.patch.yml");
+        let body = format!(
+            "- insert:\n    - id: zeron-chatgpt\n      name: {}\n      config:\n        home: {}\n        sdkRoot: {}\n",
+            quoted(&file_url(&plugin)),
+            quoted(&self.home.to_string_lossy()),
+            quoted(&self.sdk_root.to_string_lossy()),
+        );
+        tokio::fs::write(&patch, body)
+            .await
+            .map_err(|error| GatewayError::Start(error.to_string()))?;
+        Ok(patch)
+    }
+
     async fn spawn(&self) -> Result<Session, GatewayError> {
         let bin = self.bin();
         if !bin.is_file() {
@@ -144,6 +180,8 @@ impl Gateway {
             .arg(&bin)
             .arg("--profile")
             .arg("web")
+            .arg("--patch")
+            .arg(self.chatgpt_patch().await?)
             .arg("--host")
             .arg("127.0.0.1")
             .arg("--port")
@@ -278,6 +316,21 @@ fn interpret(status: u16, body: &str) -> Result<Value, GatewayError> {
 
 /// What a service process inherits: enough to find its stores and its own
 /// tools, nothing of the app's environment that could change its behaviour.
+/// A path as the `file:` URL a DSH profile row names a plugin by.
+fn file_url(path: &Path) -> String {
+    let text = path.to_string_lossy().replace('\\', "/");
+    if text.starts_with('/') {
+        format!("file://{text}")
+    } else {
+        format!("file:///{text}")
+    }
+}
+
+/// A YAML scalar holding `value` verbatim, whatever it contains.
+fn quoted(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".into())
+}
+
 fn gateway_environment(home: &Path) -> BTreeMap<OsString, OsString> {
     let allowed = [
         "PATH",

@@ -108,6 +108,14 @@ pub mod methods {
     pub const DSH_CANCEL_SIGN_IN: &str = "DshCancelSignIn";
     pub const DSH_SIGN_OUT: &str = "DshSignOut";
     pub const DSH_DISCOVER_MODELS: &str = "DshDiscoverModels";
+    /// Zeron's own ChatGPT subscription sign-in, served by the plugin Zeron
+    /// loads into DSH's gateway: begun ({} -> the authorize URL and whether a
+    /// flow is already running), cancelled ({}), and its state ({} ->
+    /// `authorized`, `running`, `url`). DSH's own login path refuses this
+    /// provider, so it is Zeron's surface rather than DSH's.
+    pub const DSH_CHATGPT_START: &str = "DshChatgptStart";
+    pub const DSH_CHATGPT_CANCEL: &str = "DshChatgptCancel";
+    pub const DSH_CHATGPT_STATUS: &str = "DshChatgptStatus";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";

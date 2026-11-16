@@ -25,6 +25,9 @@ pub fn handles(method: &str) -> bool {
             | methods::DSH_CANCEL_SIGN_IN
             | methods::DSH_SIGN_OUT
             | methods::DSH_DISCOVER_MODELS
+            | methods::DSH_CHATGPT_START
+            | methods::DSH_CHATGPT_CANCEL
+            | methods::DSH_CHATGPT_STATUS
     )
 }
 
@@ -84,6 +87,11 @@ pub fn translate(
                 "request": field("request").unwrap_or_else(|| json!({})),
             }),
         ),
+        // Zeron's own plugin, loaded into the same gateway: DSH's login path
+        // refuses this provider, so these three are Zeron's surface.
+        methods::DSH_CHATGPT_START => ("zeron-chatgpt/start", json!({})),
+        methods::DSH_CHATGPT_CANCEL => ("zeron-chatgpt/cancel", json!({})),
+        methods::DSH_CHATGPT_STATUS => ("zeron-chatgpt/status", json!({})),
         other => {
             return Err(RpcError::Failed(format!(
                 "{other} is not part of the DeepSeek Harness provider surface"
@@ -148,6 +156,21 @@ mod tests {
         assert_eq!(args["client"]["locale"], "hi");
         assert_eq!(args["client"]["timezoneOffsetSeconds"], 19800);
         assert_eq!(args["client"]["version"], env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn the_chatgpt_sign_in_is_zerons_own_plugin_on_the_same_gateway() {
+        let origin = "http://127.0.0.1:49152";
+        for (method, call) in [
+            (methods::DSH_CHATGPT_START, "zeron-chatgpt/start"),
+            (methods::DSH_CHATGPT_CANCEL, "zeron-chatgpt/cancel"),
+            (methods::DSH_CHATGPT_STATUS, "zeron-chatgpt/status"),
+        ] {
+            assert!(handles(method), "{method} is part of the surface");
+            let (translated, args) = translate(method, &json!({}), origin).unwrap();
+            assert_eq!(translated, call);
+            assert_eq!(args, json!({}), "these three take no arguments");
+        }
     }
 
     #[test]
