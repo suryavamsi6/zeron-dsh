@@ -1,3 +1,4 @@
+pub mod gateway;
 mod normalize;
 #[cfg(test)]
 mod tests;
