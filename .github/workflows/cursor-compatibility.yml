@@ -56,6 +56,6 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: ./.github/actions/linux-ci
         with:
-          rust-cache: core # saved by core-tests in ui-tests.yml
+          rust-cache: core # saved by core-tests-0 in ui-tests.yml
       - name: Harness, engine, sync, update, doc and preview tests
         run: scripts/ci/test-core.sh

@@ -53,7 +53,7 @@ from reuse import matches  # noqa: E402
 # pass is recorded under. Keep in step with the reusable workflows
 # (scripts/tests/test_ci_plan.py checks).
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
-    "core": [("core-tests", "linux")],  # ui-tests.yml
+    "core": [("core-tests-0", "linux"), ("core-tests-1", "linux")],  # ui-tests.yml (one nextest run, two partitions)
     "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
     "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml

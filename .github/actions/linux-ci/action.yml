@@ -58,6 +58,12 @@ runs:
         path: ~/apt-debs/*.deb
         key: apt-debs-v1-${{ inputs.apt-cache }}-${{ hashFiles('scripts/ci/apt-install.sh') }}
 
+    # .cargo/cc-mold.sh links with mold when it is on PATH (the .deb is small,
+    # so it needs no cache of its own) and falls back to cc when it is not.
+    - name: Mold linker
+      shell: bash
+      run: command -v mold >/dev/null 2>&1 || bash scripts/ci/apt-install.sh mold
+
     # Exported for the rest of the job. Tests and the browser fixture are built in
     # the dev profile without debug info (smaller, faster to link). CARGO_* variables
     # are part of the rust-cache key, so every job sharing a cache must set the same.

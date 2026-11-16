@@ -314,7 +314,7 @@ class PriorityAndLockTests(unittest.TestCase):
         # The older lock keeps its runners until it is released; then the newer one goes.
         snap.waiters = [w for w in snap.waiters if w.run_id == 2]
         snap.locked, snap.lock_times = {91}, {91: "2026-10-27T10:05:00Z"}
-        snap.holding = [held_(pr=90, linux=2)]
+        snap.holding = [held_(pr=90, linux=1)]
         self.assertTrue(decide(2, full, snap, big).admit)
 
     def test_an_unverified_claim_is_an_ordinary_run(self):
