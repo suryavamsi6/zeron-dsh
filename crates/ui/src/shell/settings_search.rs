@@ -671,7 +671,7 @@ mod tests {
         // A provider's details draw only once it is expanded, with its data
         // loaded: draw every section they can show, and hold those rows to
         // the same agreement. The provider's own name is not a setting.
-        let harness = zeron_proto::HarnessId::ClaudeCode;
+        let harness = zeron_proto::HarnessId::DeepSeek;
         shell.update(cx, |shell, cx| {
             shell.open_settings(SettingsSection::Harnesses, cx)
         });
