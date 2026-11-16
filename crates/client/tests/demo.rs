@@ -69,7 +69,10 @@ fn front_page_mirrors_the_desktop_sidebar() {
             "chat-blog"
         ]
     );
-    assert_eq!(ids(&ws.archived), ["chat-oklch", "chat-presence"]);
+    assert_eq!(
+        ids(&ws.archived),
+        ["chat-oklch", "chat-presence", "chat-studio-old"]
+    );
     assert_eq!(
         ids(ws.children("chat-veil")),
         ["chat-side-easing", "chat-side"]
@@ -82,7 +85,7 @@ fn front_page_mirrors_the_desktop_sidebar() {
     assert_eq!(veil.project.as_ref().unwrap().name, "zeron");
     assert_eq!(veil.device_name.as_deref(), Some("MacBook Pro"));
     assert!(veil.device_online);
-    assert_eq!(veil.model_label.as_deref(), Some("Fable 5"));
+    assert_eq!(veil.model_label.as_deref(), Some("DeepSeek V4.1 Flash"));
     assert_eq!(veil.branch.as_deref(), Some("veil-fade"));
     assert_eq!(veil.time_label, "now");
     assert_eq!(
@@ -603,38 +606,47 @@ fn sends_to_an_offline_host_park_as_queued_not_working() {
     assert_eq!(row.host_indicator, ChatIndicator::Idle);
 }
 
-/// A provider change goes through only where the chat's host switches
-/// providers; a model change goes through anywhere.
+/// A chat left on a removed provider moves to DeepSeek only where its host
+/// switches providers; a model change goes through anywhere.
 #[test]
 fn provider_switch_needs_a_host_that_switches() {
+    use zeron_proto::HarnessId;
     let (client, _dir) = demo(fast());
-    let switched = |chat: &str| {
+    let migrate = |chat: &str| {
         let mut config = client
             .session_config(chat)
             .expect("demo chats have a config");
-        use zeron_proto::HarnessId;
-        config.harness = if config.harness == HarnessId::Codex {
-            HarnessId::ClaudeCode
-        } else {
-            HarnessId::Codex
-        };
-        config.model = None;
-        (client.set_session_config(chat, &config), config.harness)
+        assert!(!config.harness.is_supported(), "the chat is history");
+        config.harness = HarnessId::DeepSeek;
+        config.model = Some("deepseek-flash".into());
+        client.set_session_config(chat, &config)
     };
     // The Mac advertises provider switching.
-    let (result, harness) = switched("chat-veil");
-    result.expect("a host that switches takes the change");
-    assert_eq!(client.session_config("chat-veil").unwrap().harness, harness);
+    migrate("chat-oklch").expect("a host that switches takes the change");
+    assert_eq!(
+        client.session_config("chat-oklch").unwrap().harness,
+        HarnessId::DeepSeek
+    );
     // The studio's engine predates it: the chat keeps its provider.
-    let before = client.session_config("chat-blog").unwrap();
-    let (result, _) = switched("chat-blog");
-    let error = result.expect_err("an older host refuses").to_string();
+    let before = client.session_config("chat-studio-old").unwrap();
+    let error = migrate("chat-studio-old")
+        .expect_err("an older host refuses")
+        .to_string();
     assert!(error.contains("newer Zeron"), "{error}");
-    assert_eq!(client.session_config("chat-blog").unwrap(), before);
+    assert_eq!(client.session_config("chat-studio-old").unwrap(), before);
     // A model change on the same provider is not a switch.
-    let mut model = before.clone();
-    model.model = Some("another-model".into());
+    let mut model = client.session_config("chat-blog").unwrap();
+    assert_eq!(model.harness, HarnessId::DeepSeek);
+    model.model = Some("deepseek-v4-pro".into());
     client.set_session_config("chat-blog", &model).unwrap();
+    // A config naming a removed provider cannot be written at all.
+    let mut legacy = model.clone();
+    legacy.harness = HarnessId::Codex;
+    let error = client
+        .set_session_config("chat-blog", &legacy)
+        .expect_err("removed providers are read-only")
+        .to_string();
+    assert!(error.contains("read-only"), "{error}");
 }
 
 /// The Activity view's data: a wait reads as Waiting (stoppable when it's a
