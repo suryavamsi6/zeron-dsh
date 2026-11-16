@@ -71,24 +71,20 @@ impl Gateway {
         }
     }
 
+    /// The address a service that may have to be started answers on: a call
+    /// that needs a callback origin (a sign-in) asks for it before it calls.
+    pub async fn origin(&self) -> Result<String, GatewayError> {
+        Ok(self.endpoint().await?.0)
+    }
+
     /// Call one gateway method with its argument object.
     pub async fn call(&self, method: &str, args: Value) -> Result<Value, GatewayError> {
-        let mut guard = self.session.lock().await;
-        if guard
-            .as_mut()
-            .is_some_and(|session| !matches!(session.child.try_wait(), Ok(None)))
-        {
-            *guard = None;
-        }
-        if guard.is_none() {
-            *guard = Some(self.spawn().await?);
-        }
-        let session = guard.as_ref().expect("spawned above");
+        let (base, cookie) = self.endpoint().await?;
         let body = request_body(method, args);
         let response = self
             .http
-            .post(format!("{}/api/{method}", session.base))
-            .header(reqwest::header::COOKIE, &session.cookie)
+            .post(format!("{base}/api/{method}"))
+            .header(reqwest::header::COOKIE, cookie)
             .json(&body)
             .send()
             .await
@@ -107,6 +103,22 @@ impl Gateway {
         if let Some(mut session) = guard.take() {
             let _ = session.child.kill().await;
         }
+    }
+
+    /// The running service's address and cookie, starting one when needed.
+    async fn endpoint(&self) -> Result<(String, String), GatewayError> {
+        let mut guard = self.session.lock().await;
+        if guard
+            .as_mut()
+            .is_some_and(|session| !matches!(session.child.try_wait(), Ok(None)))
+        {
+            *guard = None;
+        }
+        if guard.is_none() {
+            *guard = Some(self.spawn().await?);
+        }
+        let session = guard.as_ref().expect("spawned above");
+        Ok((session.base.clone(), session.cookie.clone()))
     }
 
     fn bin(&self) -> PathBuf {

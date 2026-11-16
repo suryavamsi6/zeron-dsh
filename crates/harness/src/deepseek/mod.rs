@@ -134,6 +134,17 @@ impl DeepSeekHarness {
     pub fn discover() -> Self {
         Self::new()
     }
+
+    /// Where the pinned SDK lives, as the gateway service is started from it.
+    pub fn sdk_root(&self) -> &Path {
+        &self.sdk_root
+    }
+
+    /// The harness home: one store of settings and credentials for this
+    /// device, read by every session and by the service that configures them.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
 }
 
 impl Default for DeepSeekHarness {
