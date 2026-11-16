@@ -14850,7 +14850,7 @@ mod tests {
         cx.update(|cx| {
             crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
                 settings.skill_completion_by_harness.insert(
-                    HarnessId::Opencode,
+                    HarnessId::DeepSeek,
                     crate::settings::SkillCompletionSettings {
                         dollar: true,
                         separate_from_slash: true,
@@ -14918,7 +14918,7 @@ mod tests {
         cx.run_until_parked();
         composer.read_with(cx, |composer, _| {
             assert_eq!(visible_names(composer), current_names);
-            assert_eq!(composer.slash.harness, Some(HarnessId::Opencode));
+            assert_eq!(composer.slash.harness, Some(HarnessId::DeepSeek));
         });
 
         // Acceptance, ordinary prose and changing trigger characters must all

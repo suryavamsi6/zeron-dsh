@@ -263,9 +263,9 @@ mod delegation_tests {
             .unwrap();
     }
 
-    /// A device that can't answer still shows the section for an agent that
-    /// could switch: the row says why (an older engine: update it), and its
-    /// switch stays put.
+    /// A device that can't answer still maps its error to a sentence. No
+    /// runtime this build runs switches native subagents, so no provider
+    /// shows the section at all.
     #[gpui::test]
     fn native_subagents_say_why_a_device_cannot_switch(cx: &mut gpui::TestAppContext) {
         let update = "Update Zeron on the selected device to change this.";
@@ -284,16 +284,20 @@ mod delegation_tests {
         window
             .update(cx, |page, _, cx| {
                 page.native_subagents = Loadable::Error(update.into());
-                assert_eq!(
-                    page.native_subagents_row(HarnessId::ClaudeCode),
-                    Some((true, false, update.to_string()))
-                );
-                assert_eq!(page.native_subagents_row(HarnessId::Codex), None);
-                assert!(
-                    page.render_native_subagents_for(HarnessId::ClaudeCode, &Theme::default(), cx)
-                        .is_some()
-                );
-                page.toggle_native_subagents(HarnessId::ClaudeCode, cx);
+                // The one runtime keeps its subagents to itself: no row, no
+                // section, and a toggle sends nothing.
+                for harness in [
+                    HarnessId::DeepSeek,
+                    HarnessId::ClaudeCode,
+                    HarnessId::Codex,
+                ] {
+                    assert_eq!(page.native_subagents_row(harness), None);
+                    assert!(
+                        page.render_native_subagents_for(harness, &Theme::default(), cx)
+                            .is_none()
+                    );
+                    page.toggle_native_subagents(harness, cx);
+                }
                 assert!(
                     matches!(&page.native_subagents, Loadable::Error(error) if error == update),
                     "an inert switch sends nothing"
