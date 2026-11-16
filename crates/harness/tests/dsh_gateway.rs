@@ -118,6 +118,34 @@ async fn the_provider_surface_answers_over_the_gateway() {
         .expect("status after cancel");
     assert_eq!(after["running"], false, "cancel leaves nothing running");
 
+    // A credential written here lands in the store a session reads: the shim's
+    // shared home points `credentials` at exactly this file, which is what
+    // makes a provider configured in the app the provider the next run uses.
+    gateway
+        .call(
+            "credentials/set",
+            serde_json::json!({ "ref": "OPENCODE_API_KEY", "value": "synthetic-not-a-key" }),
+        )
+        .await
+        .expect("the credential is stored");
+    let store = std::fs::read_to_string(home.path().join(".credentials.yaml"))
+        .expect("the shared credential store is the one the gateway writes");
+    assert!(
+        store.contains("OPENCODE_API_KEY"),
+        "the ref is in the shared store: {store}"
+    );
+    let described = gateway
+        .call(
+            "credentials/describe",
+            serde_json::json!({ "refs": ["OPENCODE_API_KEY"] }),
+        )
+        .await
+        .expect("the credential describes");
+    assert_eq!(
+        described["OPENCODE_API_KEY"]["configured"], true,
+        "and reads back as configured: {described}"
+    );
+
     // The service outlives no test: shut it down and prove the next call
     // starts a fresh one rather than answering a dead port.
     gateway.shutdown().await;
