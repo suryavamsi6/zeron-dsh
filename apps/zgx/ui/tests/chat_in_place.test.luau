@@ -236,10 +236,12 @@ test("the catalog changing keeps the composer, its draft and the keys", function
 	settle(app)
 	expect(`field @{node(app, "textbox \"Message\"")}`).to_be(`field @{field}`)
 	expect((app:tree():match("[^\n]*textbox \"Message\"[^\n]*")) or "").to_contain("focused")
-	-- The new agent's model is there to pick.
+	-- The new model is there to pick.
 	app:click('role:button "Model"')
 	settle(app)
-	expect(app:has('role:tab "Codex"')).to_be(true)
+	app:click(".folded")
+	settle(app)
+	expect(app:has('role:option "DeepSeek V4 Pro Max"')).to_be(true)
 end)
 
 test("a catalog with no agents shows the picker without failing", function()
@@ -251,10 +253,16 @@ test("a catalog with no agents shows the picker without failing", function()
 	app:click('role:button "Model"')
 	settle(app)
 	expect(app:error()).to_be_nil()
+	-- A retired provider's models in the catalog: none of them offered.
+	app:command("catalog_retired")
+	settle(app)
+	expect(app:error()).to_be_nil()
+	expect(app:has('role:option "GPT-5.5"')).to_be(false)
+	-- The one runtime's model, as it comes: there to pick.
 	app:command("catalog_grows")
 	settle(app)
 	expect(app:error()).to_be_nil()
-	expect(app:has('role:tab "Codex"')).to_be(true)
+	expect(app:has('role:option "DeepSeek V4 Pro Max"')).to_be(true)
 end)
 
 -- A node's box, by a pattern on its line: x, y, w, h.
@@ -520,7 +528,7 @@ test("long messages open folded, never at their whole height first; a click ease
 	app:click(`role:button "Expand message"[{n}]`)
 	local seen: { number } = {}
 	for _ = 1, 30 do
-		app:wait("#never-shown", { timeout_ms = 16 })
+		app:frames(1)
 		local hs = bubbles(app)
 		table.insert(seen, hs[#hs])
 	end

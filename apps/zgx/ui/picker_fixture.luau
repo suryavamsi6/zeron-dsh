@@ -1,7 +1,9 @@
--- A model picker on the two DeepSeek models, for
--- tests/model_picker_in_place.test.luau: both with reasoning at the same
--- levels. The model chosen is `test_picker_model`. Here, beside app.luau,
--- as a mounted script loads modules from its own directory down.
+-- A model picker on models made up here, for
+-- tests/model_picker_in_place.test.luau and tests/model_picker_motion.test.luau:
+-- two with reasoning at the same levels, one with five, one with none, and
+-- one configured in place (its lead and sidekick are options). The model
+-- chosen is `test_picker_model`. Here, beside app.luau, as a mounted script
+-- loads modules from its own directory down.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -25,6 +27,20 @@ local FIVE: { EffortSlider.Level } = {
 local MODELS: { ModelPicker.Model } = {
 	{ value = "deepseek/deepseek-flash", label = "DeepSeek V4.1 Flash", harness = "deepseek", efforts = THREE, effort = "high" },
 	{ value = "deepseek/deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek", efforts = THREE, effort = "high" },
+	{ value = "deepseek/deepseek-v4-pro-max", label = "DeepSeek V4 Pro Max", harness = "deepseek", efforts = FIVE, effort = "medium" },
+	{ value = "deepseek/deepseek-lite", label = "DeepSeek Lite", harness = "deepseek" },
+	{
+		value = "deepseek/deepseek-v4-pro-tuned",
+		label = "DeepSeek V4 Pro Tuned",
+		harness = "deepseek",
+		efforts = THREE,
+		effort = "high",
+		fast = true,
+		options = {
+			{ id = "sidekick", label = "Sidekick", default = "swe-medium", choices = { { id = "swe-medium", label = "SWE-2 Medium" }, { id = "swe-high", label = "SWE-2 High" } } },
+			{ id = "lead", label = "Lead", default = "fable", choices = { { id = "fable", label = "Fable 5.1" }, { id = "sol", label = "GPT-6 Sol" } } },
+		},
+	},
 }
 
 -- What the picker's panel, and what opens out with its list, have looked

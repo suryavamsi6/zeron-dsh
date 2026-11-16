@@ -2043,29 +2043,33 @@ mod tests {
     #[test]
     fn a_device_lists_only_agents_that_sign_in_and_report_usage() {
         let value = device_accounts_value(&[
-            json!({ "id": "a", "harness": "claude-code", "email": "a@example.test", "active": true, "switchable": true,
+            json!({ "id": "a", "harness": "deepseek", "email": "a@example.test", "active": true, "switchable": true,
                 "planLabel": "Max", "usageWindows": [{ "label": "Week", "usedFraction": 1.4 }] }),
-            json!({ "id": "b", "harness": "antigravity", "active": true, "switchable": true }),
-            json!({ "id": "c", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
-            json!({ "id": "d", "harness": "acp.someone", "active": true }),
+            json!({ "id": "b", "harness": "claude-code", "email": "b@example.test", "active": true, "switchable": true }),
+            json!({ "id": "c", "harness": "antigravity", "active": true, "switchable": true }),
+            json!({ "id": "d", "harness": "hermes", "active": true, "switchable": true, "usageError": "no" }),
+            json!({ "id": "e", "harness": "acp.someone", "active": true }),
         ]);
-        let Value::Map(_) = &value else { panic!("a record") };
-        let rows = value.field("claude-code").expect("claude").list().to_vec();
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].field("email").map(text).as_deref(), Some("a@example.test"));
-        assert!(rows[0].field("can_switch").is_some_and(Value::truthy));
-        let windows = rows[0].field("windows").unwrap().list().to_vec();
-        assert_eq!(windows[0].field("used").and_then(Value::as_f64), Some(1.0));
-        assert!(value.field("antigravity").is_none());
-        assert!(value.field("acp.someone").is_none());
-        // Hermes rotates its own logins: listed, not switched.
-        let hermes = value.field("hermes").expect("hermes").list().to_vec();
-        assert!(!hermes[0].field("can_switch").is_some_and(Value::truthy));
-        assert_eq!(hermes[0].field("error").map(text).as_deref(), Some("no"));
+        let Value::Map(rows) = &value else { panic!("a record") };
+        // DeepSeek signs in but reports no plan usage, so no agent is listed
+        // at all; the legacy ones are refused outright.
+        assert!(rows.is_empty(), "{rows:?}");
     }
 
     #[test]
-    fn a_per_provider_agents_accounts_group_by_provider() {
+    fn a_legacy_per_provider_agents_accounts_group_but_are_refused() {
+        // DeepSeek is the one agent with a provider of its own: its accounts
+        // group under it, with the API key Zeron adds for it.
+        let deepseek = harness_id("deepseek").unwrap();
+        let groups = provider_groups(deepseek, &[json!({ "id": "d1", "harness": "deepseek", "active": true })]);
+        let shape: Vec<(&str, &str, Vec<usize>, Option<&str>, Option<&str>)> = groups
+            .iter()
+            .map(|g| (g.provider.as_str(), g.name.as_str(), g.rows.clone(), g.login.as_deref(), g.key.as_deref()))
+            .collect();
+        assert_eq!(shape, [("deepseek", "DeepSeek", vec![0], None, Some("DeepSeek"))]);
+        // A legacy agent that kept a login per model provider is refused: its
+        // accounts still group by the provider they name, but no group offers
+        // a sign-in or a key, and none has a name of its own.
         let pi = harness_id("pi").unwrap();
         let accounts = [
             json!({ "id": "c1", "harness": "pi", "provider": "anthropic", "active": true }),
@@ -2078,19 +2082,11 @@ mod tests {
             .iter()
             .map(|g| (g.provider.as_str(), g.name.as_str(), g.rows.clone(), g.login.as_deref(), g.key.as_deref()))
             .collect();
-        assert_eq!(&shape[..3], &[
-            // Zeron's own sign-ins first, in their order (Anthropic takes
-            // a Claude sign-in and an API key alike)…
-            ("openai-codex", "ChatGPT", vec![1, 2], Some("ChatGPT"), None),
-            ("anthropic", "Anthropic", vec![0], Some("Claude"), Some("Anthropic")),
-            // …one without accounts yet is one to add…
-            ("github-copilot", "GitHub Copilot", vec![], Some("GitHub Copilot"), None),
+        assert_eq!(&shape[..], &[
+            ("anthropic", "Unsupported legacy provider", vec![0], None, None),
+            ("openai-codex", "Unsupported legacy provider", vec![1, 2], None, None),
+            ("kimi-coding", "Unsupported legacy provider", vec![3], None, None),
         ]);
-        // …then the providers it adds keys for…
-        assert!(shape.iter().any(|g| g.0 == "openrouter" && g.4 == Some("OpenRouter") && g.2.is_empty()));
-        // …then one it adds neither to, its accounts still listed.
-        let kimi = shape.last().unwrap();
-        assert_eq!((kimi.0, kimi.2.clone(), kimi.3, kimi.4), ("kimi-coding", vec![3], None, None));
         // An older engine's row, naming no provider: the first group's.
         let old = provider_groups(pi, &[json!({ "id": "x", "harness": "pi" })]);
         assert_eq!(old[0].rows, [0]);
@@ -2098,26 +2094,19 @@ mod tests {
 
     #[test]
     fn a_device_says_each_accounts_provider_where_its_agent_keeps_one_per_provider() {
+        // No agent keeps a login per model provider any more: an account is
+        // never filed under one, and `agents.logins` offers none to pick.
         let value = device_accounts_value(&[
             json!({ "id": "o1", "harness": "pi", "provider": "openai-codex", "active": true, "switchable": true }),
-            json!({ "id": "g1", "harness": "pi", "provider": "github-copilot", "active": true, "switchable": true }),
             json!({ "id": "x1", "harness": "grok", "provider": "issuer", "active": true, "switchable": true }),
         ]);
-        let pi = value.field("pi").expect("pi").list().to_vec();
-        assert_eq!(pi[0].field("provider").map(text).as_deref(), Some("openai-codex"));
-        assert_eq!(pi[0].field("group").map(text).as_deref(), Some("ChatGPT"));
-        assert_eq!(pi[1].field("group").map(text).as_deref(), Some("GitHub Copilot"));
-        // (Grok's issuer is no model provider: one group.)
-        let grok = value.field("grok").expect("grok").list().to_vec();
-        assert!(grok[0].field("provider").is_none());
-        // Each per-provider agent's providers, for the Account row to offer.
+        assert!(value.field("pi").is_none());
+        assert!(value.field("grok").is_none());
+        // Each per-provider agent's providers, for the Account row to offer:
+        // none, not even DeepSeek's one.
         let logins = logins_value();
-        let pi_logins = logins.field("pi").expect("pi");
-        let copilot = pi_logins.field("github-copilot").expect("copilot");
-        assert_eq!(copilot.field("login").map(text).as_deref(), Some("GitHub Copilot"));
-        let openrouter = pi_logins.field("openrouter").expect("openrouter");
-        assert_eq!(openrouter.field("key").map(text).as_deref(), Some("OpenRouter"));
-        assert!(!openrouter.field("login").is_some_and(|v| v.truthy()));
+        assert!(logins.field("pi").is_none());
+        assert!(logins.field("deepseek").is_none());
         assert!(logins.field("claude-code").is_none());
     }
 

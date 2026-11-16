@@ -6689,14 +6689,14 @@ mod tests {
     fn another_devices_catalog_is_the_composers_and_names_its_device() {
         let chats = Rc::new(Chats::default());
         *chats.here.borrow_mut() = Some("mac".into());
-        *chats.harnesses.borrow_mut() = vec![json!({ "id": "codex", "name": "Codex" })];
-        chats.models.borrow_mut().insert("codex".into(), vec![json!({ "id": "gpt", "label": "GPT" })]);
+        *chats.harnesses.borrow_mut() = vec![json!({ "id": "deepseek", "name": "DeepSeek" })];
+        chats.models.borrow_mut().insert("deepseek".into(), vec![json!({ "id": "deepseek-v4-pro", "label": "DeepSeek V4 Pro" })]);
         let local = chats.catalog_value();
         assert!(local.field("device").is_none());
         // On the box: its agents, once listed (looking until then).
         *chats.remote.borrow_mut() = Some(Remote {
             device: "box".into(),
-            harnesses: vec![json!({ "id": "claude-code", "name": "Claude Code" })],
+            harnesses: vec![json!({ "id": "deepseek", "name": "DeepSeek" })],
             models: HashMap::new(),
             ready: false,
         });
@@ -6704,16 +6704,19 @@ mod tests {
         assert!(matches!(waiting.field("state"), Some(Value::Str(s)) if s.as_ref() == "looking"));
         assert!(matches!(waiting.field("device"), Some(Value::Str(s)) if s.as_ref() == "box"));
         if let Some(r) = chats.remote.borrow_mut().as_mut() {
-            r.models.insert("claude-code".into(), vec![json!({ "id": "opus", "label": "Opus" })]);
+            r.models.insert("deepseek".into(), vec![json!({ "id": "deepseek-flash", "label": "DeepSeek Flash" })]);
             r.ready = true;
         }
         let there = chats.catalog_value();
         let Some(Value::List(harnesses)) = there.field("harnesses") else { panic!("harnesses") };
         assert_eq!(harnesses.len(), 1);
-        assert!(matches!(harnesses[0].field("id"), Some(Value::Str(s)) if s.as_ref() == "claude-code"));
+        assert!(matches!(harnesses[0].field("id"), Some(Value::Str(s)) if s.as_ref() == "deepseek"));
+        // The box's models, not this device's.
+        let Some(Value::List(models)) = there.field("models") else { panic!("models") };
+        assert!(matches!(models[0].field("value"), Some(Value::Str(s)) if s.as_ref() == "deepseek/deepseek-flash"));
         // Labels: this device's, else the box's.
-        assert_eq!(chats.label_of("codex", Some("gpt")).as_deref(), Some("GPT"));
-        assert_eq!(chats.label_of("claude-code", Some("opus")).as_deref(), Some("Opus"));
+        assert_eq!(chats.label_of("deepseek", Some("deepseek-v4-pro")).as_deref(), Some("DeepSeek V4 Pro"));
+        assert_eq!(chats.label_of("deepseek", Some("deepseek-flash")).as_deref(), Some("DeepSeek Flash"));
         // Back here: this device's again.
         chats.catalog_on("mac");
         assert!(chats.remote.borrow().is_none());

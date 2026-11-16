@@ -237,8 +237,8 @@ chat_store.send = function(req: any): any
 end
 store.catalog:set({
 	state = "ready",
-	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
-	models = { { value = "opus", label = "Opus", harness = "claude-code" } },
+	harnesses = { { id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" } },
+	models = { { value = "deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek" } },
 } :: any)
 
 local HOUR = 3600

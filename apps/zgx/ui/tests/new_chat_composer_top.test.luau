@@ -68,7 +68,7 @@ test("what a draft grows it down to still takes the pointer, and a send goes as 
 	-- (The footer's chips stand below where it was empty: past its row.)
 	app:click('role:button "Model"')
 	app:frames(20)
-	expect(app:has('role:option "Sonnet"') or app:has('~"Reasoning"') or app:has('~"REASONING"')).to_be(true)
+	expect(app:has('role:option "DeepSeek V4.1 Flash"') or app:has('~"Reasoning"') or app:has('~"REASONING"')).to_be(true)
 	app:key("Escape")
 	app:frames(30)
 	app:click('role:button "Send message"')
