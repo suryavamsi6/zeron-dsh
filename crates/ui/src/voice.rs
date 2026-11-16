@@ -31,8 +31,6 @@ pub struct VoiceController {
     epoch: u64,
     task: Option<Task<()>>,
     cancellation: tokio_util::sync::CancellationToken,
-    /// This call played its start sound and owes its end sound.
-    cued: bool,
 }
 impl Default for VoiceController {
     fn default() -> Self {
@@ -53,7 +51,6 @@ impl Default for VoiceController {
             epoch: 0,
             task: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
-            cued: false,
         }
     }
 }
@@ -76,7 +73,6 @@ impl VoiceController {
         self.chat_id = None;
         self.controls = None;
         self.task = None;
-        self.cued = false;
     }
 
     /// A session is underway (including its preparation and native stop).
@@ -298,18 +294,6 @@ mod tests {
     fn remote_voice_is_never_offered_without_a_host_contract() {
         let voice = VoiceController::default();
         assert!(!voice.offered());
-    }
-
-    #[test]
-    fn only_a_hang_up_or_a_connected_call_sounds_its_end() {
-        let mut voice = VoiceController::default();
-        assert!(!voice.end_sounds(), "no call was placed");
-        voice.cued = true;
-        assert!(voice.end_sounds(), "hanging up while connecting");
-        voice.reason = Some(VoiceRejection::Busy);
-        assert!(!voice.end_sounds(), "a failure to connect stays quiet");
-        voice.active_since = Some(std::time::Instant::now());
-        assert!(voice.end_sounds(), "a connected call that drops");
     }
 
     #[gpui::test]
