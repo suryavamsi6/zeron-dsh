@@ -799,8 +799,8 @@ mod tests {
         registry.register_lazy(
             HarnessDescriptor {
                 icon: None,
-                id: HarnessId::Mock,
-                name: "Lazy Mock".into(),
+                id: HarnessId::DeepSeek,
+                name: "Lazy DeepSeek".into(),
                 supports_steering: true,
                 steering_mode: SteeringMode::StepBoundary,
                 reasoning_levels: vec![],
@@ -818,7 +818,7 @@ mod tests {
         );
         let listed = registry.descriptors();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "Lazy Mock");
+        assert_eq!(listed[0].name, "Lazy DeepSeek");
         // The listing runs the probe, not the stored placeholder.
         assert!(!listed[0].installed);
         assert_eq!(
@@ -826,7 +826,7 @@ mod tests {
             0,
             "listing must not force a resolve"
         );
-        assert!(registry.resolve(HarnessId::Mock).is_err());
+        assert!(registry.resolve(HarnessId::DeepSeek).is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 

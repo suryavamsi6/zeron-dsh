@@ -32,7 +32,7 @@ struct RecordingHarness {
 #[async_trait]
 impl Harness for RecordingHarness {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        HarnessId::DeepSeek
     }
     fn display_name(&self) -> &str {
         "Recorder"
@@ -57,7 +57,7 @@ impl Harness for RecordingHarness {
         self.cwds.lock().unwrap().push(request.cwd.clone());
         let events: Vec<Result<AgentEvent, HarnessError>> = vec![
             Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
+                harness: HarnessId::DeepSeek,
                 model: "mock-1".into(),
                 tools: vec![],
                 cwd: request.cwd.clone(),
@@ -198,7 +198,7 @@ async fn check_worktree_setup_and_reuse(use_project_symlink: bool, test_setup: b
     let core = EngineCore::assemble(
         &tmp_path.join("data"),
         Arc::new(registry),
-        HarnessId::Mock,
+        HarnessId::DeepSeek,
         None,
     )
     .expect("engine core assembles");

@@ -458,6 +458,7 @@ mod tests {
         }
     }
 
+    #[cfg(debug_assertions)]
     #[tokio::test]
     async fn configured_title_harness_and_model_run_outside_the_project() {
         let dir = tempfile::tempdir().unwrap();

@@ -6518,7 +6518,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Harness for FeedHarness {
         fn id(&self) -> HarnessId {
-            HarnessId::Mock
+            HarnessId::DeepSeek
         }
         fn display_name(&self) -> &str {
             "Feed"
@@ -6567,15 +6567,15 @@ mod tests {
         }));
         let dir = tempfile::tempdir().unwrap();
         let core =
-            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::DeepSeek, None)
                 .unwrap();
         let chat = "chat-sink-spin";
         core.sessions
-            .dispatch(chat, HarnessId::Mock, request(), None)
+            .dispatch(chat, HarnessId::DeepSeek, request(), None)
             .await
             .unwrap();
         feed.send(AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
+            harness: HarnessId::DeepSeek,
             model: "mock-1".into(),
             tools: vec![],
             cwd: "/tmp".into(),
@@ -6640,11 +6640,11 @@ mod tests {
         }));
         let dir = tempfile::tempdir().unwrap();
         let core =
-            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::DeepSeek, None)
                 .unwrap();
         let chat = "chat-lanes";
         core.sessions
-            .dispatch(chat, HarnessId::Mock, request(), None)
+            .dispatch(chat, HarnessId::DeepSeek, request(), None)
             .await
             .unwrap();
         let call = |id: &str, name: &str| AgentEvent::ToolCall {
@@ -6742,7 +6742,7 @@ mod tests {
 
     fn started() -> AgentEvent {
         AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
+            harness: HarnessId::DeepSeek,
             model: "m".into(),
             tools: vec![],
             cwd: "/tmp".into(),
@@ -6970,7 +6970,7 @@ mod tests {
     #[async_trait::async_trait]
     impl Harness for WakeHarness {
         fn id(&self) -> HarnessId {
-            HarnessId::Mock
+            HarnessId::DeepSeek
         }
         fn display_name(&self) -> &str {
             "Wake"
@@ -7029,10 +7029,10 @@ mod tests {
         }));
         let dir = tempfile::tempdir().unwrap();
         let core =
-            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::Mock, None)
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::DeepSeek, None)
                 .unwrap();
         core.sessions
-            .dispatch(chat, HarnessId::Mock, request(), None)
+            .dispatch(chat, HarnessId::DeepSeek, request(), None)
             .await
             .unwrap();
         feed.send(started()).unwrap();
