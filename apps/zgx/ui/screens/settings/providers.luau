@@ -481,18 +481,43 @@ local function account_row(agent_id: string, account: any): Node
 			if account.key then
 				return nil
 			end
-			return `Session {pct(account.session)} · Week {pct(account.week)}`
+			local line = `Session {pct(account.session)} · Week {pct(account.week)}`
+			-- A Codex account banks resets: how many are left, as the upstream
+			-- screen says ("1 reset banked").
+			local banked = tonumber(account.banked) or 0
+			if banked > 0 then
+				line = `{line} · {ui.t("settings.providers.accounts.banked", { count = banked }):get()}`
+			end
+			return line
 		end,
-		control = ui.show(function(): boolean
-			return account.switchable == true and account.active ~= true
-		end, ds.Button {
-			ui.t("settings.providers.accounts.use"),
-			size = "sm",
-			tone = "secondary",
-			on_click = function()
-				agents.switch_on(agents.now:get().target or "", agent_id, account.id)
-			end,
-		}),
+		control = ui.column {
+			gap = "$space.1",
+			items = "end",
+			-- The soonest-to-expire reset spends first, as the upstream does.
+			ui.show(function(): boolean
+				return account.banked ~= nil and (tonumber(account.banked) or 0) > 0
+			end, ds.Button {
+				ui.t("settings.providers.accounts.use_reset"),
+				size = "sm",
+				tone = "secondary",
+				on_click = function()
+					local first = (account.resets or {})[1]
+					if first then
+						agents.use_reset(account.id, first.id)
+					end
+				end,
+			}),
+			ui.show(function(): boolean
+				return account.switchable == true and account.active ~= true
+			end, ds.Button {
+				ui.t("settings.providers.accounts.use"),
+				size = "sm",
+				tone = "secondary",
+				on_click = function()
+					agents.switch_on(agents.now:get().target or "", agent_id, account.id)
+				end,
+			}),
+		},
 	}
 end
 

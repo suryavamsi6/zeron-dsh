@@ -1704,7 +1704,9 @@
         "description": "The accounts this device's agents are signed in with, and what each plan is using.",
         "in_use": "In use",
         "use": "Use",
-        "add": "Add account"
+        "add": "Add account",
+        "banked": "{count} reset banked",
+        "use_reset": "Use reset"
       }
     },
     "devices": {

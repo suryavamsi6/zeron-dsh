@@ -1024,8 +1024,10 @@ test("Providers lists the agents' accounts with their plans", function()
 	local app = open("Providers")
 	expect(shows(app, PAGE, "d@example.com")).to_be(true)
 	expect(shows(app, PAGE, "ChatGPT Plus")).to_be(true)
-	expect(shows(app, PAGE, "Session 1% · Week 22%")).to_be(true)
+	expect(shows(app, PAGE, "Session 1% · Week 22% · 1 reset banked")).to_be(true)
 	expect(shows(app, PAGE, "Add account")).to_be(true)
+	-- The banked reset is a button, as the upstream screen's is.
+	expect(shows(app, PAGE, "Use reset")).to_be(true)
 end)
 
 -- The route DSH runs by default says so, as the upstream screen marks it.

@@ -569,7 +569,16 @@ local function agents_of(target: string?): any
 				-- One signed-in account, so the page's accounts section has a
 				-- row to show (its plan, its two windows).
 				accounts = {
-					{ id = "a1", email = "d@example.com", plan = "ChatGPT Plus", session = 0.01, week = 0.22, active = true },
+					{
+						id = "a1",
+						email = "d@example.com",
+						plan = "ChatGPT Plus",
+						session = 0.01,
+						week = 0.22,
+						active = true,
+						banked = 1,
+						resets = { { id = "r1", title = "Reset" } },
+					},
 				},
 			},
 		},
