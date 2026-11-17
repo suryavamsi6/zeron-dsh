@@ -29,6 +29,8 @@ store.catalog:set {
 	models = {
 		{ value = "deepseek-flash", label = "DeepSeek V4.1 Flash", harness = "deepseek", efforts = EFFORT, effort = "high" },
 		{ value = "deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek", efforts = EFFORT, effort = "medium" },
+		-- A model the gateway's routes list: its provider rides with it.
+		{ value = "deepseek/gpt-6-luna", label = "GPT-6 Luna", harness = "deepseek", efforts = EFFORT, effort = "high", provider = { id = "openai", name = "OpenAI" } },
 	},
 }
 
@@ -53,10 +55,13 @@ end
 local TRANSCRIPTS: { [string]: { any } } = {
 	s1 = long(30),
 	s2 = { { id = "x1", role = "user", text = "Hello there" }, { id = "x2", role = "assistant", text = "Hi! What shall we work on?", model = "Opus" } },
+	s3 = { { id = "y1", role = "user", text = "Hi" } },
 }
 local META: { [string]: any } = {
 	s1 = { title = "Long chat", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false },
 	s2 = { title = "Short chat", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "edits", plan = false },
+	-- A chat saved on a gateway model, before its route rode with it.
+	s3 = { title = "Gateway chat", project = "atlas", model = "deepseek/gpt-6-luna", effort = "high", access = "full", plan = false },
 }
 
 -- What the page asked of the host, in order (`calls`).
@@ -320,6 +325,9 @@ ui.command {
 }
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	if req.model_options and req.model_options.provider then
+		note(`send_provider:{req.model_options.provider}`)
+	end
 	-- A send carries no time of its own: the host starts its clock when it
 	-- gets it (a message held back goes with its week starting then).
 	if req.at or req.issued_at or req.sent_at or req.expires_at then

@@ -24,6 +24,8 @@ end
 local function greeter(app: any): any
 	app:command("plugin_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
 	app:click(TAB)
 	app:frames(30)
 	return app
@@ -74,6 +76,8 @@ test("a plugin's page is listed under Plugins while it's on, and goes when it's 
 	expect(heading ~= nil and heading < tab and tab < zeron and zeron < about).to_be(true)
 	expect(app:tree(TAB)).to_contain('text "G"')
 	-- Drawn by Zeron from what it declares: its sections and every kind.
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
 	app:click(TAB)
 	app:frames(30)
 	for _, part in { 'heading "Greeter"', 'heading "Greeting"', 'heading "More"', 'switch "Show the greeting"', 'textbox "Greeting"', 'radio "Excited"', 'button "Where it shows"', 'textbox "Greet again every"', 'button "Choose Postcards folder"' } do
@@ -128,6 +132,8 @@ test("what's set goes to the host and stays, in place, off and on again", functi
 	app:frames(20)
 	app:command("plugin_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
 	app:click(TAB)
 	app:frames(30)
 	expect(line(app, 'switch "Show the greeting"')).to_contain("unchecked")
@@ -228,6 +234,8 @@ test("a status the plugin reports is drawn beside the control, and cleared", fun
 	app:command("status_clear")
 	app:command("plugin_on")
 	app:frames(20)
+	-- (Past the list's foot: scrolled to it first.)
+	app:scroll(NAV, 400)
 	app:click(TAB)
 	app:frames(30)
 	expect(app:tree("#setting-keys")).never.to_contain('"Set up"')

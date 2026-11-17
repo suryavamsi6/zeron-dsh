@@ -22,6 +22,7 @@ local motion = require("@ds/motion")
 local Placement = require("@app/screens/chat/composer_place")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
+local ModelVisibility = require("@app/model_visibility")
 local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
@@ -399,6 +400,26 @@ local function Composer(): Node
 				patch[k] = v
 				applied[k] = v
 				any_change = true
+			end
+		end
+		-- A model the gateway's routes list names its route in the config: a
+		-- chat saved before the route rode with the model gets it now, since
+		-- the run needs it and the picker's pick is only sent once.
+		if not any_change then
+			-- (`s.model` is the picker's own value form, "<harness>/<model>" —
+			-- "<harness>/<route>/<model>" where the run's route rides with it.)
+			local saved = (s :: any).model
+			if saved then
+				for _, m in store.catalog:peek().models do
+					if m.value == saved and m.provider then
+						local opts = (s :: any).model_options or {}
+						if opts.provider ~= m.provider.id then
+							patch.model_options = { provider = m.provider.id }
+							applied.model_options = patch.model_options
+							any_change = true
+						end
+					end
+				end
 			end
 		end
 		if any_change then
@@ -907,6 +928,12 @@ local function Composer(): Node
 					for _, m in store.catalog:peek().models do
 						if m.value == pick.model then
 							req.harness = m.harness
+							-- Which provider route serves it: a model id alone is
+							-- ambiguous (`gpt-4` is on `openai` and `openrouter`),
+							-- and the run has to name the route it may use.
+							if m.provider then
+								req.model_options = { provider = m.provider.id }
+							end
 						end
 					end
 				end
@@ -1249,7 +1276,8 @@ local function Composer(): Node
 				return m and m.value
 			end,
 			models = function(): { ds.Model }
-				return store.catalog:get().models
+				-- What Settings → Providers → Models leaves on.
+				return ModelVisibility.visible(store.catalog:get().models)
 			end,
 			accounts = accounts.accounts,
 			account_group = accounts.account_group,

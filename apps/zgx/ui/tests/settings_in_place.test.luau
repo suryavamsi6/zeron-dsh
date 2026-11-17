@@ -53,7 +53,7 @@ end
 
 test("the pages list under Personal, Devices and Organization", function()
 	local app = open()
-	for _, label in { "Personal", "Devices", "Organization", "General", "Appearance", "Notifications", "Account", "DeepSeek", "Members" } do
+	for _, label in { "Personal", "Devices", "Organization", "General", "Appearance", "Notifications", "Account", "Providers", "Members" } do
 		expect(app:has(`{NAV} >> "{label}"`)).to_be(true)
 	end
 	-- The account's page is "Account" (its id still `profile`): no "Profile".
@@ -239,21 +239,16 @@ test("each heading shows once, its pages under it, ahead of Archived", function(
 	expect(at("Members") < at("Archived")).to_be(true)
 end)
 
-test("DeepSeek's page asks another device's agents when it's chosen", function()
-	local app = open("DeepSeek")
-	expect(asked(app, "agents.load")).to_be(true)
-	expect(shows(app, PAGE, "Official DeepSeek Harness SDK")).to_be(true)
-	app:click(`{PAGE} >> role:button "Device"`)
+test("Providers asks the engine for its routes", function()
+	local app = open("Providers")
+	expect(asked(app, "DshProviders")).to_be(true)
+	-- (A route with no key waits behind "Show all": the catalog's tail.)
+	app:click('role:button ~"Show all"')
 	app:frames(10)
-	app:click('role:menuitem "devbox"')
-	app:frames(20)
-	expect(asked(app, "agents.target:box")).to_be(true)
-	-- Back to this computer: no device named, the engine's own.
-	app:click(`{PAGE} >> role:button "Device"`)
-	app:frames(10)
-	app:click('role:menuitem "MacBook Pro"')
-	app:frames(20)
-	expect(asked(app, "agents.target:")).to_be(true)
+	-- The routes the gateway reports, each with the control it needs.
+	expect(shows(app, PAGE, "OpenCode Go")).to_be(true)
+	expect(shows(app, PAGE, "OpenAI")).to_be(true)
+	expect(shows(app, PAGE, "Sign in with ChatGPT")).to_be(true)
 end)
 
 -- A node's box under `scope`: x, y, w, h.
@@ -1011,14 +1006,92 @@ test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and send
 	expect(shows(app, PAGE, "Capture Appshots")).to_be(true)
 end)
 
-test("DeepSeek stands on the page's middle, as General does", function()
+-- The catalog's display names are its route ids for the pi-ai routes; the
+-- page names them as people know them, and the Codex route is the ChatGPT
+-- sign-in's duplicate.
+-- The Models section offers each route's models to switch off, with how many
+-- it serves; the agent's own models carry no route and are never listed.
+test("Providers offers each route's models to switch", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "Every OpenAI model")).to_be(true)
+	expect(shows(app, PAGE, "Every OpenCode Go model")).to_be(true)
+	expect(shows(app, PAGE, "Serves 1 model")).to_be(true)
+end)
+
+-- A signed-in provider's plan draws as the upstream screen's meters: its
+-- windows (label, bar, percent) on the provider's own row.
+test("Providers draws a signed-in provider's usage", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "Session")).to_be(true)
+	expect(shows(app, PAGE, "Week")).to_be(true)
+	expect(shows(app, PAGE, "22%")).to_be(true)
+end)
+
+-- The route DSH runs by default says so, as the upstream screen marks it.
+test("Providers marks the route in use", function()
+	local app = open("Providers")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	expect(shows(app, PAGE, "In use")).to_be(true)
+end)
+
+-- A saved key is what a visit is usually about: its row moves to the top,
+-- at once, without a reload.
+test("Providers puts the connected routes first", function()
+	local app = open("Providers")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	-- (Enter commits the field; two rows carry a Save button of their own.)
+	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
+	app:key("Enter")
+	app:frames(10)
+	-- The route with a key now stands above one without (OpenAI has only the
+	-- grant, which this stub reports unsigned).
+	local after = app:tree(PAGE)
+	expect(after:find("OpenCode Go", 1, true) < after:find("OpenAI", 1, true)).to_be(true)
+end)
+
+-- OpenCode Zen and OpenCode Go are two products with two keys, though pi-ai's
+-- catalog names one env for both.
+test("the two OpenCode products keep their own keys", function()
+	local app = open("Providers")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	expect(shows(app, PAGE, "OPENCODE_ZEN_API_KEY")).to_be(true)
+	expect(shows(app, PAGE, "OPENCODE_API_KEY")).to_be(true)
+end)
+
+test("Providers names its routes and hides the Codex duplicate", function()
+	local app = open("Providers")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	expect(shows(app, PAGE, "OpenAI")).to_be(true)
+	expect(shows(app, PAGE, "OpenCode Zen")).to_be(true)
+	expect(shows(app, PAGE, "OpenCode Go")).to_be(true)
+	expect(shows(app, PAGE, "openai-codex")).to_be(false)
+end)
+
+test("Providers saves a key and names it in the route's profile", function()
+	local app = open("Providers")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	-- (Enter commits the field; two rows carry a Save button of their own.)
+	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
+	app:key("Enter")
+	app:frames(10)
+	expect(asked(app, "DshSetCredential")).to_be(true)
+	-- A stored key alone does nothing: the route's profile has to name it.
+	expect(asked(app, "DshMutateSettings")).to_be(true)
+end)
+
+test("Providers stands on the page's middle, as General does", function()
 	local app = open("General")
 	app:resize(1400, 900)
 	app:frames(30)
 	local gx = box(app, `{PAGE} >> role:heading "General"`)
-	app:click(`{NAV} >> role:tab "DeepSeek"`)
+	app:click(`{NAV} >> role:tab "Providers"`)
 	app:frames(40)
-	local px = box(app, `{PAGE} >> role:heading "DeepSeek"`)
+	local px = box(app, `{PAGE} >> role:heading "Providers"`)
 	expect(gx > 0).to_be(true)
 	expect(math.abs(px - gx) < 1).to_be(true)
 end)

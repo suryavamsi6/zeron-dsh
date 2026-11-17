@@ -126,18 +126,7 @@ jobs:
     uses: ./.github/workflows/ui-tests.yml
     with:
       core: true
-      ui: false
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).core || '' }}
-
-  linux-ui:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).ui
-    uses: ./.github/workflows/ui-tests.yml
-    with:
-      core: false
-      ui: true
-      browser: ${{ contains(fromJSON(needs.plan.outputs.flags).ui || fromJSON('[]'), 'browser') }}
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).ui || '' }}
 
   deepseek:
     needs: [plan, admit]
@@ -177,34 +166,11 @@ jobs:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).windows || '' }}
       skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).windows || fromJSON('[]')) }}
 
-  macos:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).macos
-    uses: ./.github/workflows/macos.yml
-    with:
-      native: true
-      frame-source: false
-      ios: false
-      fixtures: ${{ contains(fromJSON(needs.plan.outputs.flags).macos || fromJSON('[]'), 'fixtures') }}
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).macos || '' }}
-
-  frame-source:
-    needs: [plan, admit]
-    if: fromJSON(needs.plan.outputs.suites).frame_source
-    uses: ./.github/workflows/macos.yml
-    with:
-      native: false
-      frame-source: true
-      ios: false
-      pass-key: ${{ fromJSON(needs.plan.outputs.keys).frame_source || '' }}
-
   ios:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).ios
     uses: ./.github/workflows/macos.yml
     with:
-      native: false
-      frame-source: false
       ios: true
       skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).ios || fromJSON('[]')) }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).ios || '' }}
@@ -233,7 +199,7 @@ jobs:
 
   result:
     name: CI result
-    needs: [plan, admit, linux-core, linux-ui, deepseek, edge, installer, voice, windows, macos, frame-source, ios, android, zgx]
+    needs: [plan, admit, linux-core, deepseek, edge, installer, voice, windows, ios, android, zgx]
     if: always()
     runs-on: ubuntu-24.04
     timeout-minutes: 5

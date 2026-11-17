@@ -25,6 +25,7 @@ local Quote = require("@ds/quote")
 local Comments = require("@app/screens/chat/comments")
 local Annotation = require("@ds/annotation")
 local prefs = require("@app/screens/settings/prefs")
+local ModelVisibility = require("@app/model_visibility")
 local store = require("@app/screens/chat/store")
 local route = require("@app/screens/shell/route")
 local art = require("@app/screens/shell/art")
@@ -1244,7 +1245,8 @@ local function Composer(): Node
 				return m and m.value
 			end,
 			models = function(): { ds.Model }
-				return store.catalog:get().models
+				-- What Settings → Providers → Models leaves on.
+				return ModelVisibility.visible(store.catalog:get().models)
 			end,
 			accounts = accounts.accounts,
 			account_group = accounts.account_group,

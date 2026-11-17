@@ -6,6 +6,7 @@
 //! to a wrong answer.
 
 use serde_json::{json, Value};
+use zeron_proto::ReasoningLevel;
 
 /// The settings namespace that holds the default model DSH runs a session
 /// with when the app sends none.
@@ -25,6 +26,10 @@ pub struct GatewayProvider {
     pub api_key_env: Option<String>,
     /// Whether the route signs in through DSH's own account flow.
     pub account: bool,
+    /// Whether the route is one someone declared by hand rather than one pi-ai
+    /// ships (`declared` in the catalog answer), which is the only kind Zeron
+    /// may remove: a catalog route's path always exists.
+    pub declared: bool,
     /// Whether the route is the ChatGPT subscription, served by Zeron's own
     /// plugin on the same gateway (`zeron-chatgpt/*`).
     pub chatgpt: bool,
@@ -37,6 +42,267 @@ impl GatewayProvider {
     }
 }
 
+/// The models the gateway's configured routes offer, for the model picker.
+///
+/// A route counts as configured when its `apiKeyEnv` reference is stored, or
+/// when it is the ChatGPT subscription and the account is signed in. Best
+/// effort throughout: discovery is a network call per route, so a route that
+/// cannot answer contributes nothing and the caller keeps its own list.
+pub async fn route_models(
+    gateway: &zeron_harness::deepseek::gateway::Gateway,
+    chatgpt_signed_in: bool,
+) -> Vec<zeron_proto::Model> {
+    use zeron_proto::{Model, ModelProvider};
+
+    let Ok(catalog) = gateway
+        .call("llm/listConfigurableProviders", serde_json::json!({}))
+        .await
+    else {
+        return Vec::new();
+    };
+    let routes = parse_provider_catalog(&catalog);
+    let refs: Vec<&str> = routes.iter().filter_map(GatewayProvider::credential_ref).collect();
+    let describe = if refs.is_empty() {
+        None
+    } else {
+        gateway
+            .call("credentials/describe", describe_credentials_params(&refs))
+            .await
+            .ok()
+    };
+    let mut models = Vec::new();
+    // `llm/discoverModels` strips capability data: the adapter emits id,
+    // name, contextWindow, maxTokens and inputModalities only, and the host
+    // re-projects those same fields (`discoverModels` in dsh-llm-pi-ai and
+    // `LlmRuntime.discoverModels` in dsh-llm). Reasoning support is instead
+    // declared where the adapter itself resolves it, so the levels offered
+    // here are mirrored from those declarations rather than guessed — an
+    // effort the run would refuse (UNSUPPORTED_REASONING_EFFORT) is never
+    // shown:
+    //
+    // * pi-ai routes (`llm-pi-ai` profiles): the installed catalog at
+    //   `@earendil-works/pi-ai` `providers/data/<route>.json` carries each
+    //   chat model's `reasoning` flag and `thinkingLevelMap` wire spellings,
+    //   overlaid by the stored profile's `models[].reasoningEfforts` and
+    //   `modelOverrides` (`resolveModelReasoning`/`getSupportedThinkingLevels`).
+    // * llm-deepseek routes: every model offers the adapter's fixed effort
+    //   list (off/low/high/max) unless the route's `thinking` switch is
+    //   `disabled`, which reduces the offer to `off` alone (`modelInfo` in
+    //   dsh-llm-deepseek).
+    //
+    // The harness only ever sends low, high and max (`EFFORTS` in
+    // `deepseek::configuration`), so supported levels outside those — pi-ai's
+    // `minimal`/`medium`/`xhigh`, and every route's `off` — are filtered out
+    // of what the picker offers.
+    let settings = gateway.call("settings/describe", json!({})).await.ok();
+    let catalog_dir = zeron_harness::deepseek::DeepSeekHarness::new()
+        .sdk_root()
+        .join("node_modules/@earendil-works/pi-ai/dist/providers/data");
+    let mut catalogs: std::collections::HashMap<String, std::collections::HashMap<String, Vec<ReasoningLevel>>> =
+        std::collections::HashMap::new();
+    for route in &routes {
+        let ready = route
+            .credential_ref()
+            .is_some_and(|key| describe.as_ref().is_some_and(|d| credential_configured(d, key)))
+            || (route.chatgpt && chatgpt_signed_in);
+        if !ready {
+            continue;
+        }
+        let Ok(found) = gateway
+            .call(
+                "llm/discoverModels",
+                serde_json::json!({
+                    "settingsNs": route.settings_ns,
+                    "request": { "provider": route.id },
+                }),
+            )
+            .await
+        else {
+            continue;
+        };
+        let Some(list) = found.as_array() else { continue };
+        for entry in list {
+            let Some(id) = entry["id"].as_str() else { continue };
+            models.push(Model {
+                id: id.to_string(),
+                label: entry["name"].as_str().unwrap_or(id).to_string(),
+                description: None,
+                provider: Some(ModelProvider {
+                    id: route.id.clone(),
+                    name: route.display_name.clone(),
+                }),
+                reasoning_levels: route_reasoning_levels(
+                    route,
+                    id,
+                    settings.as_ref(),
+                    &catalog_dir,
+                    &mut catalogs,
+                )
+                .await,
+                options: Vec::new(),
+                default: false,
+            });
+        }
+    }
+    models
+}
+
+/// The pi-ai thinking levels the harness's run path can send
+/// (`deepseek::configuration` maps exactly these, in this order).
+const RUNNABLE_EFFORTS: [(&str, ReasoningLevel); 6] = [
+    ("minimal", ReasoningLevel::Minimal),
+    ("low", ReasoningLevel::Low),
+    ("medium", ReasoningLevel::Medium),
+    ("high", ReasoningLevel::High),
+    ("xhigh", ReasoningLevel::XHigh),
+    ("max", ReasoningLevel::Max),
+];
+
+/// The levels a declared `reasoningEfforts`/`thinkingLevelMap` dict supports.
+/// A member is usable when it names a wire value (a string): a `null` member
+/// pins the level to unsupported — except `off`, which is not a
+/// `ReasoningLevel` and never reaches the list either way.
+fn map_supported_levels(map: &Value) -> Vec<ReasoningLevel> {
+    RUNNABLE_EFFORTS
+        .into_iter()
+        .filter(|(level, _)| map[*level].is_string())
+        .map(|(_, level)| level)
+        .collect()
+}
+
+/// The runnable levels an installed catalog model declares. With no
+/// `thinkingLevelMap`, pi-ai's base levels (off/minimal/low/medium/high) are
+/// all supported and only `xhigh`/`max` are withheld
+/// (`getSupportedThinkingLevels`); declared maps decide explicitly.
+fn catalog_model_levels(entry: &Value) -> Vec<ReasoningLevel> {
+    if entry["reasoning"].as_bool() != Some(true) {
+        return Vec::new();
+    }
+    if entry["thinkingLevelMap"].is_object() {
+        return map_supported_levels(&entry["thinkingLevelMap"]);
+    }
+    // No map: the base levels (`off/minimal/low/medium/high` — `off` is not
+    // a `ReasoningLevel`), never `xhigh` or `max`.
+    RUNNABLE_EFFORTS
+        .into_iter()
+        .map(|(_, level)| level)
+        .filter(|level| !matches!(level, ReasoningLevel::Max | ReasoningLevel::XHigh))
+        .collect()
+}
+
+/// Parse one installed catalog file (`providers/data/<route>.json`) into
+/// `model id -> runnable levels`. Chat entries are keyed `<type>:<id>` under
+/// each API group; `getBuiltinModels` serves only `type: "chat"`, last entry
+/// per id winning, which the discovered list then enumerates.
+fn parse_catalog_levels(
+    file: &Value,
+) -> std::collections::HashMap<String, Vec<ReasoningLevel>> {
+    let mut levels = std::collections::HashMap::new();
+    for group in file.as_object().into_iter().flat_map(|groups| groups.values()) {
+        let Some(entries) = group.as_object() else {
+            continue;
+        };
+        for entry in entries.values() {
+            if entry["type"].as_str() != Some("chat") {
+                continue;
+            }
+            if let Some(id) = entry["id"].as_str() {
+                levels.insert(id.to_string(), catalog_model_levels(entry));
+            }
+        }
+    }
+    levels
+}
+
+/// The runnable levels a discovered model carries for one route, mirroring
+/// the adapter's own resolution. pi-ai routes resolve the stored profile's
+/// declaration over the installed catalog, both read the way
+/// `resolveModelReasoning` composes them; llm-deepseek routes answer their
+/// adapter's fixed set unless `thinking` is disabled. Everything else —
+/// including a route whose catalog file is missing — offers nothing, which
+/// keeps an effort DSH would refuse out of the picker.
+async fn route_reasoning_levels(
+    route: &GatewayProvider,
+    model: &str,
+    settings: Option<&Value>,
+    catalog_dir: &std::path::Path,
+    catalogs: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<ReasoningLevel>>>,
+) -> Vec<ReasoningLevel> {
+    if route.settings_ns == PI_AI_NS {
+        let profile = settings.and_then(|store| {
+            settings_namespaces(store)
+                .into_iter()
+                .find(|(ns, _)| *ns == PI_AI_NS)
+                .map(|(_, value)| value["providers"][route.id.as_str()].clone())
+        });
+        let profile = profile.unwrap_or(Value::Null);
+        let models_list = profile["models"].as_array();
+        let declared = models_list
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["id"].as_str() == Some(model));
+        // A declared models[] entry or — when no models list replaces the
+        // catalog — a modelOverrides member decides the level set when it
+        // names `reasoningEfforts`; otherwise the installed catalog entry's
+        // capability carries through unchanged, exactly as
+        // `resolveModelReasoning` composes them.
+        let declaration = declared
+            .map(|entry| &entry["reasoningEfforts"])
+            .filter(|efforts| !efforts.is_null())
+            .or_else(|| {
+                if models_list.is_some_and(|list| !list.is_empty()) {
+                    return None;
+                }
+                let override_efforts = &profile["modelOverrides"][model]["reasoningEfforts"];
+                (!override_efforts.is_null()).then_some(override_efforts)
+            });
+        if let Some(efforts) = declaration {
+            // `false` is a non-reasoning model; a dict declares the offered
+            // levels and their wire spellings.
+            return efforts
+                .as_object()
+                .map(|_| map_supported_levels(efforts))
+                .unwrap_or_default();
+        }
+        if !catalogs.contains_key(route.id.as_str()) {
+            let path = catalog_dir.join(format!("{}.json", route.id));
+            let parsed = tokio::fs::read(&path)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .map(|file| parse_catalog_levels(&file))
+                .unwrap_or_default();
+            catalogs.insert(route.id.clone(), parsed);
+        }
+        return catalogs[route.id.as_str()]
+            .get(model)
+            .cloned()
+            .unwrap_or_default();
+    }
+    if route.settings_ns.starts_with("llm-deepseek") {
+        let thinking = settings
+            .and_then(|store| {
+                settings_namespaces(store)
+                    .into_iter()
+                    .find(|(ns, _)| *ns == route.settings_ns)
+                    .map(|(_, value)| {
+                        value["thinking"].as_str().unwrap_or("enabled").to_string()
+                    })
+            })
+            .unwrap_or_else(|| "enabled".to_string());
+        if thinking == "disabled" {
+            return Vec::new();
+        }
+        // The DeepSeek adapter's own: off, low, high, max.
+        return vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::High,
+            ReasoningLevel::Max,
+        ];
+    }
+    Vec::new()
+}
+
 /// Parse the `llm/listConfigurableProviders` answer. Entries without a
 /// `provider` or `settingsNs` are skipped, not guessed at.
 pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
@@ -47,8 +313,19 @@ pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
         .filter_map(|entry| {
             let id = entry["provider"].as_str()?.to_string();
             let settings_ns = entry["settingsNs"].as_str()?.to_string();
-            let api_key_env = entry["apiKeyEnv"].as_str().map(str::to_string);
-            let chatgpt = entry["auth"].as_str() == Some("chatgpt") || id.contains("chatgpt");
+            // The pinned DSH describes a route's credential as
+            // `nativeAuth: {env: [...], oauth: bool}`; older builds used a
+            // bare `apiKeyEnv`/`auth`, which stays as the fallback.
+            let api_key_env = entry["nativeAuth"]["env"]
+                .as_array()
+                .and_then(|env| env.first())
+                .and_then(|v| v.as_str())
+                .or_else(|| entry["apiKeyEnv"].as_str())
+                .map(str::to_string);
+            // The ChatGPT subscription only — not every route that *can* sign
+            // in through OAuth. A grant on this one must not make the others
+            // look configured.
+            let chatgpt = id == "openai" || id.starts_with("zeron-chatgpt");
             let account = !chatgpt
                 && (entry["account"].as_bool() == Some(true)
                     || entry["auth"].as_str() == Some("account")
@@ -62,6 +339,7 @@ pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
                 settings_ns,
                 api_key_env,
                 account,
+                declared: entry["declared"].as_bool().unwrap_or(false),
                 chatgpt,
             })
         })
@@ -178,14 +456,21 @@ pub fn settings_namespaces(value: &Value) -> Vec<(&str, &Value)> {
         .collect()
 }
 
-/// The models a settings namespace carries, read offline from the store
-/// (no provider call): the first array of `{id, ...}` objects under any
-/// top-level key of the ns value.
-pub fn models_in_ns(settings: &Value, ns: &str) -> Vec<ModelChoice> {
+/// The models a route offers, read offline from the store (no provider call).
+/// The route's own profile wins: pi-ai keeps each route at
+/// `providers.<route>`, and a hand-declared route's models are its
+/// `models` field — the only place they exist. When the profile has no
+/// `models` (a catalog route that lists its models live instead), the first
+/// array of `{id, ...}` objects under any top-level key of the ns value is
+/// the namespace-wide list DSH's card layout stores there.
+pub fn models_for_route(settings: &Value, ns: &str, route: &str) -> Vec<ModelChoice> {
     let Some((_, value)) = settings_namespaces(settings).into_iter().find(|(name, _)| *name == ns)
     else {
         return Vec::new();
     };
+    if let Some(declared) = value["providers"][route].get("models") {
+        return parse_models(declared);
+    }
     value
         .as_object()
         .into_iter()
@@ -211,15 +496,15 @@ pub fn default_model_of(settings: &Value) -> Option<(String, String)> {
     Some((provider, model))
 }
 
-/// The `settings/mutate` params setting the default model. `add` writes the
+/// The `settings/mutate` params setting the default model. `set` writes the
 /// key whether or not it exists yet; the revision is left unset so a
 /// last-write wins, matching the store's own merge rule.
 pub fn set_default_model_params(provider: &str, model: &str) -> Value {
     json!({
         "ns": DEFAULT_MODEL_NS,
         "ops": [
-            { "op": "add", "path": ["provider"], "value": provider },
-            { "op": "add", "path": ["model"], "value": model },
+            { "op": "set", "path": ["provider"], "value": provider },
+            { "op": "set", "path": ["model"], "value": model },
         ],
     })
 }
@@ -292,6 +577,422 @@ pub fn offline_report(credential: Option<&Value>, key_ref: Option<&str>, setting
     }
 }
 
+/// The settings namespace pi-ai's adapter mounts, which holds every declared
+/// route at `providers.<route>`.
+pub const PI_AI_NS: &str = "llm-pi-ai";
+
+/// A route id pi-ai accepts both as a settings key and as the stem of a
+/// credential reference: lower-case segments joined by single dashes, starting
+/// with a letter, within the runtime's 64-byte route limit
+/// (`deepseek::configuration` refuses a longer route before a run). DSH's own
+/// custom-provider card enforces the same grammar before it writes, and the
+/// credential seam reinforces it: the derived ref is upper-cased, so a
+/// digit-leading id would name a ref the store refuses.
+pub fn route_id_valid(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
+    let mut segments = id.split('-');
+    let first = segments.next().unwrap_or_default();
+    let mut chars = first.chars();
+    let head = chars.next().is_some_and(|c| c.is_ascii_lowercase());
+    head && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && segments.all(|segment| {
+            !segment.is_empty()
+                && segment.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        })
+}
+
+/// The credential reference a declared route's key is stored under when the
+/// declaration does not name one (`deriveKeyRef` in DSH's Models page).
+pub fn key_ref_for(route: &str) -> String {    let stem: String = route
+        .to_uppercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!("{stem}_API_KEY")
+}
+
+/// Whether `value` parses as an absolute http(s) endpoint with a host. The
+/// runtime hands `baseURL` to a URL parser, so a bare `https://` or a broken
+/// authority must be refused here rather than persisted.
+pub fn http_url(value: &str) -> bool {
+    reqwest::Url::parse(value)
+        .map(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+        .unwrap_or(false)
+}
+
+/// Read a typed token capacity, the spelling DSH's Models page accepts: a
+/// decimal count with an optional `K`/`M` suffix, so `1M` and `256K` are the
+/// numbers they quote. A blank field is `Ok(None)` (inherit); an unreadable one
+/// is `Err`, which validation then reports against the row.
+pub fn parse_capacity(text: &str) -> Result<Option<u64>, ()> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let (digits, scale) = match trimmed.as_bytes().last() {
+        Some(b'k' | b'K') => (&trimmed[..trimmed.len() - 1], 1_000.0),
+        Some(b'm' | b'M') => (&trimmed[..trimmed.len() - 1], 1_000_000.0),
+        _ => (trimmed, 1.0),
+    };
+    let count: f64 = digits.parse().map_err(|_| ())?;
+    if !count.is_finite() || count <= 0.0 {
+        return Err(());
+    }
+    let scaled = count * scale;
+    Ok(Some(scaled.round() as u64))
+}
+
+/// Whether `value` is an env-shaped credential reference: what `apiKeyEnv`
+/// accepts, and what the credential store's `set` accepts.
+pub fn key_ref_valid(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `value` is a model id the runtime will run: the grammar
+/// `deepseek::configuration` enforces for a non-default route — ASCII
+/// alphanumerics and `- _ . : /`, at most 128 bytes. A declaration that wrote
+/// a looser id would persist a route every run refuses.
+pub fn model_id_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
+}
+
+/// One model of a hand-declared route (`models[]` in pi-ai's config).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredModel {
+    pub id: String,
+    /// Display name; DSH falls back to the id.
+    pub name: Option<String>,
+    pub context_window: Option<u64>,
+    /// The output capability, which pi-ai also sends as the request's token
+    /// cap — so this is a real limit, not a label.
+    pub max_tokens: Option<u64>,
+    /// Whether the model takes images. Vision is declared, never inferred: a
+    /// model without it refuses attachments.
+    pub vision: bool,
+}
+
+impl DeclaredModel {
+    fn to_json(&self) -> Value {
+        let mut entry = json!({ "id": self.id });
+        let object = entry.as_object_mut().expect("object literal");
+        if let Some(name) = self.name.as_deref().filter(|name| !name.is_empty()) {
+            object.insert("name".into(), json!(name));
+        }
+        if let Some(context) = self.context_window {
+            object.insert("contextWindow".into(), json!(context));
+        }
+        if let Some(max) = self.max_tokens {
+            object.insert("maxTokens".into(), json!(max));
+        }
+        let input: &[&str] = if self.vision { &["text", "image"] } else { &["text"] };
+        object.insert("input".into(), json!(input));
+        entry
+    }
+}
+
+/// The wire-compatibility switches the installed catalog carries for a
+/// DeepSeek-compatible `openai-completions` route, and that a hand-declared
+/// route loses unless it restates them: without them pi-ai's own
+/// `detectCompat` sends `store: false`, rewrites `system` to `developer`,
+/// names the token cap `max_completion_tokens`, and asks for reasoning with
+/// `reasoning_effort` instead of DeepSeek's `thinking` block. Each is a silent
+/// behavior change rather than an error, so the editor states them explicitly.
+pub fn deepseek_compat() -> Value {
+    json!({
+        "supportsStore": false,
+        "supportsDeveloperRole": false,
+        "supportsStrictMode": true,
+        "maxTokensField": "max_tokens",
+        "requiresReasoningContentOnAssistantMessages": true,
+        "thinkingFormat": "deepseek",
+    })
+}
+
+/// A route pi-ai's installed catalog does not describe, declared by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredRoute {
+    pub id: String,
+    pub display_name: Option<String>,
+    /// The endpoint prefix up to (not including) the API path.
+    pub base_url: String,
+    /// The one wire protocol every model on the route speaks.
+    pub api: String,
+    /// The env-shaped reference the key is read through; `None` leaves the
+    /// route on its provider-native authentication (a credential chain, ADC).
+    pub api_key_env: Option<String>,
+    /// Static headers sent with every request, which a declared route needs
+    /// explicitly: the catalog path adds its own.
+    pub headers: Vec<(String, String)>,
+    pub models: Vec<DeclaredModel>,
+    /// Write [`deepseek_compat`] on `openai-completions`.
+    pub deepseek_compat: bool,
+}
+
+impl DeclaredRoute {
+    /// The reference a key would be stored under for this route.
+    pub fn key_ref(&self) -> String {
+        self.api_key_env.clone().unwrap_or_else(|| key_ref_for(&self.id))
+    }
+
+    /// The profile pi-ai reads at `providers.<id>`.
+    pub fn profile(&self) -> Value {
+        let mut profile = json!({ "api": self.api, "baseURL": self.base_url });
+        let object = profile.as_object_mut().expect("object literal");
+        if let Some(name) = self.display_name.as_deref().filter(|name| !name.is_empty()) {
+            object.insert("displayName".into(), json!(name));
+        }
+        if let Some(key_ref) = &self.api_key_env {
+            object.insert("apiKeyEnv".into(), json!(key_ref));
+        }
+        if !self.headers.is_empty() {
+            let headers: serde_json::Map<String, Value> = self
+                .headers
+                .iter()
+                .map(|(name, value)| (name.clone(), json!(value)))
+                .collect();
+            object.insert("headers".into(), Value::Object(headers));
+        }
+        if self.deepseek_compat && self.api == "openai-completions" {
+            object.insert("compat".into(), deepseek_compat());
+        }
+        object.insert(
+            "models".into(),
+            Value::Array(self.models.iter().map(DeclaredModel::to_json).collect()),
+        );
+        profile
+    }
+}
+
+/// Why a declaration was refused, named so the form can point at the field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclarationError {
+    /// The id is not route-shaped.
+    RouteId(String),
+    /// A route of that id already exists (catalog or declared).
+    RouteTaken(String),
+    BaseUrl(String),
+    /// The protocol is not one the adapter serves.
+    Api(String),
+    /// A declared route cannot inherit a catalog, so it needs a model.
+    NoModels,
+    ModelId(usize),
+    DuplicateModel(usize),
+    /// A capacity that is not a whole positive token count.
+    Capacity(usize, &'static str),
+    KeyRef(String),
+    /// A header name or value a request would reject.
+    Header(usize),
+}
+
+impl DeclarationError {
+    /// The sentence the form shows beside the offending field.
+    pub fn message(&self) -> String {
+        match self {
+            Self::RouteId(id) => format!(
+                "{id} is not a route id: lower-case segments joined by dashes, starting with a letter, at most 64 bytes (acme-gateway)."
+            ),
+            Self::RouteTaken(id) => format!("{id} is already a route on this device."),
+            Self::BaseUrl(url) => format!("{url} is not an http(s) endpoint."),
+            Self::Api(api) => format!("{api} is not a protocol this adapter serves."),
+            Self::NoModels => "a declared route needs at least one model: it has no catalog to inherit.".into(),
+            Self::ModelId(index) => format!(
+                "model {} needs an id the runtime accepts: ASCII letters, digits and - _ . : /, at most 128 bytes.",
+                index + 1
+            ),
+            Self::DuplicateModel(index) => format!("model {} repeats an id another row already uses.", index + 1),
+            Self::Capacity(index, field) => {
+                format!("model {}: {field} must be a whole number of tokens greater than zero.", index + 1)
+            }
+            Self::KeyRef(reference) => format!(
+                "{reference} is not a credential reference: letters, digits and underscores, not starting with a digit."
+            ),
+            Self::Header(index) => format!("header {} needs a name without spaces and a value on one line.", index + 1),
+        }
+    }
+}
+
+impl std::fmt::Display for DeclarationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message())
+    }
+}
+
+impl std::error::Error for DeclarationError {}
+
+/// Check a declaration before it is written. `taken` is every route id the
+/// device already has, catalog and declared alike.
+pub fn validate(route: &DeclaredRoute, taken: &[String]) -> Result<(), DeclarationError> {
+    if !route_id_valid(&route.id) {
+        return Err(DeclarationError::RouteId(route.id.clone()));
+    }
+    if taken.iter().any(|id| id == &route.id) {
+        return Err(DeclarationError::RouteTaken(route.id.clone()));
+    }
+    if !http_url(&route.base_url) {
+        return Err(DeclarationError::BaseUrl(route.base_url.clone()));
+    }
+    if !protocols().iter().any(|api| api == &route.api) {
+        return Err(DeclarationError::Api(route.api.clone()));
+    }
+    if let Some(key_ref) = &route.api_key_env
+        && !key_ref_valid(key_ref)
+    {
+        return Err(DeclarationError::KeyRef(key_ref.clone()));
+    }
+    if let Some(index) = route.headers.iter().position(|(name, value)| {
+        name.is_empty()
+            || name.chars().any(|c| c.is_whitespace() || c == ':' || c == '\n' || c == '\r')
+            || value.contains(['\n', '\r'])
+    }) {
+        return Err(DeclarationError::Header(index));
+    }
+    if route.models.is_empty() {
+        return Err(DeclarationError::NoModels);
+    }
+    let mut seen: Vec<&str> = Vec::new();
+    for (index, model) in route.models.iter().enumerate() {
+        let id = model.id.as_str();
+        if !model_id_valid(id) {
+            return Err(DeclarationError::ModelId(index));
+        }
+        if seen.contains(&id) {
+            return Err(DeclarationError::DuplicateModel(index));
+        }
+        seen.push(id);
+        if model.context_window == Some(0) {
+            return Err(DeclarationError::Capacity(index, "the context window"));
+        }
+        if model.max_tokens == Some(0) {
+            return Err(DeclarationError::Capacity(index, "the output limit"));
+        }
+    }
+    Ok(())
+}
+
+/// The wire protocols pi-ai serves, in the order the adapter reports them.
+/// DSH reads them out of the namespace's own schema; a declaration validated
+/// offline uses this list, which the schema read reproduces.
+pub fn protocols() -> &'static [&'static str] {
+    &["openai-completions", "openai-responses", "anthropic-messages", "google-generative-ai"]
+}
+
+/// The protocols a `settings/describe` answer's `llm-pi-ai` schema declares,
+/// read from the union at `providers.<any>/api` the same way DSH's Models page
+/// reads them, so the form offers exactly what the adapter accepts. Falls back
+/// to [`protocols`] when the schema is not walkable.
+pub fn protocol_choices(settings: &Value) -> Vec<String> {
+    let declared = settings["namespaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["ns"].as_str() == Some(PI_AI_NS))
+        .filter(|entry| entry["schema"].is_object())
+        .and_then(|entry| schema_at(&entry["schema"], &["providers", "declared-route", "api"]))
+        .filter(|node| node["type"].as_str() == Some("union"))
+        .and_then(|node| node["list"].as_array())
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| entry["value"].as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    if declared.is_empty() {
+        protocols().iter().map(|api| api.to_string()).collect()
+    } else {
+        declared
+    }
+}
+
+/// Walk a serialized settings schema (`{uid, refs}`) down a value path, the
+/// shape `settings/describe` returns for every namespace.
+fn schema_at<'a>(schema: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut node = schema_ref(schema, schema.get("uid")?);
+    for step in path {
+        let next = match node["type"].as_str()? {
+            "object" => schema_ref(schema, node["dict"].get(*step)?),
+            "dict" => schema_ref(schema, node.get("inner")?),
+            _ => return None,
+        };
+        node = next;
+    }
+    Some(node)
+}
+
+/// Resolve a schema reference: a number is a `refs` key, an object is inline.
+fn schema_ref<'a>(schema: &'a Value, node: &'a Value) -> &'a Value {
+    match node.as_u64() {
+        Some(uid) => schema["refs"].get(uid.to_string()).unwrap_or(&Value::Null),
+        None => node,
+    }
+}
+
+/// The revision of one namespace's user section, for a write that refuses to
+/// overwrite a route another window declared meanwhile.
+pub fn namespace_revision(settings: &Value, ns: &str) -> Option<u64> {
+    settings["namespaces"]
+        .as_array()?
+        .iter()
+        .find(|entry| entry["ns"].as_str() == Some(ns))?
+        .get("revision")?
+        .as_u64()
+}
+
+/// The `settings/mutate` params declaring `route` at `providers.<id>`.
+///
+/// One path-addressed `set`, the write DSH's own Models page makes: the whole
+/// profile at that path, never `settings/replace`, which would drop the secrets
+/// the describe read redacts.
+pub fn declare_route_params(
+    route: &DeclaredRoute,
+    taken: &[String],
+    revision: Option<u64>,
+) -> Result<Value, DeclarationError> {
+    validate(route, taken)?;
+    let mut params = json!({
+        "ns": PI_AI_NS,
+        "ops": [
+            { "op": "set", "path": ["providers", route.id], "value": route.profile() },
+        ],
+    });
+    if let Some(revision) = revision {
+        params["expectedRevision"] = json!(revision);
+    }
+    Ok(params)
+}
+
+/// The `settings/mutate` params removing a declared route. Removal is the only
+/// off switch pi-ai's profile has: a route has no `enabled` field, and deleting
+/// its settings path is what DSH's own Models page does.
+pub fn remove_route_params(route: &str) -> Value {
+    json!({
+        "ns": PI_AI_NS,
+        "ops": [{ "op": "unset", "path": ["providers", route] }],
+    })
+}
+
+/// Every route id a device has in `llm-pi-ai`, declared or not, so a new
+/// declaration cannot shadow one.
+pub fn routes_in_ns(settings: &Value, ns: &str) -> Vec<String> {
+    settings["namespaces"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|entry| entry["ns"].as_str() == Some(ns))
+        .and_then(|entry| entry["value"]["providers"].as_object())
+        .map(|providers| providers.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,7 +1002,7 @@ mod tests {
         let catalog = parse_provider_catalog(&json!([
             { "provider": "deepseek-official", "displayName": "DeepSeek", "settingsNs": "llm-deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY", "account": true },
             { "provider": "opencode-go", "displayName": "OpenCode Go", "settingsNs": "llm-pi-ai", "apiKeyEnv": "OPENCODE_API_KEY" },
-            { "provider": "chatgpt-subscription", "settingsNs": "llm-pi-ai", "auth": "chatgpt" },
+            { "provider": "openai", "settingsNs": "llm-pi-ai", "auth": "chatgpt" },
             { "provider": "no-ns" },
         ]));
         assert_eq!(catalog.len(), 3, "an entry without settingsNs is skipped: {catalog:?}");
@@ -316,7 +1017,8 @@ mod tests {
         let chatgpt = &catalog[2];
         assert!(chatgpt.chatgpt && !chatgpt.account);
         assert_eq!(chatgpt.credential_ref(), None);
-        assert_eq!(chatgpt.display_name, "chatgpt-subscription", "no displayName falls back to the id");
+        assert_eq!(chatgpt.display_name, "openai", "no displayName falls back to the id");
+        assert!(!chatgpt.declared, "only a hand-declared route is removable");
     }
 
     #[test]
@@ -366,14 +1068,36 @@ mod tests {
     #[test]
     fn settings_namespaces_and_models_within_one_read_offline() {
         let settings = json!({ "namespaces": [
-            { "ns": "llm-pi-ai", "value": { "providers": {}, "models": [{ "id": "gpt-5", "name": "GPT-5" }] } },
+            { "ns": "llm-pi-ai", "value": {
+                "providers": {
+                    "acme-gateway": {
+                        "api": "openai-completions",
+                        "models": [{ "id": "acme-flash", "name": "Acme Flash" }, { "id": "acme-mini" }],
+                    },
+                    "opencode-go": { "api": "openai-completions" },
+                },
+                "models": [{ "id": "gpt-5", "name": "GPT-5" }],
+            } },
             { "ns": "agent-default-model", "value": { "provider": "opencode-go", "model": "gpt-5" } },
         ] });
         let namespaces = settings_namespaces(&settings);
         assert_eq!(namespaces.len(), 2);
-        let models = models_in_ns(&settings, "llm-pi-ai");
-        assert_eq!(models, vec![ModelChoice { id: "gpt-5".into(), label: "GPT-5".into() }]);
-        assert!(models_in_ns(&settings, "missing").is_empty());
+        let declared = models_for_route(&settings, "llm-pi-ai", "acme-gateway");
+        assert_eq!(
+            declared,
+            vec![
+                ModelChoice { id: "acme-flash".into(), label: "Acme Flash".into() },
+                ModelChoice { id: "acme-mini".into(), label: "acme-mini".into() },
+            ],
+            "a declared route's models live at providers.<route>.models"
+        );
+        let catalog = models_for_route(&settings, "llm-pi-ai", "opencode-go");
+        assert_eq!(
+            catalog,
+            vec![ModelChoice { id: "gpt-5".into(), label: "GPT-5".into() }],
+            "a route without its own models reads the namespace-wide list"
+        );
+        assert!(models_for_route(&settings, "missing", "acme-gateway").is_empty());
         assert_eq!(
             default_model_of(&settings).as_ref(),
             Some(&("opencode-go".to_string(), "gpt-5".to_string()))
@@ -389,9 +1113,10 @@ mod tests {
         assert_eq!(
             params["ops"],
             json!([
-                { "op": "add", "path": ["provider"], "value": "opencode-go" },
-                { "op": "add", "path": ["model"], "value": "gpt-5" },
-            ])
+                { "op": "set", "path": ["provider"], "value": "opencode-go" },
+                { "op": "set", "path": ["model"], "value": "gpt-5" },
+            ]),
+            "the store's own op vocabulary is set/unset: DSH's Models page writes `set`"
         );
         assert_eq!(
             discover_models_params("llm-pi-ai"),
@@ -426,5 +1151,372 @@ mod tests {
         assert_eq!(report.key_saved, Some(true));
         assert_eq!(report.namespaces, 1);
         assert_eq!(offline_report(None, Some("DEEPSEEK_API_KEY"), &settings).key_saved, None);
+    }
+
+    fn declared_route() -> DeclaredRoute {
+        DeclaredRoute {
+            id: "acme-gateway".into(),
+            display_name: Some("Acme Gateway".into()),
+            base_url: "https://gateway.acme.test/openai/v1".into(),
+            api: "openai-completions".into(),
+            api_key_env: Some("ACME_GATEWAY_API_KEY".into()),
+            headers: vec![("x-acme-tenant".into(), "zeron".into())],
+            models: vec![
+                DeclaredModel {
+                    id: "acme-flash".into(),
+                    name: Some("Acme Flash".into()),
+                    context_window: Some(1_000_000),
+                    max_tokens: Some(64_000),
+                    vision: true,
+                },
+                DeclaredModel { id: "acme-mini".into(), ..Default::default() },
+            ],
+            deepseek_compat: true,
+        }
+    }
+
+    #[test]
+    fn route_ids_and_key_refs_follow_the_adapters_grammar() {
+        for valid in ["acme-gateway", "a", "route-2", "z9-x"] {
+            assert!(route_id_valid(valid), "{valid} is route-shaped");
+        }
+        let over_limit = format!("{}-x", "a".repeat(64));
+        for invalid in ["", "Acme", "acme_gateway", "-acme", "acme-", "acme--gateway", "9acme", "acme gateway", over_limit.as_str()] {
+            assert!(!route_id_valid(invalid), "{invalid} is not route-shaped");
+        }
+        assert_eq!(key_ref_for("acme-gateway"), "ACME_GATEWAY_API_KEY");
+        assert_eq!(key_ref_for("a1"), "A1_API_KEY");
+        assert!(key_ref_valid("ACME_GATEWAY_API_KEY"));
+        assert!(!key_ref_valid("llm-pi-ai/opencode-go"), "a record key is not an env ref");
+        assert!(!key_ref_valid("9ACME"));
+        for valid in ["gpt-5", "deepseek.v4_flash", "vendor/model:free", "q3_8b.gguf"] {
+            assert!(model_id_valid(valid), "{valid} is a model id the runtime runs");
+        }
+        let too_long = "m".repeat(129);
+        for invalid in ["", "acme flash", " acme-flash", "m1 ", "m²", "a,b", too_long.as_str()] {
+            assert!(!model_id_valid(invalid), "{invalid} is not a model id the runtime runs");
+        }
+        assert!(model_id_valid(&"m".repeat(128)), "128 bytes is the runtime's limit");
+        assert!(http_url("http://127.0.0.1:41999/v1") && http_url("https://x.test"));
+        // WHATWG special schemes skip extra slashes before the authority, so
+        // `http:///v1` is `http://v1/` — the parser the runtime uses accepts
+        // it. A bare scheme and a broken authority are what cannot parse.
+        for invalid in ["https://", "https://[invalid", "ftp://x.test", "gateway.test/v1"] {
+            assert!(!http_url(invalid), "{invalid} is not a parsed http(s) endpoint");
+        }
+    }
+
+    #[test]
+    fn a_declaration_writes_one_path_addressed_set_of_the_whole_profile() {
+        let params = declare_route_params(&declared_route(), &["opencode-go".into()], Some(7)).unwrap();
+        assert_eq!(params["ns"], "llm-pi-ai");
+        assert_eq!(params["expectedRevision"], 7);
+        assert_eq!(params["ops"].as_array().map(Vec::len), Some(1), "one op, not a rewrite of the namespace");
+        assert_eq!(params["ops"][0]["op"], "set");
+        assert_eq!(params["ops"][0]["path"], json!(["providers", "acme-gateway"]));
+        let profile = &params["ops"][0]["value"];
+        assert_eq!(profile["api"], "openai-completions");
+        assert_eq!(profile["baseURL"], "https://gateway.acme.test/openai/v1");
+        assert_eq!(profile["displayName"], "Acme Gateway");
+        assert_eq!(profile["apiKeyEnv"], "ACME_GATEWAY_API_KEY");
+        assert_eq!(profile["headers"], json!({ "x-acme-tenant": "zeron" }));
+        assert_eq!(
+            profile["models"][0],
+            json!({
+                "id": "acme-flash",
+                "name": "Acme Flash",
+                "contextWindow": 1_000_000,
+                "maxTokens": 64_000,
+                "input": ["text", "image"],
+            })
+        );
+        assert_eq!(
+            profile["models"][1],
+            json!({ "id": "acme-mini", "input": ["text"] }),
+            "unset capacities inherit, and vision stays text-only unless declared"
+        );
+        assert_eq!(
+            profile["compat"],
+            json!({
+                "supportsStore": false,
+                "supportsDeveloperRole": false,
+                "supportsStrictMode": true,
+                "maxTokensField": "max_tokens",
+                "requiresReasoningContentOnAssistantMessages": true,
+                "thinkingFormat": "deepseek",
+            }),
+            "a declared route restates the catalog's wire switches"
+        );
+    }
+
+    #[test]
+    fn a_declaration_without_a_revision_leaves_the_field_out() {
+        let params = declare_route_params(&declared_route(), &[], None).unwrap();
+        assert!(params.get("expectedRevision").is_none(), "an absent revision is absent, not null");
+        let mut route = declared_route();
+        route.api = "anthropic-messages".into();
+        let params = declare_route_params(&route, &[], None).unwrap();
+        assert!(
+            params["ops"][0]["value"].get("compat").is_none(),
+            "the DeepSeek switches belong to openai-completions only; another protocol would refuse them"
+        );
+    }
+
+    #[test]
+    fn validation_names_the_field_it_refuses() {
+        let taken = vec!["opencode-go".to_string()];
+        let mut route = declared_route();
+        route.id = "opencode-go".into();
+        assert_eq!(validate(&route, &taken), Err(DeclarationError::RouteTaken("opencode-go".into())));
+        assert!(validate(&route, &taken).unwrap_err().message().contains("already a route"));
+
+        route.id = "Acme".into();
+        assert!(matches!(validate(&route, &[]), Err(DeclarationError::RouteId(_))));
+
+        let mut route = declared_route();
+        route.base_url = "gateway.acme.test".into();
+        assert!(matches!(validate(&route, &[]), Err(DeclarationError::BaseUrl(_))));
+
+        route.base_url = "https://gateway.acme.test/v1".into();
+        route.api = "carrier-pigeon".into();
+        assert!(matches!(validate(&route, &[]), Err(DeclarationError::Api(_))));
+
+        let mut route = declared_route();
+        route.models.clear();
+        assert_eq!(validate(&route, &[]), Err(DeclarationError::NoModels));
+
+        route.models = vec![DeclaredModel { id: " acme-flash".into(), ..Default::default() }];
+        assert_eq!(validate(&route, &[]), Err(DeclarationError::ModelId(0)));
+
+        route.models = vec![DeclaredModel { id: "acme flash".into(), ..Default::default() }];
+        assert_eq!(
+            validate(&route, &[]),
+            Err(DeclarationError::ModelId(0)),
+            "an id with a space passes the form but the runtime refuses it"
+        );
+
+        route.models = vec![DeclaredModel { id: "m".repeat(129), ..Default::default() }];
+        assert_eq!(
+            validate(&route, &[]),
+            Err(DeclarationError::ModelId(0)),
+            "an id past the runtime's 128-byte limit is refused at declaration"
+        );
+
+        route.models = vec![
+            DeclaredModel { id: "dup".into(), ..Default::default() },
+            DeclaredModel { id: "dup".into(), ..Default::default() },
+        ];
+        assert_eq!(validate(&route, &[]), Err(DeclarationError::DuplicateModel(1)));
+
+        route.models = vec![DeclaredModel { id: "zero".into(), max_tokens: Some(0), ..Default::default() }];
+        assert_eq!(validate(&route, &[]), Err(DeclarationError::Capacity(0, "the output limit")));
+
+        let mut route = declared_route();
+        route.api_key_env = Some("llm-pi-ai/acme".into());
+        assert!(matches!(validate(&route, &[]), Err(DeclarationError::KeyRef(_))));
+
+        route.api_key_env = None;
+        route.headers = vec![("bad name".into(), "x".into())];
+        assert_eq!(validate(&route, &[]), Err(DeclarationError::Header(0)));
+    }
+
+    #[test]
+    fn removing_a_route_unsets_its_path_and_nothing_else() {
+        assert_eq!(
+            remove_route_params("acme-gateway"),
+            json!({
+                "ns": "llm-pi-ai",
+                "ops": [{ "op": "unset", "path": ["providers", "acme-gateway"] }],
+            }),
+            "a route has no enabled flag: its path existing is what turns it on"
+        );
+    }
+
+    #[test]
+    fn protocol_choices_come_out_of_the_namespaces_own_schema() {
+        let schema = json!({
+            "uid": 1,
+            "refs": {
+                "1": { "type": "object", "dict": { "providers": 2 } },
+                "2": { "type": "dict", "inner": 3 },
+                "3": { "type": "object", "dict": { "api": 4 } },
+                "4": { "type": "union", "list": [
+                    { "type": "const", "value": "openai-completions" },
+                    { "type": "const", "value": "anthropic-messages" }
+                ] }
+            }
+        });
+        let settings = json!({ "namespaces": [{ "ns": "llm-pi-ai", "schema": schema, "value": {} }] });
+        assert_eq!(protocol_choices(&settings), vec!["openai-completions", "anthropic-messages"]);
+        let fallback = json!({ "namespaces": [{ "ns": "llm-pi-ai", "schema": {}, "value": {} }] });
+        assert_eq!(protocol_choices(&fallback), protocols().to_vec());
+        assert_eq!(protocol_choices(&json!({})), protocols().to_vec());
+    }
+
+    #[test]
+    fn capacities_round_trip_through_the_spellings_the_form_accepts() {
+        assert_eq!(parse_capacity(""), Ok(None), "a blank field inherits");
+        assert_eq!(parse_capacity(" 64000 "), Ok(Some(64_000)));
+        assert_eq!(parse_capacity("256K"), Ok(Some(256_000)));
+        assert_eq!(parse_capacity("1M"), Ok(Some(1_000_000)));
+        assert_eq!(parse_capacity("1.5M"), Ok(Some(1_500_000)));
+        assert_eq!(parse_capacity("0"), Err(()));
+        assert_eq!(parse_capacity("-5"), Err(()));
+        assert_eq!(parse_capacity("lots"), Err(()));
+        assert_eq!(parse_capacity("12X"), Err(()));
+    }
+
+    #[test]
+    fn routes_and_revision_read_off_the_settings_answer() {
+        let settings = json!({ "namespaces": [
+            { "ns": "llm-pi-ai", "revision": 4, "value": { "providers": {
+                "acme-gateway": { "api": "openai-completions" },
+                "opencode-go": {},
+            } } },
+        ] });
+        let mut declared = routes_in_ns(&settings, "llm-pi-ai");
+        declared.sort();
+        assert_eq!(declared, vec!["acme-gateway", "opencode-go"]);
+        assert_eq!(namespace_revision(&settings, "llm-pi-ai"), Some(4));
+        assert_eq!(namespace_revision(&settings, "missing"), None);
+        assert!(routes_in_ns(&json!({}), "llm-pi-ai").is_empty());
+    }
+
+    /// A scratch catalog directory for the reasoning-level tests.
+    fn scratch_catalog(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("zeron-dsh-providers-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn route(id: &str, ns: &str) -> GatewayProvider {
+        GatewayProvider {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            settings_ns: ns.to_string(),
+            api_key_env: None,
+            account: false,
+            declared: false,
+            chatgpt: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_levels_mirror_the_catalog_and_profile_declarations() {
+        let dir = scratch_catalog("levels");
+        // The installed catalog declares support per model: a map pins the
+        // offered levels to their wire spellings, no map offers the base
+        // levels (so `max` stays out), and `reasoning: false` offers none.
+        std::fs::write(
+            dir.join("acme.json"),
+            json!({ "openai-responses": {
+                "chat:thinker": { "id": "thinker", "type": "chat",
+                    "reasoning": true,
+                    "thinkingLevelMap": { "off": null, "xhigh": "xhigh", "max": "max" } },
+                "chat:base": { "id": "base", "type": "chat", "reasoning": true },
+                "chat:plain": { "id": "plain", "type": "chat", "reasoning": false },
+                "classifier:sorter": { "id": "sorter", "type": "classifier", "reasoning": true },
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let mut catalogs = std::collections::HashMap::new();
+        let acme = route("acme", "llm-pi-ai");
+        assert_eq!(
+            route_reasoning_levels(&acme, "thinker", None, &dir, &mut catalogs).await,
+            vec![ReasoningLevel::XHigh, ReasoningLevel::Max]
+        );
+        assert_eq!(
+            route_reasoning_levels(&acme, "base", None, &dir, &mut catalogs).await,
+            vec![
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High
+            ]
+        );
+        assert!(
+            route_reasoning_levels(&acme, "plain", None, &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        assert!(
+            route_reasoning_levels(&acme, "sorter", None, &dir, &mut catalogs)
+                .await
+                .is_empty(),
+            "a classifier catalog entry never reaches a chat picker"
+        );
+        // A stored modelOverrides declaration decides the set over the
+        // catalog; `false` takes the control away entirely.
+        let settings = json!({ "namespaces": [{ "ns": "llm-pi-ai", "value": { "providers": { "acme": {
+            "modelOverrides": {
+                "thinker": { "reasoningEfforts": { "off": null, "high": "high" } },
+                "base": { "reasoningEfforts": false },
+            }
+        } } } }] });
+        assert_eq!(
+            route_reasoning_levels(&acme, "thinker", Some(&settings), &dir, &mut catalogs).await,
+            vec![ReasoningLevel::High]
+        );
+        assert!(
+            route_reasoning_levels(&acme, "base", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reasoning_levels_declared_route_and_deepseek_switch() {
+        let dir = scratch_catalog("declared");
+        let mut catalogs = std::collections::HashMap::new();
+        // A hand-declared route carries no installed catalog; its models[]
+        // entries' reasoningEfforts are the whole declaration, with only the
+        // levels the harness can run offered.
+        let declared = route("acme-gateway", "llm-pi-ai");
+        let settings = json!({ "namespaces": [{ "ns": "llm-pi-ai", "value": { "providers": { "acme-gateway": {
+            "models": [
+                { "id": "thinking", "reasoningEfforts": { "off": null, "minimal": "min", "high": "high" } },
+                { "id": "silent", "reasoningEfforts": false },
+                { "id": "inherit" },
+            ]
+        } } } }] });
+        assert_eq!(
+            route_reasoning_levels(&declared, "thinking", Some(&settings), &dir, &mut catalogs)
+                .await,
+            vec![ReasoningLevel::Minimal, ReasoningLevel::High]
+        );
+        assert!(
+            route_reasoning_levels(&declared, "silent", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        assert!(
+            route_reasoning_levels(&declared, "inherit", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty(),
+            "no catalog exists to inherit from; nothing is invented"
+        );
+        // A non-pi-ai, non-deepseek route offers nothing.
+        assert!(
+            route_reasoning_levels(&route("x", "other-ns"), "m", None, &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        // llm-deepseek routes offer the adapter's efforts while thinking is
+        // enabled, and none once the switch is disabled.
+        let deepseek = route("deepseek-official", "llm-deepseek-api-key");
+        assert_eq!(
+            route_reasoning_levels(&deepseek, "deepseek-v4-pro", None, &dir, &mut catalogs).await,
+            vec![ReasoningLevel::Low, ReasoningLevel::High, ReasoningLevel::Max]
+        );
+        let disabled = json!({ "namespaces": [{ "ns": "llm-deepseek-api-key", "value": { "thinking": "disabled" } }] });
+        assert!(
+            route_reasoning_levels(&deepseek, "deepseek-v4-pro", Some(&disabled), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
     }
 }

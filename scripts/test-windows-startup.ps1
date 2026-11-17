@@ -1,9 +1,15 @@
-# Check the actual executable: startup must not allocate a console, and CLI
-# help/errors must still reach redirected streams before normal initialization.
-param([string]$Exe = (Join-Path $PSScriptRoot '../target/release/zeron.exe'))
+# Check the actual executables: the desktop app must not allocate a console,
+# and the CLI's help/errors must still reach redirected streams before normal
+# initialization. (Two binaries since the GPUI app went: `zeron-zgx.exe` is
+# the desktop app, `zeron.exe` the CLI beside it.)
+param(
+  [string]$Exe = (Join-Path $PSScriptRoot '../target/release/zeron.exe'),
+  [string]$GuiExe = (Join-Path $PSScriptRoot '../apps/zgx/target/release/zeron-zgx.exe')
+)
 $ErrorActionPreference = 'Stop'
 $Exe = (Resolve-Path -LiteralPath $Exe).Path
-$bytes = [IO.File]::ReadAllBytes($Exe)
+$GuiExe = (Resolve-Path -LiteralPath $GuiExe).Path
+$bytes = [IO.File]::ReadAllBytes($GuiExe)
 $pe = [BitConverter]::ToInt32($bytes, 0x3c)
 $subsystem = [BitConverter]::ToUInt16($bytes, $pe + 24 + 68)
 if ($subsystem -ne 2) { throw "Expected Windows GUI subsystem (2), got $subsystem" }

@@ -25,6 +25,8 @@ pub fn handles(method: &str) -> bool {
             | methods::DSH_CANCEL_SIGN_IN
             | methods::DSH_SIGN_OUT
             | methods::DSH_DISCOVER_MODELS
+            | methods::DSH_SESSIONS
+            | methods::DSH_PROJECTIONS
             | methods::DSH_CHATGPT_START
             | methods::DSH_CHATGPT_CANCEL
             | methods::DSH_CHATGPT_STATUS
@@ -50,14 +52,15 @@ pub fn translate(
     let translated = match method {
         methods::DSH_PROVIDERS => ("llm/listConfigurableProviders", json!({})),
         methods::DSH_SETTINGS => ("settings/describe", json!({})),
-        methods::DSH_MUTATE_SETTINGS => (
-            "settings/mutate",
-            json!({
-                "ns": required("ns")?,
-                "ops": required("ops")?,
-                "expectedRevision": field("expectedRevision"),
-            }),
-        ),
+        methods::DSH_MUTATE_SETTINGS => {
+            let mut args = json!({ "ns": required("ns")?, "ops": required("ops")? });
+            // An absent revision is absent, not null: the gateway validates the
+            // argument list, and a null would be a value it must reject.
+            if let Some(revision) = field("expectedRevision").filter(|value| !value.is_null()) {
+                args["expectedRevision"] = revision;
+            }
+            ("settings/mutate", args)
+        }
         methods::DSH_CREDENTIALS => ("credentials/describe", json!({ "refs": required("refs")? })),
         methods::DSH_SET_CREDENTIAL => (
             "credentials/set",
@@ -92,6 +95,14 @@ pub fn translate(
         methods::DSH_CHATGPT_START => ("zeron-chatgpt/start", json!({})),
         methods::DSH_CHATGPT_CANCEL => ("zeron-chatgpt/cancel", json!({})),
         methods::DSH_CHATGPT_STATUS => ("zeron-chatgpt/status", json!({})),
+        // The meter's Remotes take their request under a named argument, which
+        // the gateway validates by name: `_request` for the list, `request` for
+        // one session's projections.
+        methods::DSH_SESSIONS => ("session/list", json!({ "_request": {} })),
+        methods::DSH_PROJECTIONS => (
+            "session/projections",
+            json!({ "request": { "sessionId": required("sessionId")? } }),
+        ),
         other => {
             return Err(RpcError::Failed(format!(
                 "{other} is not part of the DeepSeek Harness provider surface"
@@ -138,7 +149,40 @@ mod tests {
         .unwrap();
         assert_eq!(call, "settings/mutate");
         assert_eq!(args["ns"], "llm-pi-ai");
-        assert!(args["expectedRevision"].is_null(), "a last-write wins");
+        assert!(
+            args.get("expectedRevision").is_none(),
+            "an absent revision stays absent: the gateway validates the argument list, so a null would be refused"
+        );
+
+        let (_, args) = translate(
+            methods::DSH_MUTATE_SETTINGS,
+            &json!({ "ns": "llm-pi-ai", "ops": [], "expectedRevision": 4 }),
+            origin,
+        )
+        .unwrap();
+        assert_eq!(args["expectedRevision"], 4, "a caller that read a revision sends it");
+    }
+
+    #[test]
+    fn the_token_meter_is_read_through_the_argument_names_its_remotes_declare() {
+        let origin = "http://127.0.0.1:49152";
+        assert!(handles(methods::DSH_SESSIONS));
+        assert!(handles(methods::DSH_PROJECTIONS));
+        let (call, args) = translate(methods::DSH_SESSIONS, &json!({}), origin).unwrap();
+        assert_eq!(call, "session/list");
+        assert_eq!(args, json!({ "_request": {} }), "the list Remote names its request `_request`");
+        let (call, args) = translate(
+            methods::DSH_PROJECTIONS,
+            &json!({ "sessionId": "ses_1" }),
+            origin,
+        )
+        .unwrap();
+        assert_eq!(call, "session/projections");
+        assert_eq!(args, json!({ "request": { "sessionId": "ses_1" } }));
+        assert!(
+            translate(methods::DSH_PROJECTIONS, &json!({}), origin).is_err(),
+            "a projection read without a session is refused, not defaulted"
+        );
     }
 
     #[test]

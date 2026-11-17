@@ -7,6 +7,20 @@ import { readFile, writeFile, mkdir, mkdtemp, rm } from 'node:fs/promises';
 
 const VERSION = '0.2.2-rc.3';
 const models = new Set(['deepseek-flash', 'deepseek-v4-pro']);
+// The `llm-pi-ai` entries the gateway wrote into the web profile, as YAML
+// patch lines (empty when there are none, or no profile yet).
+async function gatewayRoutes(dshHome) {
+  try {
+    const text = await readFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8');
+    return text
+      .split(/^(?=- )/m)
+      .filter(block => /^- id: llm-pi-ai\b/.test(block))
+      .join('');
+  } catch {
+    return '';
+  }
+}
+
 const sdkRoot = resolve(process.argv[1].endsWith('shim.mjs') ? process.argv[2] : process.argv[1]);
 const testRuntime = process.argv[1].endsWith('shim.mjs') ? process.argv[3] : process.argv[2];
 const requests = new Map();
@@ -125,6 +139,11 @@ async function start(config) {
     for (const value of Object.values(mcp.env ?? {})) if (value) secrets.add(value);
     yaml += `- insert:\n    - id: zeron-mcp-${index}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config: !!js JSON.parse(process.env.${variable})\n`;
   }
+  // The gateway's route registrations (the Providers page's writes) land in
+  // the `web` profile; this run's is `sdk`, so a route configured there has
+  // no adapter here ("no adapter registered for provider"). Carry the pi-ai
+  // entry across: the credential store is shared, the settings are not.
+  yaml += await gatewayRoutes(config.dshHome);
   const patchPath = join(runtimeDirectory, 'cordis.patch.yml');
   await writeFile(patchPath, yaml, { mode: 0o600 });
   for (const [key, value] of Object.entries(environment)) if (/key|token|secret/i.test(key) && value) secrets.add(value);

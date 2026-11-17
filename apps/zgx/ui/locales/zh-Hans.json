@@ -1642,6 +1642,71 @@
         "placeholder": "粘贴密钥",
         "save": "保存",
         "saved": "云端的 {agent} 现在使用此密钥"
+      },
+      "models": {
+        "title": "模型",
+        "description": "输入框提供哪些提供商的模型。关闭一个不会取消该提供商的配置。",
+        "every": "每个 {name} 模型",
+        "count": "提供 {count} 个模型",
+        "count_one": "提供 1 个模型",
+        "none": "还没有提供商提供模型。"
+      },
+      "routes": {
+        "title": "提供商路由",
+        "description": "此设备网关提供的模型提供商，以及各自运行所需的配置。",
+        "page_description": "此设备上的网关可以运行的模型提供商，以及各自所需的配置。",
+        "account": "已通过账户登录——这里无需添加。",
+        "nothing": "这里没有需要配置的内容。",
+        "oauth_elsewhere": "请在提供商自己的设置中登录；Zeron 只能登录 ChatGPT。",
+        "refreshing": "正在刷新…",
+        "remote": "在 {device} 上打开「提供商」以更改该设备运行的内容。",
+        "terms": "提供商 路由 模型 网关 密钥 api oauth 登录",
+        "empty": {
+          "title": "没有路由",
+          "body": "此设备的网关没有报告任何提供商。在它的 DeepSeek Harness 设置中添加一个，然后重试。"
+        },
+        "failed": {
+          "title": "提供商服务没有响应",
+          "hint": "请稍后重试。",
+          "retry": "重试"
+        },
+        "key": {
+          "name": "{name} API 密钥",
+          "description": "保存在存储中 {ref} 下的密钥——优先于环境变量。",
+          "placeholder": "粘贴密钥",
+          "save": "保存",
+          "configured": "已配置",
+          "saved": "已保存。",
+          "failed": "无法保存：{says}",
+          "whitespace": "密钥前后不能有空格。",
+          "line": "API 密钥"
+        },
+        "sign_in": {
+          "start": "使用 ChatGPT 登录",
+          "description": "在浏览器中登录；授权会保存在存储中。",
+          "waiting": "等待浏览器…",
+          "cancel": "取消",
+          "signed_in": "已登录",
+          "not_completed": "登录未完成。",
+          "try_again": "重试",
+          "failed": "登录未能开始：{says}",
+          "line": "ChatGPT 账户"
+        },
+        "in_use": "使用中",
+        "show_all": "显示全部 {count} 个提供商",
+        "show_fewer": "收起",
+        "account_line": "DeepSeek 账户",
+        "oauth_line": "账户",
+        "nothing_line": "无密钥"
+      },
+      "accounts": {
+        "title": "账户",
+        "description": "此设备上的智能体已登录的账户，以及各套餐的使用情况。",
+        "in_use": "使用中",
+        "use": "使用",
+        "add": "添加账户",
+        "banked": "{count} 次重置已存入",
+        "use_reset": "使用重置"
       }
     },
     "devices": {
@@ -2341,6 +2406,13 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "移除"
       }
+    },
+    "gateway": {
+      "title": "网关"
+    },
+    "agents": {
+      "title": "智能体",
+      "description": "此设备上的编程智能体、它们的登录账户，以及各自的使用情况。"
     }
   },
   "common": {

@@ -1495,6 +1495,54 @@
     "providers": {
       "title": "Providers",
       "terms": "harnesses agents cli claude code codex cursor devin grok hermes pi opencode antigravity muse install enable disable accounts sign in login",
+      "routes": {
+        "title": "Provider routes",
+        "description": "The model providers this device's gateway offers, and what each needs to run.",
+        "page_description": "The model providers the gateway on this device can run, and what each needs.",
+        "account": "Signed in through the account — nothing to add here.",
+        "nothing": "Nothing to configure here.",
+        "oauth_elsewhere": "Sign in from the provider's own setup; Zeron can sign in to ChatGPT only.",
+        "refreshing": "Refreshing…",
+        "remote": "Open Providers on {device} to change what that device runs.",
+        "terms": "provider route model gateway key api oauth sign in",
+        "empty": {
+          "title": "No routes",
+          "body": "This device's gateway reported no providers. Add one to its DeepSeek Harness setup, then try again."
+        },
+        "failed": {
+          "title": "The provider service didn't answer",
+          "hint": "Try again in a moment.",
+          "retry": "Try again"
+        },
+        "key": {
+          "name": "{name} API key",
+          "description": "A key saved to the store under {ref} — it wins over the environment variable.",
+          "placeholder": "Paste a key",
+          "save": "Save",
+          "configured": "Configured",
+          "saved": "Saved.",
+          "failed": "Couldn't save it: {says}",
+          "whitespace": "A key has no spaces around it.",
+          "line": "API key"
+        },
+        "sign_in": {
+          "start": "Sign in with ChatGPT",
+          "description": "Sign in with the browser; the grant is kept in the store.",
+          "waiting": "Waiting for the browser…",
+          "cancel": "Cancel",
+          "signed_in": "Signed in",
+          "not_completed": "The sign-in wasn't completed.",
+          "try_again": "Try again",
+          "failed": "The sign-in didn't start: {says}",
+          "line": "ChatGPT account"
+        },
+        "in_use": "In use",
+        "show_all": "Show all {count} providers",
+        "show_fewer": "Show fewer",
+        "account_line": "DeepSeek account",
+        "oauth_line": "Account",
+        "nothing_line": "No key"
+      },
       "agent_settings": "Agent settings",
       "agents": {
         "label": "Your agents",
@@ -1642,6 +1690,23 @@
         "placeholder": "Paste a key",
         "save": "Save",
         "saved": "{agent} on Cloud now uses this key"
+      },
+      "models": {
+        "title": "Models",
+        "description": "Which of the providers' models the composer offers. Switching one off leaves the provider configured.",
+        "every": "Every {name} model",
+        "count": "Serves {count} models",
+        "none": "No provider serves models yet.",
+        "count_one": "Serves 1 model"
+      },
+      "accounts": {
+        "title": "Accounts",
+        "description": "The accounts this device's agents are signed in with, and what each plan is using.",
+        "in_use": "In use",
+        "use": "Use",
+        "add": "Add account",
+        "banked": "{count} reset banked",
+        "use_reset": "Use reset"
       }
     },
     "devices": {
@@ -2341,6 +2406,13 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "Remove"
       }
+    },
+    "gateway": {
+      "title": "Gateway"
+    },
+    "agents": {
+      "title": "Agents",
+      "description": "The coding agents this device has, the accounts they sign in with, and what each is using."
     }
   },
   "common": {

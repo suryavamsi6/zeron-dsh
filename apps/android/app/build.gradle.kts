@@ -40,7 +40,9 @@ val genIcons by tasks.registering(Exec::class) {
     description = "Rasterizes the shared transcript icons."
     val out = iconsOut.get().asFile
     inputs.dir(repoRoot.resolve("apps/ios/Zeron/Assets.xcassets"))
-    inputs.dir(repoRoot.resolve("crates/ui/assets/icons"))
+    // The desktop icon set `svg2vd.py` reads (the GPUI app's copy went with
+    // `crates/ui`).
+    inputs.dir(repoRoot.resolve("assets/icons"))
     inputs.dir(repoRoot.resolve("apps/android/icons"))
     inputs.file(repoRoot.resolve("scripts/android/svg2vd.py"))
     outputs.dir(out)

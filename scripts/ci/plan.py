@@ -15,8 +15,7 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
   skip         JSON object, suite -> jobs that already passed on the same
                inputs and are skipped (Windows and voice skip single jobs; the
                other suites only run or skip as a whole)
-  flags        JSON object, suite -> optional steps to run (fast tier: only
-               for their own files): ui "browser", macos "fixtures"
+  flags        JSON object, suite -> optional steps to run
   pr           the pull request number (pull requests only), for the admit job name
 
 Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
@@ -25,11 +24,11 @@ Windows and voice jobs that passed while the others did not.
 
 Tiers. Every suite has a broad path list (what used to trigger its workflow).
 On the full tier a suite runs when any changed file matches it. On the fast
-tier the expensive platform suites (Windows, macOS native, voice platforms,
-Android) only run when the change can plausibly be platform specific: their
-own files, or Rust/script hunks that mention the platform (cfg(windows),
-target_os, objc, WebKit...). Linux, iOS (already selective) and the cheap
-suites run as on the full tier. Changes to CI itself run everything.
+tier the expensive platform suites (Windows, voice, Android) only run when
+the change can plausibly be platform specific: their own files, or
+Rust/script hunks that mention the platform (cfg(windows), target_os...).
+Linux, iOS (already selective) and the cheap suites run as on the full tier.
+Changes to CI itself run everything.
 
 Nightly only. Some checks cost more runner time than the regressions they
 catch on pull requests and main (NIGHTLY_SUITES, NIGHTLY_FLAGS): they run on
@@ -54,14 +53,11 @@ from reuse import matches  # noqa: E402
 # (scripts/tests/test_ci_plan.py checks).
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests-1", "linux"), ("core-tests-2", "linux")],  # ui-tests.yml (one nextest run, two partitions)
-    "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
     "deepseek": [("deepseek-compatibility", "linux")],  # deepseek-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
     "voice": [("offline-linux", "linux")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
-    "macos": [("macos-native", "macos")],  # macos.yml
-    "frame_source": [("macos-frame-source", "macos")],  # macos.yml
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
     "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
@@ -69,10 +65,9 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
 # Run only nightly, manually or with `ci:full` (see the module docstring): voice
 # (the AEC3 audio stack and the packaged Windows media runtime; no failures of
 # their own in the two weeks measured, and the rest of voice is tested in
-# core-tests, ios-core and the Windows tests) and the Linux native browser
-# fixture (its failures were window-timing flakes and package downloads).
+# core-tests, ios-core and the Windows tests).
 NIGHTLY_SUITES = ("voice",)
-NIGHTLY_FLAGS = (("ui", "browser"),)
+NIGHTLY_FLAGS: tuple[tuple[str, str], ...] = ()
 # Suites whose jobs are independent, so one can be skipped while another runs.
 SPLITTABLE = ("voice", "windows")
 
@@ -113,9 +108,6 @@ ZGX_CORE = [
 BROAD: dict[str, list[str]] = {
     "core": CARGO + ["crates/**", "apps/zeron/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                      ".github/workflows/ui-tests.yml"],
-    "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
-                   "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
-                   ".github/workflows/ui-tests.yml"],
     "deepseek": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
                        "scripts/*deepseek-sdk*", ".github/workflows/deepseek-*.yml"],
     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
@@ -126,11 +118,6 @@ BROAD: dict[str, list[str]] = {
     "windows": CARGO + ["crates/**", "apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml"],
-    "macos": CARGO + ["crates/**", "apps/zeron/**", "edge/**", "scripts/run-macos-browser-fixture.sh",
-                      "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
-                      "dist/macos/Info.plist", ".github/workflows/macos.yml"],
-    # Tests the pinned GPUI checkout: only when the pin moves (see gpui_moved()).
-    "frame_source": [".github/workflows/macos.yml"],
     "ios": CARGO + MOBILE_CORE + ["apps/ios/**", "scripts/ios/**", ".github/workflows/macos.yml"],
     "android": CARGO + ["apps/android/**", "crates/**", "scripts/android/**", "apps/ios/Zeron/Fonts/**",
                         "apps/ios/Zeron/Assets.xcassets/**", ".github/workflows/android.yml"],
@@ -147,11 +134,6 @@ FAST_PATHS: dict[str, list[str]] = {
                         "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                         ".github/workflows/windows.yml", "crates/update/**", "crates/cli/**",
                         "crates/launch/**"],
-    "macos": CARGO + ["apps/zeron/**", "crates/update/**", "crates/cli/**", "crates/launch/**",
-                      "crates/preview/**", "crates/text/**",
-                      "edge/package.json", "edge/package-lock.json", "scripts/run-macos-browser-fixture.sh",
-                      "scripts/test-browser-storage.py", "scripts/ci/run-macos-fixture.sh",
-                      "dist/macos/Info.plist", ".github/workflows/macos.yml"],
     # The Rust is the same code the Linux suites test (no Android cfg), so a pull
     # request builds the APK for the app, the FFI crate and dependency changes.
     "android": CARGO + ["apps/android/**", "scripts/android/**", "crates/mobile/**", "crates/mobile-bindgen/**",
@@ -173,17 +155,7 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
                                    "crates/client/**", ".github/workflows/macos.yml"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
-FLAG_PATHS: dict[tuple[str, str], list[str]] = {
-    # Native browser fixture on X11/Wayland/OpenGL.
-    ("ui", "browser"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
-                                "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
-                                ".github/workflows/ui-tests.yml"],
-    # WebKit browser fixture and the preview (HMR) fixture.
-    ("macos", "fixtures"): CARGO + ["crates/ui/src/browser/**", "crates/ui/examples/browser-fixture*",
-                                    "crates/ui/examples/preview-fixture*", "crates/preview/**", "edge/**",
-                                    "scripts/run-macos-browser-fixture.sh", "scripts/test-browser-storage.py",
-                                    "scripts/ci/run-macos-fixture.sh", ".github/workflows/macos.yml"],
-}
+FLAG_PATHS: dict[tuple[str, str], list[str]] = {}
 
 # A version bump (workspace version in Cargo.toml and the workspace packages'
 # versions in Cargo.lock) changes no code: it selects nothing and is left out of
@@ -191,26 +163,20 @@ FLAG_PATHS: dict[tuple[str, str], list[str]] = {
 VERSION_LINE = re.compile(r'^\s*version\s*=\s*"[^"]*"\s*$')
 
 
-# ...and, for files under crates/, platform markers in the file name or in the
+# ...and, for files under crates/, Windows markers in the file name or in the
 # changed code (comments are ignored: "as on Windows" changes nothing). A
-# platform conditional (target_os, cfg(unix), cfg(not(windows))...) counts for
-# both, since it decides what each of them compiles; cfg(windows) only for Windows. A Rust file without a
-# diff (too large, binary) counts too.
-PLATFORM_CFG = r"target_os|target_family|target_vendor|cfg!?\(\s*(?:not\(\s*(?:unix|windows)|unix)\b"
-PLATFORM_PATHS = {
-    "windows": re.compile(r"(?:^|[/_.-])(?:windows|win32)(?:[/_.-]|$)", re.IGNORECASE),
-    "macos": re.compile(r"(?:^|[/_.-])(?:macos|darwin|apple|coretext|webkit)(?:[/_.-]|$)", re.IGNORECASE),
-}
-PLATFORM_CODE = {
-    "windows": re.compile(PLATFORM_CFG + r"|cfg!?\(\s*windows\b|\bwindows(?:_sys)?::|\bwin32|\bwinapi\b|\bmsvc\b|\bhwnd\b"
-                          r"|direct3d|directwrite|\bdwrite|\bd3d1[12]|gpui_windows", re.IGNORECASE),
-    "macos": re.compile(PLATFORM_CFG + r"|\bobjc2?\b|\bcocoa\b|\bappkit\b|core_?text|\bwebkit|wkwebview"
-                        r"|\bns(?:view|window|string|app|event)\b|gpui_macos|\bcore_foundation", re.IGNORECASE),
-}
+# platform conditional (target_os, cfg(unix), cfg(not(windows))...) counts,
+# since it decides what Windows compiles. A Rust file without a diff (too
+# large, binary) counts too.
+PLATFORM_PATHS = re.compile(r"(?:^|[/_.-])(?:windows|win32)(?:[/_.-]|$)", re.IGNORECASE)
+PLATFORM_CODE = re.compile(
+    r"target_os|target_family|target_vendor|cfg!?\(\s*(?:not\(\s*(?:unix|windows)|unix)\b"
+    r"|cfg!?\(\s*windows\b|\bwindows(?:_sys)?::|\bwin32|\bwinapi\b|\bmsvc\b|\bhwnd\b"
+    r"|direct3d|directwrite|\bdwrite|\bd3d1[12]|gpui_windows", re.IGNORECASE)
 COMMENT = re.compile(r"^\s*(?://|/\*|\*)")
 
 
-PLATFORM_FAST_SUITES = ("voice", "windows", "macos", "android")
+PLATFORM_FAST_SUITES = ("voice", "windows", "android")
 
 
 def changed_code(patch: str) -> str:
@@ -226,19 +192,19 @@ def changed_code(patch: str) -> str:
     return "\n".join(lines)
 
 
-def platform_specific(platform: str, files: list[dict]) -> bool:
+def windows_specific(files: list[dict]) -> bool:
     for f in files:
         path = f["filename"]
         if not path.startswith("crates/"):
             continue
-        if PLATFORM_PATHS[platform].search(path):
+        if PLATFORM_PATHS.search(path):
             return True
         patch = f.get("patch")
         if patch is None:
             if path.endswith(".rs"):
                 return True
             continue
-        if PLATFORM_CODE[platform].search(changed_code(patch)):
+        if PLATFORM_CODE.search(changed_code(patch)):
             return True
     return False
 
@@ -250,17 +216,6 @@ def version_only(f: dict) -> bool:
     changed = [line[1:] for line in f["patch"].splitlines()
                if line[:1] in "+-" and not line.startswith(("+++", "---"))]
     return bool(changed) and all(VERSION_LINE.match(line) for line in changed)
-
-
-def gpui_moved(files: list[dict]) -> bool:
-    """Whether the pinned GPUI (zeronsh/zui) checkout changed."""
-    for f in files:
-        if f["filename"] not in ("Cargo.toml", "Cargo.lock"):
-            continue
-        patch = f.get("patch")
-        if patch is None or re.search(r"^[+-].*(gpui|zui)", patch, re.MULTILINE):
-            return True
-    return False
 
 
 def plan(files: list[dict] | None, tier: str, mobile: list[str] | None = None,
@@ -294,14 +249,13 @@ def select(files: list[dict] | None, tier: str, mobile: list[str] | None,
     if zgx is not None:
         broad["zgx"] = CARGO + ZGX_PATHS + zgx
     suites = {suite: any(matches(p, broad[suite]) for p in paths) for suite in SUITE_JOBS}
-    suites["frame_source"] = suites["frame_source"] or gpui_moved(files)
     if tier == "fast":
         for suite in PLATFORM_FAST_SUITES:
             if not suites[suite]:
                 continue
             fast = any(matches(p, FAST_PATHS[suite]) for p in paths)
-            if not fast and suite in PLATFORM_CODE:
-                fast = platform_specific(suite, files)
+            if not fast and suite == "windows":
+                fast = windows_specific(files)
             suites[suite] = fast
     return suites
 
@@ -521,10 +475,10 @@ def main() -> int:
         lines.append(f"| {suite} | {state} | {'; '.join(notes)} |")
     lines += ["", f"Reserved runners: `{out['reservation']}`"]
     if tier == "fast":
-        lines += ["", "Windows, macOS and Android run on pull requests only when the change looks "
+        lines += ["", "Windows and Android run on pull requests only when the change looks "
                   "platform specific. Add the `ci:full` label and re-run for everything."]
     if not nightly:
-        lines += ["", "Nightly only (or with `ci:full`): voice and the Linux native browser fixture."]
+        lines += ["", "Nightly only (or with `ci:full`): voice."]
     files_read = {path for paths in extra.values() for path in paths}
     if files_read:
         lines += ["", "Files outside their packages that Rust suites read (part of their fingerprints): "

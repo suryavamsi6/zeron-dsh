@@ -40,6 +40,11 @@ impl AgentAccountsConfig {
     }
 }
 
+/// The env-shaped ref the harness's own key store answers to: the gateway's
+/// `credentials/describe` names the same ref for DSH's DeepSeek route, and
+/// both must hold the key for a run to have it.
+pub const DEEPSEEK_KEY_REF: &str = "DEEPSEEK_API_KEY";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RelayedCallback {

@@ -937,6 +937,26 @@ pub struct EngineRpc {
 }
 
 impl EngineRpc {
+    /// The models the gateway's configured routes offer, for the model picker.
+    /// Started on first use like every other DSH surface: a sign-in made on the
+    /// Providers page has to be visible in the picker without a visit there
+    /// first. A route that cannot be discovered contributes nothing.
+    async fn dsh_route_models(&self) -> Vec<zeron_proto::Model> {
+        let harness = zeron_harness::deepseek::DeepSeekHarness::new();
+        let gateway = self.dsh_gateway.get_or_init(|| {
+            std::sync::Arc::new(zeron_harness::deepseek::gateway::Gateway::new(
+                harness.sdk_root(),
+                harness.home(),
+            ))
+        });
+        let signed_in = gateway
+            .call("zeron-chatgpt/status", serde_json::json!({}))
+            .await
+            .map(|value| value["authorized"].as_bool().unwrap_or(false))
+            .unwrap_or(false);
+        crate::dsh_providers::route_models(gateway, signed_in).await
+    }
+
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API
     pub fn new(
         sessions: SessionsEngine,
@@ -1022,6 +1042,28 @@ impl EngineRpc {
             .call(call, args)
             .await
             .map_err(|error| RpcError::Failed(error.to_string()))?;
+        // The DeepSeek key has two stores: DSH's gateway (what its routes
+        // read) and the harness's own `{data_dir}/deepseek/api-key` (what a
+        // run's environment and the account list read). Saving one without
+        // the other leaves a key that looks stored and is never used.
+        if let Some(key) = params.get("ref").and_then(|r| r.as_str())
+            && key == crate::agent_accounts::DEEPSEEK_KEY_REF
+        {
+            let dir = self.repos.data_dir().join("deepseek");
+            let path = dir.join("api-key");
+            match method {
+                methods::DSH_SET_CREDENTIAL => {
+                    if let Some(value) = params.get("value").and_then(|v| v.as_str()) {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::write(&path, value);
+                    }
+                }
+                methods::DSH_UNSET_CREDENTIAL => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                _ => {}
+            }
+        }
         Ok(RpcReply::Value(value))
     }
 
@@ -3474,11 +3516,15 @@ impl RpcService for EngineRpc {
             }
             methods::LIST_MODELS => {
                 let p: ListModelsParams = parse_params(params)?;
-                let models = self
+                let mut models = self
                     .registry
                     .discover_models(p.harness)
                     .await
                     .map_err(|e| RpcError::Failed(e.to_string()))?;
+                // The gateway's own routes: what the person signed in to or
+                // stored a key for on the Providers page. The picker reads
+                // this list, so without them a sign-in there is invisible.
+                models.extend(self.dsh_route_models().await);
                 // A catalog that changed is told to plugins (models.updated).
                 if let Some(plugins) = &self.plugins {
                     plugins.agents().observe_models(p.harness, &models);

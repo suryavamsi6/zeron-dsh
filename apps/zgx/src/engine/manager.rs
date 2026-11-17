@@ -461,7 +461,9 @@ mod tests {
 
     /// The beta manages Zeron.app's own engine: its port and data, the
     /// bundle's engine, production's edge and sign-in; never staging's.
-    #[cfg(feature = "beta")]
+    // Zeron.app's bundle is macOS's: elsewhere there is no engine beside the
+    // app to manage, and the test's own paths are the bundle's.
+    #[cfg(all(feature = "beta", target_os = "macos"))]
     #[test]
     fn a_beta_build_manages_zeron_app_s_engine() {
         let dir = std::env::temp_dir().join(format!("zgx-beta-engine-{}", std::process::id()));

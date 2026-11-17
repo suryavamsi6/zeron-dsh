@@ -5,7 +5,17 @@ const reads = new Set(['read', 'glob', 'grep', 'list', 'ask_user_question']);
 const edits = new Set(['write', 'edit', 'apply_patch']);
 
 export function assertRoute(options) {
-  if (options.provider !== 'deepseek-official' || !['deepseek-flash', 'deepseek-v4-pro'].includes(options.model)) {
+  // The official route runs its two models and nothing else. Any other route
+  // is one the host stamped (`ZERON_DEEPSEEK_PROVIDER`, which never rides the
+  // wire, so a sender cannot choose it); DSH resolves that route's models and
+  // reports an unknown one itself.
+  if (options.provider === 'deepseek-official') {
+    if (!['deepseek-flash', 'deepseek-v4-pro'].includes(options.model)) {
+      throw new Error('Zeron only permits official DeepSeek model routes');
+    }
+    return;
+  }
+  if (typeof options.provider !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(options.provider)) {
     throw new Error('Zeron only permits official DeepSeek model routes');
   }
 }
