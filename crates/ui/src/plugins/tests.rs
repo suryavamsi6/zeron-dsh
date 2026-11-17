@@ -3,7 +3,6 @@
 //! settings do.
 
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::{AppContext, Context, Entity, Render, TestAppContext, div, prelude::*};
 use serde_json::{Value as Json, json};
@@ -316,21 +315,31 @@ fn a_pointer_move_rebuilds_the_scene_even_when_it_is_still(cx: &mut TestAppConte
         dir: parallax_dir(),
     };
     let window = cx.add_window(|_, cx| PluginScene::new(plugin, data.path(), cx));
+    // When it was last built (a frame that reuses the tree leaves it alone)
+    // and where its nearest layer sat: an address would prove neither, since
+    // a rebuilt tree can be given the one the old tree had.
+    let drawn = |window: &gpui::WindowHandle<PluginScene>, cx: &mut TestAppContext| {
+        window
+            .update(cx, |scene, _, _| {
+                let mut found = Vec::new();
+                pictures(scene.tree.as_ref().expect("a tree"), &mut found);
+                (scene.at, found)
+            })
+            .unwrap()
+    };
     cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
         .unwrap();
-    let before = window
+    window
         .update(cx, |scene, _, _| {
             assert!(matches!(scene.state(), SceneState::Drawing));
             assert!(!scene.moving, "at rest, nothing moves");
-            Rc::as_ptr(scene.tree.as_ref().expect("a tree"))
         })
         .unwrap();
+    let before = drawn(&window, cx);
     // Nothing asked for a frame: drawing again reuses the tree as-is.
     cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
         .unwrap();
-    let still = window
-        .update(cx, |scene, _, _| Rc::as_ptr(scene.tree.as_ref().unwrap()))
-        .unwrap();
+    let still = drawn(&window, cx);
     assert_eq!(still, before, "a still scene is built once");
     // The pointer is what the drawing follows, so its move rebuilds even
     // though no spring was moving.
@@ -339,10 +348,13 @@ fn a_pointer_move_rebuilds_the_scene_even_when_it_is_still(cx: &mut TestAppConte
         .unwrap();
     cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
         .unwrap();
-    let after = window
-        .update(cx, |scene, _, _| Rc::as_ptr(scene.tree.as_ref().unwrap()))
-        .unwrap();
-    assert_ne!(after, before, "the pointer's move rebuilt the tree");
+    let after = drawn(&window, cx);
+    assert!(after.0 > before.0, "the pointer's move rebuilt the tree");
+    assert_ne!(
+        after.1, before.1,
+        "the drawing moved with the pointer: {:?} then {:?}",
+        before.1, after.1
+    );
 }
 
 #[gpui::test]

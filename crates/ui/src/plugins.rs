@@ -159,10 +159,7 @@ impl PluginScene {
             .as_ref()
             .map(|manifest| zeron_engine::plugins::settings::declared(manifest, builtin(&self.plugin)))
             .unwrap_or_default();
-        let values = zeron_engine::plugins::settings::values(
-            &declared,
-            &zeron_engine::plugins::settings::load(&storage, &self.plugin.id),
-        );
+        let values = zeron_engine::plugins::settings::load(&storage, &self.plugin.id);
         let locale = read_locale(&self.plugin.dir);
         let entry_name = manifest
             .as_ref()
@@ -171,19 +168,21 @@ impl PluginScene {
             .unwrap_or("init.luau")
             .to_string();
         let reduced = crate::motion::reduced_motion(cx);
-        let entry = std::fs::read_to_string(self.plugin.dir.join(&entry_name));
-        let script = entry.map_err(|error| format!("Its entry couldn't be read: {error}")).and_then(
-            |entry| {
+        let dir = self.plugin.dir.clone();
+        let script = values
+            .map_err(|problem| format!("Its settings couldn't be read: {problem}"))
+            .and_then(|stored| {
+                let entry = std::fs::read_to_string(dir.join(&entry_name))
+                    .map_err(|error| format!("Its entry couldn't be read: {error}"))?;
                 PluginScript::load(
                     &entry,
-                    &read_modules(&self.plugin.dir),
-                    &values,
+                    &read_modules(&dir),
+                    &zeron_engine::plugins::settings::values(&declared, &stored),
                     &locale,
                     reduced,
                 )
                 .map_err(|error| format!("Its drawing couldn't load: {}", error.message))
-            },
-        );
+            });
         match script {
             Ok(script) if script.replaces(NEW_CHAT_BACKGROUND) => {
                 self.script = Some(script);
