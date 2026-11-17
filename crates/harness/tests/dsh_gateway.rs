@@ -156,3 +156,96 @@ async fn the_provider_surface_answers_over_the_gateway() {
     assert!(again["status"].is_string());
     gateway.shutdown().await;
 }
+
+/// Settings written through the gateway persist in the shared home across a
+/// service restart — the proof behind "configured in the app, used by the
+/// next run". Opt-in like the rest of this file: it starts a real `dsh web`
+/// in a scratch home and makes no model call.
+#[tokio::test]
+#[ignore = "starts a real dsh web service from the pinned SDK"]
+async fn settings_written_here_survive_a_service_restart() {
+    let Some(sdk) = sdk_root() else {
+        eprintln!("no ZERON_DEEPSEEK_SDK_DIR: nothing to start");
+        return;
+    };
+    let home = tempfile::tempdir().expect("a scratch harness home");
+    let gateway = Gateway::new(&sdk, home.path());
+
+    // The default model namespace exists and starts empty of a pick.
+    let before = gateway
+        .call("settings/describe", serde_json::json!({}))
+        .await
+        .expect("settings answer");
+    let default_ns = |value: &serde_json::Value| {
+        value["namespaces"]
+            .as_array()
+            .and_then(|list| list.iter().find(|ns| ns["ns"] == "agent-default-model").cloned())
+    };
+    assert!(default_ns(&before).is_some(), "the default model ns exists: {before}");
+
+    // Write the default model and an enabled provider through settings/mutate.
+    gateway
+        .call(
+            "settings/mutate",
+            serde_json::json!({
+                "ns": "agent-default-model",
+                "ops": [
+                    { "op": "add", "path": ["provider"], "value": "deepseek-official" },
+                    { "op": "add", "path": ["model"], "value": "deepseek-flash" },
+                ],
+            }),
+        )
+        .await
+        .expect("the default model mutates");
+    gateway
+        .call(
+            "settings/mutate",
+            serde_json::json!({
+                "ns": "llm-pi-ai",
+                "ops": [{
+                    "op": "add",
+                    "path": ["providers", "opencode-go"],
+                    "value": { "displayName": "OpenCode Go", "apiKeyEnv": "OPENCODE_API_KEY" },
+                }],
+            }),
+        )
+        .await
+        .expect("the provider enables");
+
+    let after = gateway
+        .call("settings/describe", serde_json::json!({}))
+        .await
+        .expect("settings answer again");
+    let default = default_ns(&after).expect("the default model ns");
+    assert_eq!(
+        default["value"]["model"], "deepseek-flash",
+        "the default model reads back: {default}"
+    );
+    let pi_ai = after["namespaces"]
+        .as_array()
+        .and_then(|list| list.iter().find(|ns| ns["ns"] == "llm-pi-ai"))
+        .expect("the llm-pi-ai ns");
+    assert_eq!(
+        pi_ai["value"]["providers"]["opencode-go"]["apiKeyEnv"], "OPENCODE_API_KEY",
+        "the enabled provider reads back: {pi_ai}"
+    );
+
+    // Restart the service on the same home: both writes are still there.
+    gateway.shutdown().await;
+    let restarted = gateway
+        .call("settings/describe", serde_json::json!({}))
+        .await
+        .expect("a restarted service answers");
+    let default = default_ns(&restarted).expect("the default model ns after restart");
+    assert_eq!(default["value"]["model"], "deepseek-flash");
+    assert_eq!(default["value"]["provider"], "deepseek-official");
+    let pi_ai = restarted["namespaces"]
+        .as_array()
+        .and_then(|list| list.iter().find(|ns| ns["ns"] == "llm-pi-ai"))
+        .expect("the llm-pi-ai ns after restart");
+    assert!(
+        pi_ai["value"]["providers"]["opencode-go"].is_object(),
+        "the provider is still enabled after restart: {pi_ai}"
+    );
+    gateway.shutdown().await;
+}
