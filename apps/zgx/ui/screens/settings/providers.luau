@@ -464,6 +464,77 @@ local function model_row(item: any): Node
 	}
 end
 
+-- The agents' accounts, as the upstream screen lists them: who is signed in,
+-- what the plan is using, and which one runs.
+local function account_row(agent_id: string, account: any): Node
+	local function pct(value: any): string
+		return `{math.floor((tonumber(value) or 0) * 100 + 0.5)}%`
+	end
+	return ds.Settings.Row {
+		label = account.email,
+		description = account.plan,
+		badge = ui.show(function(): boolean
+			return account.active == true
+		end, ds.Badge { ui.t("settings.providers.accounts.in_use"), tone = "accent", size = "sm" }),
+		detail = function(): string?
+			-- (An API key has no plan, so no windows to show.)
+			if account.key then
+				return nil
+			end
+			return `Session {pct(account.session)} · Week {pct(account.week)}`
+		end,
+		control = ui.show(function(): boolean
+			return account.switchable == true and account.active ~= true
+		end, ds.Button {
+			ui.t("settings.providers.accounts.use"),
+			size = "sm",
+			tone = "secondary",
+			on_click = function()
+				agents.switch_on(agents.now:get().target or "", agent_id, account.id)
+			end,
+		}),
+	}
+end
+
+-- One block per agent that has accounts, its own "Add account" under them.
+local function accounts_section(): Node?
+	local now = agents.now:get()
+	local blocks = {}
+	for _, agent in now.list or {} do
+		local accounts = agent.accounts or {}
+		if #accounts > 0 then
+			local rows = {}
+			for _, account in accounts do
+				table.insert(rows, account_row(agent.id, account))
+			end
+			table.insert(blocks, ds.Settings.Section {
+				title = agent.name,
+				ds.Settings.Group(rows),
+				ui.row {
+					w_full = true,
+					px = ds.Settings.inset(),
+					ds.Button {
+						ui.t("settings.providers.accounts.add"),
+						size = "sm",
+						tone = "secondary",
+						on_click = function()
+							agents.sign_in(agent.id)
+						end,
+					},
+				},
+			})
+		end
+	end
+	if #blocks == 0 then
+		return nil
+	end
+	return ds.Settings.Section {
+		title = ui.t("settings.providers.accounts.title"),
+		description = ui.t("settings.providers.accounts.description"),
+		ui.column { w_full = true, gap = "$space.4", blocks },
+	}
+end
+
 function M.body(): Node
 	return ui.component(function(): Node
 		-- The catalog and what it needs, loaded once a visit (Try again
@@ -605,9 +676,11 @@ function M.body(): Node
 			end
 			return out
 		end)
+		local accounts = accounts_section()
 		return ui.column {
 			w_full = true,
 			gap = "$space.6",
+			if accounts then accounts else nil,
 			search.anchor(
 				"routes",
 				ds.Settings.Section {

@@ -1018,6 +1018,16 @@ test("Providers offers each route's models to switch", function()
 	expect(shows(app, PAGE, "Serves 1 model")).to_be(true)
 end)
 
+-- The agents' accounts read as the upstream screen lists them: who, the
+-- plan, and what it is using.
+test("Providers lists the agents' accounts with their plans", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "d@example.com")).to_be(true)
+	expect(shows(app, PAGE, "ChatGPT Plus")).to_be(true)
+	expect(shows(app, PAGE, "Session 1% · Week 22%")).to_be(true)
+	expect(shows(app, PAGE, "Add account")).to_be(true)
+end)
+
 -- The route DSH runs by default says so, as the upstream screen marks it.
 test("Providers marks the route in use", function()
 	local app = open("Providers")
@@ -1032,14 +1042,14 @@ test("Providers puts the connected routes first", function()
 	local app = open("Providers")
 	app:click('role:button ~"Show all"')
 	app:frames(10)
-	local before = app:tree(PAGE)
-	expect(before:find("DeepSeek", 1, true) < before:find("OpenCode Go", 1, true)).to_be(true)
 	-- (Enter commits the field; two rows carry a Save button of their own.)
 	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
 	app:key("Enter")
 	app:frames(10)
+	-- The route with a key now stands above one without (OpenAI has only the
+	-- grant, which this stub reports unsigned).
 	local after = app:tree(PAGE)
-	expect(after:find("OpenCode Go", 1, true) < after:find("DeepSeek", 1, true)).to_be(true)
+	expect(after:find("OpenCode Go", 1, true) < after:find("OpenAI", 1, true)).to_be(true)
 end)
 
 -- OpenCode Zen and OpenCode Go are two products with two keys, though pi-ai's

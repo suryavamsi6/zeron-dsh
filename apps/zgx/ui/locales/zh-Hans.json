@@ -1698,6 +1698,13 @@
         "account_line": "DeepSeek 账户",
         "oauth_line": "账户",
         "nothing_line": "无密钥"
+      },
+      "accounts": {
+        "title": "账户",
+        "description": "此设备上的智能体已登录的账户，以及各套餐的使用情况。",
+        "in_use": "使用中",
+        "use": "使用",
+        "add": "添加账户"
       }
     },
     "devices": {

@@ -1698,6 +1698,13 @@
         "count": "Serves {count} models",
         "none": "No provider serves models yet.",
         "count_one": "Serves 1 model"
+      },
+      "accounts": {
+        "title": "Accounts",
+        "description": "The accounts this device's agents are signed in with, and what each plan is using.",
+        "in_use": "In use",
+        "use": "Use",
+        "add": "Add account"
       }
     },
     "devices": {

@@ -566,7 +566,11 @@ local function agents_of(target: string?): any
 				version = "1.0.0",
 				installing = false,
 				login = "idle",
-				accounts = {},
+				-- One signed-in account, so the page's accounts section has a
+				-- row to show (its plan, its two windows).
+				accounts = {
+					{ id = "a1", email = "d@example.com", plan = "ChatGPT Plus", session = 0.01, week = 0.22, active = true },
+				},
 			},
 		},
 	}
