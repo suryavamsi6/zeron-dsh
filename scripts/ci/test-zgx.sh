@@ -42,7 +42,8 @@ case "${1:-}" in
     "$zgx" test ui 2>&1 | tee "$log" | grep -vE '^warning: Luau was built with its asserts' || status=$?
     # `FAIL <name> (<file>)`
     failed="$(sed -n 's/^FAIL \(.*\) ([^()]*)$/\1/p' "$log" | sort -u)"
-    expected="$(listed luau | sort -u)"
+    # (A test the macOS runner can't pass, which the other runners keep running.)
+    expected="$( { listed luau; if [ "$(uname -s)" = Darwin ]; then listed luau-macos; fi; } | sort -u)"
     new="$(comm -23 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
     fixed="$(comm -13 <(printf '%s\n' "$failed") <(printf '%s\n' "$expected") | sed '/^$/d')"
     ran="$(grep -cE '^(ok|FAIL) ' "$log" || true)"
