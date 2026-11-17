@@ -216,8 +216,8 @@ class LookupTests(unittest.TestCase):
 class ReusePlanTests(unittest.TestCase):
     def test_whole_suites(self):
         suites = {s: s in ("core", "ios") for s in plan.SUITE_JOBS}
-        skip = plan.reused_jobs(suites, {"core": {"core-tests"}, "ios": {"ios-core"}})
-        self.assertEqual(skip, {"core": ["core-tests"]})  # iOS: the simulator tests never passed
+        skip = plan.reused_jobs(suites, {"core": {"core-tests-1", "core-tests-2"}, "ios": {"ios-core"}})
+        self.assertEqual(skip, {"core": ["core-tests-1", "core-tests-2"]})  # iOS: the simulator tests never passed
         running = plan.jobs_to_run(suites, skip)
         self.assertEqual(running["core"], [])
         self.assertEqual([j for j, _ in running["ios"]], ["ios-core", "ios-tests"])
@@ -234,7 +234,7 @@ class ReusePlanTests(unittest.TestCase):
 
     def test_unselected_suites_are_not_reused(self):
         suites = {s: False for s in plan.SUITE_JOBS}
-        self.assertEqual(plan.reused_jobs(suites, {"core": {"core-tests"}}), {})
+        self.assertEqual(plan.reused_jobs(suites, {"core": {"core-tests-1"}}), {})
 
 
 class PlanMainTests(unittest.TestCase):
@@ -290,23 +290,24 @@ class PlanMainTests(unittest.TestCase):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
         keys = json.loads(first["keys"])
         self.assertTrue(json.loads(first["suites"])["core"])
-        caches = [{"key": keys["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
+        caches = [{"key": keys["core"] + "-core-tests-" + shard, "ref": "refs/pull/3/merge"}
+                  for shard in ("1", "2")]
         second = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches)
         self.assertFalse(json.loads(second["suites"])["core"])
         self.assertTrue(json.loads(second["suites"])["ui"])
-        self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests"]})
+        self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests-1", "core-tests-2"]})
         self.assertLess(int(second["reservation"].split()[0].split("=")[1]),
                         int(first["reservation"].split()[0].split("=")[1]))
 
     def test_forks_reuse_only_mains_passes(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [], head_repo="someone/r")
-        key = json.loads(first["keys"])["core"] + "-core-tests"
-        own = [{"key": key, "ref": "refs/pull/3/merge"}]
+        key = json.loads(first["keys"])["core"]
+        own = [{"key": key + "-core-tests-" + shard, "ref": "refs/pull/3/merge"} for shard in ("1", "2")]
         self.assertTrue(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, own,
                                                  head_repo="someone/r")["suites"])["core"])
         self.assertTrue(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, own,
                                                  head_repo=None)["suites"])["core"])  # deleted fork
-        mains = [{"key": key, "ref": "refs/heads/main"}]
+        mains = [{"key": key + "-core-tests-" + shard, "ref": "refs/heads/main"} for shard in ("1", "2")]
         self.assertFalse(json.loads(self.run_plan("pull_request", {"pull_request": {"number": 3}}, mains,
                                                   head_repo="someone/r")["suites"])["core"])
         # CI_FORK_REUSE=own, once the merge queue is required.
@@ -316,13 +317,13 @@ class PlanMainTests(unittest.TestCase):
 
     def test_the_merge_queue_reuses_nothing(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
-        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/heads/main"}]
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests-1", "ref": "refs/heads/main"}]
         group = self.run_plan("merge_group", {"merge_group": {"base_sha": "a" * 40, "head_sha": "b" * 40}}, caches)
         self.assertTrue(json.loads(group["suites"])["core"])
 
     def test_a_build_file_no_fingerprint_covers_disables_reuse(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
-        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests-1", "ref": "refs/pull/3/merge"}]
         # crates/c is in no selected suite (core reads crates/b, ui crates/a and b).
         again = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches,
                               files=[{"filename": "crates/b/src/lib.rs", "patch": "+x"},
@@ -331,7 +332,7 @@ class PlanMainTests(unittest.TestCase):
 
     def test_ci_full_and_main_do_not_trust_pull_request_passes(self):
         first = self.run_plan("pull_request", {"pull_request": {"number": 3}}, [])
-        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests", "ref": "refs/pull/3/merge"}]
+        caches = [{"key": json.loads(first["keys"])["core"] + "-core-tests-1", "ref": "refs/pull/3/merge"}]
         full = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches, labels=["ci:full"])
         self.assertTrue(json.loads(full["suites"])["core"])
         main = self.run_plan("push", {"before": "a" * 40, "after": "b" * 40}, caches)

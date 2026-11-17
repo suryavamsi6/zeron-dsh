@@ -153,15 +153,15 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + deepseek + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
+        # result + core x2 + ui + deepseek + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
         # native + ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 8, "windows": 2, "macos": 3})
+        self.assertEqual(counts, {"linux": 9, "windows": 2, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
-        self.assertEqual(main["linux"], 9)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=2 macos=3")
+        self.assertEqual(main["linux"], 10)  # + android publish
+        self.assertEqual(plan.format_reservation(counts), "linux=9 windows=2 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
+        self.assertEqual(daytime, {"linux": 9, "windows": 2, "macos": 3})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
@@ -199,15 +199,22 @@ class WorkflowConsistencyTests(unittest.TestCase):
             runners = []
             for job in jobs:
                 runs_on = spec["jobs"][job]["runs-on"]
+                shards = spec["jobs"][job].get("strategy", {}).get("matrix", {}).get("shard")
                 if "matrix.os" in runs_on:
                     default = spec.get("on", spec.get(True))["workflow_call"]["inputs"]["native-oses"]["default"]
                     labels = [(f"{job}-{os}", os) for os in json.loads(default)]
+                    recorded = f"{job}-${{{{ matrix.os }}}}" if shards is None else None
+                elif shards is not None:
+                    labels = [(f"{job}-{shard}", runs_on) for shard in shards]
+                    recorded = f"{job}-${{{{ matrix.shard }}}}"
                 else:
                     labels = [(job, runs_on)]
+                    recorded = job
+                if recorded is None:
+                    continue
                 for marker, label in labels:
                     runner = "windows" if "windows" in label else "macos" if "macos" in label else "linux"
                     runners.append((marker, runner))
-                    recorded = marker if "matrix.os" not in runs_on else f"{job}-${{{{ matrix.os }}}}"
                     self.assertIn(f"key: ${{{{ inputs.pass-key }}}}-{recorded}", text, (suite, marker))
             self.assertEqual(sorted(runners), sorted(plan.SUITE_JOBS[suite]), suite)
 

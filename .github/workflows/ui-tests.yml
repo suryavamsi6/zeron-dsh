@@ -30,10 +30,17 @@ env:
 
 jobs:
   # Every Linux Rust test that is not UI: one build, one nextest run (see
-  # scripts/ci/test-core.sh), including the voice protocol and transport tests
+  # scripts/ci/test-core.sh) split into two nextest partitions that run side by
+  # side (scripts/ci/plan.py counts both runners and skips both passes
+  # together). Both shards build the same graph; both restore the core cache,
+  # and only shard 1 saves it. Including the voice protocol and transport tests
   # that need no audio stack.
   core-tests:
     if: inputs.core
+    strategy:
+      matrix:
+        shard: [1, 2]
+      fail-fast: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -41,15 +48,15 @@ jobs:
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: core
-          save-rust-cache: 'true'
+          save-rust-cache: ${{ matrix.shard == 1 && 'true' || 'false' }}
       - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
-        run: scripts/ci/test-core.sh
+        run: scripts/ci/test-core.sh --partition hash:${{ matrix.shard }}/2
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: rust-toolchain.toml
-          key: ${{ inputs.pass-key }}-core-tests
+          key: ${{ inputs.pass-key }}-core-tests-${{ matrix.shard }}
 
   # UI and headless layout regressions, then (when `browser`) the native browser
   # on X11 and Wayland. One job: the browser fixture shares the UI build's
