@@ -85,6 +85,12 @@ pub enum NodeKind {
         label: String,
         url: String,
     },
+    /// A placed box: where it stands (an inset, an offset), what it clips,
+    /// and what it holds. Plugins draw with these; a visual's layout is
+    /// flows only.
+    Frame(Box<Frame>),
+    /// A file's picture, filling the box it is in.
+    Image(Box<ImageNode>),
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -99,6 +105,72 @@ pub struct Stack {
     pub hover: bool,
     pub on_click: Option<HandlerId>,
     pub children: Vec<Node>,
+}
+
+/// Where a [`Frame`] stands: absolute in its nearest placed ancestor, with
+/// insets in design pixels, and how far it has moved from there (a spring's
+/// answer).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Place {
+    pub absolute: bool,
+    pub left: Option<f32>,
+    pub right: Option<f32>,
+    pub top: Option<f32>,
+    pub bottom: Option<f32>,
+    pub x: f32,
+    pub y: f32,
+    /// Clip what overflows the box.
+    pub clip: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Frame {
+    pub place: Place,
+    /// Take the room it is in, across and down.
+    pub width_full: bool,
+    pub height_full: bool,
+    pub gap: f32,
+    pub align: Align,
+    pub justify: Justify,
+    /// What it is for assistive technology, where it says.
+    pub role: Option<String>,
+    pub label: Option<String>,
+    pub children: Vec<Node>,
+}
+
+/// How a picture sits in its box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ImageFit {
+    /// Fill the box, letting the edges go.
+    #[default]
+    Cover,
+    /// Show all of it, inside the box.
+    Contain,
+    /// Stretch to the box exactly.
+    Fill,
+}
+
+impl ImageFit {
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "cover" => Self::Cover,
+            "contain" => Self::Contain,
+            "fill" | "stretch" => Self::Fill,
+            _ => return None,
+        })
+    }
+}
+
+/// A picture from a file beside the script (`art/dusk/sky.webp`), drawn
+/// filling its box.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ImageNode {
+    pub src: String,
+    pub fit: ImageFit,
+    pub width_full: bool,
+    pub height_full: bool,
+    /// For assistive technology: a picture with no label is decorative.
+    pub label: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -274,7 +346,7 @@ const MAX_TEXT: usize = 8000;
 
 /// Builds a [`Node`] tree from a view's return value, collecting the
 /// functions it references.
-pub(crate) struct Parser {
+pub struct Parser {
     pub handlers: Vec<Function>,
     nodes: usize,
 }
@@ -418,6 +490,67 @@ impl Parser {
                     on_click: props.function("on_click")?.map(|f| self.handler(f)),
                     children,
                 })
+            }
+            "div" => {
+                props.allow(&[
+                    "absolute", "left", "right", "top", "bottom", "x", "y", "overflow", "relative",
+                    "w_full", "h_full", "role", "label", "gap", "align", "justify", "id", "class",
+                    "ref",
+                ])?;
+                let mut children = Vec::new();
+                for child in table.sequence_values::<Value>() {
+                    self.children_into(child?, &mut children, depth + 1)?;
+                }
+                let overflow: Option<String> = props.get("overflow")?;
+                let inset = |name: &str| -> Result<Option<f32>, VisualError> {
+                    Ok(props
+                        .number(name)?
+                        .map(|n| n.clamp(-4096.0, 4096.0) as f32))
+                };
+                NodeKind::Frame(Box::new(Frame {
+                    place: Place {
+                        absolute: props.bool("absolute")?.unwrap_or(false),
+                        left: inset("left")?,
+                        right: inset("right")?,
+                        top: inset("top")?,
+                        bottom: inset("bottom")?,
+                        x: props.number("x")?.unwrap_or(0.0).clamp(-8192.0, 8192.0) as f32,
+                        y: props.number("y")?.unwrap_or(0.0).clamp(-8192.0, 8192.0) as f32,
+                        clip: overflow.as_deref() == Some("hidden"),
+                    },
+                    width_full: props.bool("w_full")?.unwrap_or(false),
+                    height_full: props.bool("h_full")?.unwrap_or(false),
+                    gap: props.number("gap")?.unwrap_or(0.0).clamp(0.0, 96.0) as f32,
+                    align: props.parsed("align", Align::parse)?.unwrap_or_default(),
+                    justify: props.parsed("justify", Justify::parse)?.unwrap_or_default(),
+                    role: props.string("role")?,
+                    label: props.string("label")?,
+                    children,
+                }))
+            }
+            "image" => {
+                props.allow(&["src", "fit", "w_full", "h_full", "aria_hidden", "label"])?;
+                let src = props.string("src")?.unwrap_or_default();
+                if src.is_empty() {
+                    return Err(props.error("needs a 'src'"));
+                }
+                let fit = match props.string("fit")? {
+                    Some(fit) => ImageFit::parse(&fit)
+                        .ok_or_else(|| props.error("'fit' is cover, contain or fill"))?,
+                    None => ImageFit::Cover,
+                };
+                let hidden = props.bool("aria_hidden")?.unwrap_or(false);
+                NodeKind::Image(Box::new(ImageNode {
+                    src,
+                    fit,
+                    width_full: props.bool("w_full")?.unwrap_or(true),
+                    height_full: props.bool("h_full")?.unwrap_or(true),
+                    label: if hidden {
+                        None
+                    } else {
+                        props.string("label")?
+                    },
+                }))
             }
             "grid" => {
                 props.allow(&["columns", "gap"])?;

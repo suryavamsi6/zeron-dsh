@@ -22,6 +22,7 @@ mod draw;
 pub mod image;
 mod model;
 mod node;
+pub mod plugin;
 mod raster;
 mod scene;
 pub mod shader;
@@ -36,8 +37,9 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, Value, VmState};
 pub use assets::Assets;
 pub use draw::{DrawCmd, DrawText, Pointer};
 pub use node::{
-    Axis, Canvas, Chart, ChartKind, Column, HandlerId, Node, NodeKind, NumberFormat, SceneNode,
-    Series, ShaderNode, Span, Stack, Table_ as TableNode, Text,
+    Axis, Canvas, Chart, ChartKind, Column, Frame, HandlerId, ImageFit, ImageNode, Node, NodeKind,
+    NumberFormat, Parser, Place, SceneNode, Series, ShaderNode, Span, Stack, Table_ as TableNode,
+    Text,
 };
 pub use raster::{Quality, Raster, RasterLabel};
 pub use scene::{
@@ -526,6 +528,7 @@ pub fn children(node: &Node) -> Box<dyn Iterator<Item = &Node> + '_> {
     match &node.kind {
         NodeKind::Stack(stack) => Box::new(stack.children.iter()),
         NodeKind::Grid { children, .. } => Box::new(children.iter()),
+        NodeKind::Frame(frame) => Box::new(frame.children.iter()),
         NodeKind::Table(table) => Box::new(table.rows.iter().flatten()),
         _ => Box::new(std::iter::empty()),
     }

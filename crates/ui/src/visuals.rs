@@ -620,6 +620,27 @@ impl VisualFrame {
     ) -> AnyElement {
         let key = Self::key(node, path);
         match &node.kind {
+            NodeKind::Frame(frame) => {
+                let mut element = div().w_full().flex().flex_col().gap(px(frame.gap));
+                if frame.place.clip {
+                    element = element.overflow_hidden();
+                }
+                for (ix, child) in frame.children.iter().enumerate() {
+                    let child_path = format!("{path}.{ix}");
+                    element = element.child(self.node(
+                        child,
+                        &child_path,
+                        theme,
+                        palette,
+                        window,
+                        cx,
+                    ));
+                }
+                element.into_any_element()
+            }
+            // (A picture's file comes from the plugin's folder: an inline
+            // visual has no folder, so it draws nothing here.)
+            NodeKind::Image(_) => div().into_any_element(),
             NodeKind::Stack(stack) => self.stack(stack, path, theme, palette, window, cx),
             NodeKind::Grid {
                 columns,

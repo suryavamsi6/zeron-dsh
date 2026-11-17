@@ -16,9 +16,9 @@
 //! - `text`, `number`, `shortcut`, `folder` — a value row that opens a small
 //!   editor, checked against the setting before it is kept;
 //! - `wallpaper` — the app's own row, for a plugin that replaces
-//!   `#new-chat-background`. It is drawn by the build that can run the
-//!   plugin's drawing; until then the row would control nothing, so it waits
-//!   (the store already knows the kind);
+//!   `#new-chat-background`: whether this plugin draws a new chat's
+//!   background. The app keeps the choice (one plugin at a time, in
+//!   `ui-settings.json`), and the drawing lands behind a new chat;
 //! - `permission` — the app's own row: Zeron says everything on it.
 //!
 //! A plugin's settings draw while it is on: off, it draws nothing and reads
@@ -888,9 +888,6 @@ impl PluginsPage {
         let mut first = false;
         let mut section: Option<String> = None;
         for setting in row.settings.declared.clone().into_iter().filter(|_| row.on()) {
-            if setting.kind == "wallpaper" {
-                continue;
-            }
             let value = row.settings.value(&setting.id).unwrap_or(Json::Null);
             let here = setting.section().map(str::to_string);
             let heading = here != section;
@@ -919,17 +916,32 @@ impl PluginsPage {
         let setting_id = setting.id.clone();
         let key = format!("{plugin}:{setting_id}");
 
+        let (title, app_description) = match control {
+            Control::Wallpaper { .. } => (
+                "Wallpaper".to_string(),
+                Some(
+                    "Draw this plugin behind a new chat, under Zeron's own \
+                     background."
+                        .to_string(),
+                ),
+            ),
+            Control::Permission { .. } => (
+                "Permission".to_string(),
+                Some("Zeron says what this needs, and where to grant it.".to_string()),
+            ),
+            _ => (setting.label().to_string(), None),
+        };
         let mut left = div()
             .flex_1()
             .min_w(px(160.0))
             .flex()
             .flex_col()
-            .child(widgets::row_title(&theme, setting.label().to_string()));
-        let mut description = setting
+            .child(widgets::row_title(&theme, title));
+        let mut description = app_description.or_else(|| setting
             .json
             .get("description")
             .and_then(|d| d.as_str())
-            .map(str::to_string);
+            .map(str::to_string));
         if let Control::Choice {
             options, selected, ..
         } = &control
@@ -1074,8 +1086,41 @@ impl PluginsPage {
                 };
                 self.value_row(&theme, &key, text, None, row, setting, cx)
             }
-            // (The app's own rows: see the module's note.)
-            Control::Wallpaper { .. } | Control::Permission { .. } => div().into_any_element(),
+            Control::Wallpaper { on } => {
+                let on = *on;
+                let id = row.id.clone();
+                let cell = div()
+                    .id(format!("plugin-wallpaper-{id}"))
+                    .flex_none()
+                    .w(px(widgets::SWITCH_WIDTH))
+                    .h(px(40.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .role(gpui::Role::Switch)
+                    .aria_label("Use it behind a new chat")
+                    .aria_toggled(if on {
+                        gpui::Toggled::True
+                    } else {
+                        gpui::Toggled::False
+                    })
+                    .child(widgets::toggle_switch(
+                        &theme,
+                        on,
+                        format!("plugin-wallpaper-switch-{id}"),
+                    ));
+                interactive_row(
+                    cell,
+                    accent,
+                    move |page, _window, cx| {
+                        let choice = if on { None } else { Some(id.clone()) };
+                        page.choose_wallpaper(choice, cx);
+                    },
+                    cx,
+                )
+                .into_any_element()
+            }
+            Control::Permission { .. } => div().into_any_element(),
         };
 
         let row = widgets::card_row(&theme, first).child(left).child(right);

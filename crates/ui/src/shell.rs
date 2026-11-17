@@ -37,6 +37,7 @@ use crate::loaders;
 use crate::motion::{
     self, AnimationExt as _, MotionSpec, PANEL_RESIZE, RESIZE, SPLASH_OUT, TAB_SLIDE,
 };
+use crate::plugins::{PluginScene, SceneState, WallpaperPlugin};
 use crate::popover::{self, Loadable};
 use crate::pull_requests::PullRequestsPage;
 use crate::rail;
@@ -2236,6 +2237,12 @@ pub struct Shell {
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
     plugins_page: Option<Entity<PluginsPage>>,
+    /// The plugin drawing a new chat's background, once one is chosen and
+    /// the engine has said where it lives.
+    plugin_scene: Option<Entity<PluginScene>>,
+    /// The plugin id the scene was built for.
+    plugin_scene_for: Option<String>,
+    plugin_scene_task: Option<Task<()>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
@@ -2804,6 +2811,9 @@ impl Shell {
             archived_page: None,
             appearance_page: None,
             plugins_page: None,
+            plugin_scene: None,
+            plugin_scene_for: None,
+            plugin_scene_task: None,
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
@@ -5846,6 +5856,67 @@ impl Shell {
             self.nav.push(entry);
         }
         cx.notify();
+    }
+
+    /// Build the scene for the plugin chosen to draw a new chat's
+    /// background: the engine says where its folder is (`ListPlugins`, whose
+    /// `snapshot` for an on plugin is the copy to load from).
+    fn ensure_plugin_scene(&mut self, id: String, cx: &mut Context<Self>) {
+        if self.plugin_scene_for.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        let Some(engine) = self.state.read(cx).engine().cloned() else {
+            return;
+        };
+        self.plugin_scene_for = Some(id.clone());
+        self.plugin_scene = None;
+        let data_dir = self.data_dir.clone();
+        self.plugin_scene_task = Some(cx.spawn(async move |this, cx| {
+            let reply = engine
+                .client()
+                .call(zeron_rpc::methods::LIST_PLUGINS, serde_json::json!({}))
+                .await;
+            let found = reply.ok().and_then(|reply| {
+                reply
+                    .get("plugins")
+                    .and_then(|plugins| plugins.as_array())
+                    .and_then(|plugins| {
+                        plugins
+                            .iter()
+                            .find(|item| item.get("id").and_then(|i| i.as_str()) == Some(id.as_str()))
+                            .cloned()
+                    })
+            });
+            this.update(cx, |shell, cx| {
+                if shell.plugin_scene_for.as_deref() != Some(id.as_str()) {
+                    return;
+                }
+                let Some(plugin) = found.as_ref().and_then(WallpaperPlugin::from_item) else {
+                    // Not on, or not a background: nothing draws, and the
+                    // page says why it isn't offered.
+                    shell.plugin_scene_for = None;
+                    return;
+                };
+                let scene = cx.new(|cx| PluginScene::new(plugin, &data_dir, cx));
+                shell.plugin_scene = Some(scene);
+                cx.notify();
+            })
+            .ok();
+        }));
+    }
+
+    /// Where the pointer is over the page, `0..1` across and down: what a
+    /// plugin's `zeron.live("pointer")` reads.
+    fn pointer_over_page(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+        let Some(scene) = self.plugin_scene.clone() else {
+            return;
+        };
+        let left = self.sidebar_now();
+        let width = (self.viewport_width - left).max(1.0);
+        let height = self.viewport_height.max(1.0);
+        let x = (f32::from(position.x) - left) / width;
+        let y = f32::from(position.y) / height;
+        scene.update(cx, |scene, cx| scene.set_pointer(Some((x, y)), cx));
     }
 
     /// Show the board's route without recording a navigation.
@@ -11793,6 +11864,26 @@ impl Shell {
                 ),
             )));
         let term_h = self.terminal_geometry.get().height;
+        // A plugin can draw a new chat's background: while one is chosen,
+        // its scene stands in the wallpaper's place.
+        let chosen_wallpaper = ui_settings.plugin_wallpaper.clone();
+        match &chosen_wallpaper {
+            Some(id) if self.plugin_scene_for.as_deref() != Some(id.as_str()) => {
+                self.ensure_plugin_scene(id.clone(), cx)
+            }
+            None if self.plugin_scene.is_some() => {
+                self.plugin_scene = None;
+                self.plugin_scene_for = None;
+            }
+            _ => {}
+        }
+        let plugin_layer = (!has_selection || dock_frame.active)
+            .then(|| self.plugin_scene.clone())
+            .flatten()
+            // A plugin that couldn't load or draw has nothing to stand in the
+            // wallpaper's place: the picture the person chose still shows.
+            .filter(|scene| !matches!(scene.read(cx).state(), SceneState::Failed(_)))
+            .map(IntoElement::into_any_element);
         let new_thread_background_layer = (!has_selection || dock_frame.active).then(|| {
             if artwork_frame.active {
                 window.request_animation_frame();
@@ -11800,28 +11891,31 @@ impl Shell {
             let width = (self.viewport_width - self.sidebar_now()).max(0.0);
             let bounds = self.composer.read(cx).surface_bounds();
             let opacity = new_thread_background_opacity(theme.is_frost());
-            div()
-                .absolute()
-                .inset_0()
-                .child(new_thread_background(
-                    artwork_frame.previous,
-                    artwork_frame.previous_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds.clone(),
-                    dock_frame.dissolve(),
-                    (1.0 - artwork_frame.mix) * opacity,
-                ))
-                .child(new_thread_background(
-                    artwork_frame.current,
-                    artwork_frame.current_adjustment,
-                    self.viewport_height,
-                    width,
-                    bounds,
-                    dock_frame.dissolve(),
-                    artwork_frame.mix * opacity,
-                ))
-                .into_any_element()
+            let mut layer = div().absolute().inset_0();
+            if let Some(plugin) = plugin_layer {
+                layer = layer.child(plugin);
+            } else {
+                layer = layer
+                    .child(new_thread_background(
+                        artwork_frame.previous,
+                        artwork_frame.previous_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds.clone(),
+                        dock_frame.dissolve(),
+                        (1.0 - artwork_frame.mix) * opacity,
+                    ))
+                    .child(new_thread_background(
+                        artwork_frame.current,
+                        artwork_frame.current_adjustment,
+                        self.viewport_height,
+                        width,
+                        bounds,
+                        dock_frame.dissolve(),
+                        artwork_frame.mix * opacity,
+                    ));
+            }
+            layer.into_any_element()
         });
 
         // Content outlet: selected chat → transcript; nothing selected → the
@@ -11943,6 +12037,9 @@ impl Shell {
                 this.capture_navigation_focus(false, false, window, cx);
             }))
             .on_key_down(|event, _, cx| navigation_focus::copy_transcript_selection(event, cx))
+            .on_mouse_move(cx.listener(|this, event: &gpui::MouseMoveEvent, _, cx| {
+                this.pointer_over_page(event.position, cx)
+            }))
             .relative()
             .flex_1()
             .min_w_0()
