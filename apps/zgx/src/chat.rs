@@ -1718,7 +1718,9 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
     Value::record(fields)
 }
 
-/// The model picker's entry for a model: its value "<harness>/<id>", its
+/// The model picker's entry for a model: its value "<harness>/<id>" —
+/// "<harness>/<route>/<id>" when the gateway's routes say where it is
+/// served from, an id several routes list needing each its own pick — its
 /// reasoning (low to high) and where it starts, whether it has Fast, and
 /// its other options (Devin Fusion's lead and sidekick): each its id, its
 /// name, its choices (id and name) and the one it starts on.
@@ -1778,8 +1780,13 @@ fn model_value(harness: &str, m: &Json) -> Value {
             ]))
         })
         .collect();
+    let route = m["provider"]["id"].as_str().filter(|id| !id.is_empty());
+    let value = match route {
+        Some(route) => format!("{harness}/{route}/{id}"),
+        None => format!("{harness}/{id}"),
+    };
     let mut fields = vec![
-        ("value", Value::from(format!("{harness}/{id}").as_str())),
+        ("value", Value::from(value.as_str())),
         ("label", Value::from(m["label"].as_str().unwrap_or(id))),
         ("harness", Value::from(harness)),
         ("fast", Value::Bool(fast.is_some())),
@@ -3316,7 +3323,9 @@ async fn upload_as(
 }
 
 /// The chat's config with what the script changed: a model as
-/// "<harness>/<model>", its effort, Fast, the access mode and plan mode.
+/// "<harness>/<model>" — "<harness>/<route>/<model>" when a gateway route
+/// serves it, `modelOptions.provider` carrying that route — its effort,
+/// Fast, the access mode and plan mode.
 /// Whether a run's config picks another agent, model, effort or model option
 /// than the chat's.
 fn runs_otherwise(chat: &Json, run: &Json) -> bool {
@@ -3354,11 +3363,19 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         c["modelOptions"] = Json::Object(merged);
     }
     let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
+    // A picked route, set on modelOptions once the options merge is done:
+    // the provider a routed value names it, None an unrouted one sheds the
+    // chat's, absent no model picked so it stays.
+    let mut route: Option<Option<String>> = None;
     if let Some(model) = field("model") {
         match model.split_once('/') {
             Some((harness, model)) => {
                 c["harness"] = json!(harness);
+                // "<harness>/<route>/<id>", the routed value the picker
+                // lists: its middle names the provider it runs on.
+                let (provider, model) = model.split_once('/').unwrap_or(("", model));
                 c["model"] = json!(model);
+                route = Some((!provider.is_empty()).then(|| provider.to_owned()));
             }
             None => c["model"] = json!(model),
         }
@@ -3410,6 +3427,10 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         {
             next.insert(key.clone(), v.clone());
         }
+        // Its route isn't a model option's: kept with it, not replaced.
+        if let Some(provider) = c["modelOptions"].get("provider") {
+            next.insert("provider".into(), provider.clone());
+        }
         for (key, choice) in picked.iter() {
             if let Value::Str(choice) = choice
                 && !choice.is_empty()
@@ -3418,6 +3439,16 @@ fn merged_config(config: &Json, args: &Value) -> Json {
             }
         }
         c["modelOptions"] = Json::Object(next);
+    }
+    if let Some(provider) = route {
+        match provider {
+            Some(provider) => c["modelOptions"]["provider"] = json!(provider),
+            None => {
+                if let Some(map) = c["modelOptions"].as_object_mut() {
+                    map.remove("provider");
+                }
+            }
+        }
     }
     if let Some(fast) = args.field("fast")
         && let Some((key, on, off)) = fast_of_model
@@ -5788,9 +5819,20 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
     let config = &chat["config"];
     let s = |j: &Json| j.as_str().map(Value::from).unwrap_or(Value::Nil);
     let harness = config["harness"].as_str().unwrap_or("unsupported");
+    // Its picker's value ("<harness>/<route>/<id>" routed): the route its
+    // config names, the same model id served by another staying another row.
+    let route = config["modelOptions"]["provider"].as_str();
     let model = config["model"]
         .as_str()
-        .map(|m| Value::from(format!("{harness}/{m}").as_str()))
+        .map(|m| {
+            Value::from(
+                match route {
+                    Some(route) => format!("{harness}/{route}/{m}"),
+                    None => format!("{harness}/{m}"),
+                }
+                .as_str(),
+            )
+        })
         .unwrap_or(Value::Nil);
     // Its name, for a picker whose catalog doesn't list it (its device's not
     // looked at yet, or not offering it): the catalog's, else its id (as
@@ -6652,12 +6694,72 @@ mod tests {
             "provider": { "id": "openai", "name": "OpenAI" },
         });
         let value = super::model_value("deepseek", &model);
-        assert_eq!(value.field("value").map(|v| v.to_json()), Some("\"deepseek/gpt-4.1\"".into()));
+        assert_eq!(value.field("value").map(|v| v.to_json()), Some("\"deepseek/openai/gpt-4.1\"".into()));
         let provider = value.field("provider").expect("the route rides with the model");
         assert_eq!(provider.field("id").map(|v| v.to_json()), Some("\"openai\"".into()));
         // A harness with one source names none, and the row stays as it was.
         let plain = serde_json::json!({ "id": "deepseek-flash", "label": "Flash" });
         assert!(super::model_value("deepseek", &plain).field("provider").is_none());
+    }
+
+    /// GPT-6 Luna listed by three of the gateway's routes is three rows,
+    /// not one pick highlighting three: its value names the route. The pick
+    /// and a chat made on it carry that route as modelOptions.provider, and
+    /// a model named with no route is one row still ("<harness>/<id>", as
+    /// saved picks and the official two have it).
+    #[test]
+    fn a_routed_models_value_names_the_route_serving_it() {
+        let luna = |provider: &str, name: &str| {
+            serde_json::json!({
+                "id": "gpt-6-luna",
+                "label": "GPT-6 Luna",
+                "provider": { "id": provider, "name": name },
+            })
+        };
+        let openai = super::model_value("deepseek", &luna("openai", "OpenAI"));
+        let opencode = super::model_value("deepseek", &luna("opencode", "OpenCode"));
+        assert_eq!(openai.field("value").map(|v| v.to_json()), Some("\"deepseek/openai/gpt-6-luna\"".into()));
+        assert_eq!(opencode.field("value").map(|v| v.to_json()), Some("\"deepseek/opencode/gpt-6-luna\"".into()));
+        let row = serde_json::json!({
+            "config": { "harness": "deepseek", "model": "deepseek-chat", "reasoning": "high", "modelOptions": {}, "sandbox": "workspace-write" },
+        });
+        // The routed value the composer's pick sends splits three ways.
+        let picked = zgx_script::Value::from_json(r#"{"model":"deepseek/openai/gpt-6-luna"}"#).unwrap();
+        let config = super::merged_config(&row["config"], &picked);
+        assert_eq!(config["harness"], "deepseek");
+        assert_eq!(config["model"], "gpt-6-luna");
+        assert_eq!(config["modelOptions"]["provider"], "openai");
+        // One that keeps the old explicit form agrees with it.
+        let routed = zgx_script::Value::from_json(
+            r#"{"model":"gpt-6-luna","model_options":{"provider":"openai"}}"#,
+        )
+        .unwrap();
+        let config = super::merged_config(&row["config"], &routed);
+        assert_eq!(config["model"], "gpt-6-luna");
+        assert_eq!(config["modelOptions"]["provider"], "openai");
+        // An unrouted pick sheds a route the chat had, and an options
+        // rebuild keeps the one a routed pick carries.
+        let was = serde_json::json!({
+            "config": { "harness": "deepseek", "model": "gpt-6-luna", "modelOptions": { "provider": "openai" }, "sandbox": "workspace-write" },
+        });
+        let unrouted = zgx_script::Value::from_json(r#"{"model":"deepseek/deepseek-chat"}"#).unwrap();
+        let config = super::merged_config(&was["config"], &unrouted);
+        assert_eq!(config["model"], "deepseek-chat");
+        assert!(config["modelOptions"]["provider"].is_null());
+        let reopted = zgx_script::Value::from_json(r#"{"options":{"speed":"fast"}}"#).unwrap();
+        let config = super::merged_config(&was["config"], &reopted);
+        assert_eq!(config["modelOptions"]["provider"], "openai");
+        assert_eq!(config["modelOptions"]["speed"], "fast");
+        // A chat's model is that picker's value back: the route its config
+        // names, so the row it runs on is the one lit.
+        let chats = Chats::default();
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "config": { "harness": "deepseek", "model": "gpt-6-luna", "modelOptions": { "provider": "opencode" } } }),
+        );
+        let open = Open { id: "c".into(), ..Open::default() };
+        let model = session_value(&chats, &open, false).field("model").map(text);
+        assert_eq!(model.as_deref(), Some("deepseek/opencode/gpt-6-luna"));
     }
 
     #[test]

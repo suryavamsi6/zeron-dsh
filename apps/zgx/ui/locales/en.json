@@ -1682,6 +1682,14 @@
         "placeholder": "Paste a key",
         "save": "Save",
         "saved": "{agent} on Cloud now uses this key"
+      },
+      "models": {
+        "title": "Models",
+        "description": "Which of the providers' models the composer offers. Switching one off leaves the provider configured.",
+        "every": "Every {name} model",
+        "count": "Serves {count} models",
+        "none": "No provider serves models yet.",
+        "count_one": "Serves 1 model"
       }
     },
     "devices": {

@@ -1003,10 +1003,53 @@ test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and send
 	expect(shows(app, PAGE, "Capture Appshots")).to_be(true)
 end)
 
+-- The catalog's display names are its route ids for the pi-ai routes; the
+-- page names them as people know them, and the Codex route is the ChatGPT
+-- sign-in's duplicate.
+-- The Models section offers each route's models to switch off, with how many
+-- it serves; the agent's own models carry no route and are never listed.
+test("Providers offers each route's models to switch", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "Every OpenAI model")).to_be(true)
+	expect(shows(app, PAGE, "Every OpenCode Go model")).to_be(true)
+	expect(shows(app, PAGE, "Serves 1 model")).to_be(true)
+end)
+
+-- A saved key is what a visit is usually about: its row moves to the top,
+-- at once, without a reload.
+test("Providers puts the connected routes first", function()
+	local app = open("Providers")
+	local before = app:tree(PAGE)
+	expect(before:find("DeepSeek", 1, true) < before:find("OpenCode Go", 1, true)).to_be(true)
+	-- (Enter commits the field; two rows carry a Save button of their own.)
+	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
+	app:key("Enter")
+	app:frames(10)
+	local after = app:tree(PAGE)
+	expect(after:find("OpenCode Go", 1, true) < after:find("DeepSeek", 1, true)).to_be(true)
+end)
+
+-- OpenCode Zen and OpenCode Go are two products with two keys, though pi-ai's
+-- catalog names one env for both.
+test("the two OpenCode products keep their own keys", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "OPENCODE_ZEN_API_KEY")).to_be(true)
+	expect(shows(app, PAGE, "OPENCODE_API_KEY")).to_be(true)
+end)
+
+test("Providers names its routes and hides the Codex duplicate", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "OpenAI")).to_be(true)
+	expect(shows(app, PAGE, "OpenCode Zen")).to_be(true)
+	expect(shows(app, PAGE, "OpenCode Go")).to_be(true)
+	expect(shows(app, PAGE, "openai-codex")).to_be(false)
+end)
+
 test("Providers saves a key and names it in the route's profile", function()
 	local app = open("Providers")
+	-- (Enter commits the field; two rows carry a Save button of their own.)
 	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
-	app:click('role:button "Save"')
+	app:key("Enter")
 	app:frames(10)
 	expect(asked(app, "DshSetCredential")).to_be(true)
 	-- A stored key alone does nothing: the route's profile has to name it.

@@ -22,6 +22,7 @@ local motion = require("@ds/motion")
 local Placement = require("@app/screens/chat/composer_place")
 local T = require("@ds/transcript")
 local prefs = require("@app/screens/settings/prefs")
+local ModelVisibility = require("@app/model_visibility")
 local store = require("@app/screens/chat/store")
 local lanes = require("@app/screens/chat/lanes")
 local route = require("@app/screens/shell/route")
@@ -405,7 +406,8 @@ local function Composer(): Node
 		-- chat saved before the route rode with the model gets it now, since
 		-- the run needs it and the picker's pick is only sent once.
 		if not any_change then
-			-- (`s.model` is the picker's own value form, "<harness>/<model>".)
+			-- (`s.model` is the picker's own value form, "<harness>/<model>" —
+			-- "<harness>/<route>/<model>" where the run's route rides with it.)
 			local saved = (s :: any).model
 			if saved then
 				for _, m in store.catalog:peek().models do
@@ -1274,7 +1276,8 @@ local function Composer(): Node
 				return m and m.value
 			end,
 			models = function(): { ds.Model }
-				return store.catalog:get().models
+				-- What Settings → Providers → Models leaves on.
+				return ModelVisibility.visible(store.catalog:get().models)
 			end,
 			accounts = accounts.accounts,
 			account_group = accounts.account_group,

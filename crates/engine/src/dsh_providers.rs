@@ -6,6 +6,7 @@
 //! to a wrong answer.
 
 use serde_json::{json, Value};
+use zeron_proto::ReasoningLevel;
 
 /// The settings namespace that holds the default model DSH runs a session
 /// with when the app sends none.
@@ -70,6 +71,35 @@ pub async fn route_models(
             .ok()
     };
     let mut models = Vec::new();
+    // `llm/discoverModels` strips capability data: the adapter emits id,
+    // name, contextWindow, maxTokens and inputModalities only, and the host
+    // re-projects those same fields (`discoverModels` in dsh-llm-pi-ai and
+    // `LlmRuntime.discoverModels` in dsh-llm). Reasoning support is instead
+    // declared where the adapter itself resolves it, so the levels offered
+    // here are mirrored from those declarations rather than guessed — an
+    // effort the run would refuse (UNSUPPORTED_REASONING_EFFORT) is never
+    // shown:
+    //
+    // * pi-ai routes (`llm-pi-ai` profiles): the installed catalog at
+    //   `@earendil-works/pi-ai` `providers/data/<route>.json` carries each
+    //   chat model's `reasoning` flag and `thinkingLevelMap` wire spellings,
+    //   overlaid by the stored profile's `models[].reasoningEfforts` and
+    //   `modelOverrides` (`resolveModelReasoning`/`getSupportedThinkingLevels`).
+    // * llm-deepseek routes: every model offers the adapter's fixed effort
+    //   list (off/low/high/max) unless the route's `thinking` switch is
+    //   `disabled`, which reduces the offer to `off` alone (`modelInfo` in
+    //   dsh-llm-deepseek).
+    //
+    // The harness only ever sends low, high and max (`EFFORTS` in
+    // `deepseek::configuration`), so supported levels outside those — pi-ai's
+    // `minimal`/`medium`/`xhigh`, and every route's `off` — are filtered out
+    // of what the picker offers.
+    let settings = gateway.call("settings/describe", json!({})).await.ok();
+    let catalog_dir = zeron_harness::deepseek::DeepSeekHarness::new()
+        .sdk_root()
+        .join("node_modules/@earendil-works/pi-ai/dist/providers/data");
+    let mut catalogs: std::collections::HashMap<String, std::collections::HashMap<String, Vec<ReasoningLevel>>> =
+        std::collections::HashMap::new();
     for route in &routes {
         let ready = route
             .credential_ref()
@@ -101,13 +131,176 @@ pub async fn route_models(
                     id: route.id.clone(),
                     name: route.display_name.clone(),
                 }),
-                reasoning_levels: Vec::new(),
+                reasoning_levels: route_reasoning_levels(
+                    route,
+                    id,
+                    settings.as_ref(),
+                    &catalog_dir,
+                    &mut catalogs,
+                )
+                .await,
                 options: Vec::new(),
                 default: false,
             });
         }
     }
     models
+}
+
+/// The pi-ai thinking levels the harness's run path can send
+/// (`deepseek::configuration` maps exactly these, in this order).
+const RUNNABLE_EFFORTS: [(&str, ReasoningLevel); 6] = [
+    ("minimal", ReasoningLevel::Minimal),
+    ("low", ReasoningLevel::Low),
+    ("medium", ReasoningLevel::Medium),
+    ("high", ReasoningLevel::High),
+    ("xhigh", ReasoningLevel::XHigh),
+    ("max", ReasoningLevel::Max),
+];
+
+/// The levels a declared `reasoningEfforts`/`thinkingLevelMap` dict supports.
+/// A member is usable when it names a wire value (a string): a `null` member
+/// pins the level to unsupported — except `off`, which is not a
+/// `ReasoningLevel` and never reaches the list either way.
+fn map_supported_levels(map: &Value) -> Vec<ReasoningLevel> {
+    RUNNABLE_EFFORTS
+        .into_iter()
+        .filter(|(level, _)| map[*level].is_string())
+        .map(|(_, level)| level)
+        .collect()
+}
+
+/// The runnable levels an installed catalog model declares. With no
+/// `thinkingLevelMap`, pi-ai's base levels (off/minimal/low/medium/high) are
+/// all supported and only `xhigh`/`max` are withheld
+/// (`getSupportedThinkingLevels`); declared maps decide explicitly.
+fn catalog_model_levels(entry: &Value) -> Vec<ReasoningLevel> {
+    if entry["reasoning"].as_bool() != Some(true) {
+        return Vec::new();
+    }
+    if entry["thinkingLevelMap"].is_object() {
+        return map_supported_levels(&entry["thinkingLevelMap"]);
+    }
+    // No map: the base levels (`off/minimal/low/medium/high` — `off` is not
+    // a `ReasoningLevel`), never `xhigh` or `max`.
+    RUNNABLE_EFFORTS
+        .into_iter()
+        .map(|(_, level)| level)
+        .filter(|level| !matches!(level, ReasoningLevel::Max | ReasoningLevel::XHigh))
+        .collect()
+}
+
+/// Parse one installed catalog file (`providers/data/<route>.json`) into
+/// `model id -> runnable levels`. Chat entries are keyed `<type>:<id>` under
+/// each API group; `getBuiltinModels` serves only `type: "chat"`, last entry
+/// per id winning, which the discovered list then enumerates.
+fn parse_catalog_levels(
+    file: &Value,
+) -> std::collections::HashMap<String, Vec<ReasoningLevel>> {
+    let mut levels = std::collections::HashMap::new();
+    for group in file.as_object().into_iter().flat_map(|groups| groups.values()) {
+        let Some(entries) = group.as_object() else {
+            continue;
+        };
+        for entry in entries.values() {
+            if entry["type"].as_str() != Some("chat") {
+                continue;
+            }
+            if let Some(id) = entry["id"].as_str() {
+                levels.insert(id.to_string(), catalog_model_levels(entry));
+            }
+        }
+    }
+    levels
+}
+
+/// The runnable levels a discovered model carries for one route, mirroring
+/// the adapter's own resolution. pi-ai routes resolve the stored profile's
+/// declaration over the installed catalog, both read the way
+/// `resolveModelReasoning` composes them; llm-deepseek routes answer their
+/// adapter's fixed set unless `thinking` is disabled. Everything else —
+/// including a route whose catalog file is missing — offers nothing, which
+/// keeps an effort DSH would refuse out of the picker.
+async fn route_reasoning_levels(
+    route: &GatewayProvider,
+    model: &str,
+    settings: Option<&Value>,
+    catalog_dir: &std::path::Path,
+    catalogs: &mut std::collections::HashMap<String, std::collections::HashMap<String, Vec<ReasoningLevel>>>,
+) -> Vec<ReasoningLevel> {
+    if route.settings_ns == PI_AI_NS {
+        let profile = settings.and_then(|store| {
+            settings_namespaces(store)
+                .into_iter()
+                .find(|(ns, _)| *ns == PI_AI_NS)
+                .map(|(_, value)| value["providers"][route.id.as_str()].clone())
+        });
+        let profile = profile.unwrap_or(Value::Null);
+        let models_list = profile["models"].as_array();
+        let declared = models_list
+            .into_iter()
+            .flatten()
+            .find(|entry| entry["id"].as_str() == Some(model));
+        // A declared models[] entry or — when no models list replaces the
+        // catalog — a modelOverrides member decides the level set when it
+        // names `reasoningEfforts`; otherwise the installed catalog entry's
+        // capability carries through unchanged, exactly as
+        // `resolveModelReasoning` composes them.
+        let declaration = declared
+            .map(|entry| &entry["reasoningEfforts"])
+            .filter(|efforts| !efforts.is_null())
+            .or_else(|| {
+                if models_list.is_some_and(|list| !list.is_empty()) {
+                    return None;
+                }
+                let override_efforts = &profile["modelOverrides"][model]["reasoningEfforts"];
+                (!override_efforts.is_null()).then_some(override_efforts)
+            });
+        if let Some(efforts) = declaration {
+            // `false` is a non-reasoning model; a dict declares the offered
+            // levels and their wire spellings.
+            return efforts
+                .as_object()
+                .map(|_| map_supported_levels(efforts))
+                .unwrap_or_default();
+        }
+        if !catalogs.contains_key(route.id.as_str()) {
+            let path = catalog_dir.join(format!("{}.json", route.id));
+            let parsed = tokio::fs::read(&path)
+                .await
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                .map(|file| parse_catalog_levels(&file))
+                .unwrap_or_default();
+            catalogs.insert(route.id.clone(), parsed);
+        }
+        return catalogs[route.id.as_str()]
+            .get(model)
+            .cloned()
+            .unwrap_or_default();
+    }
+    if route.settings_ns.starts_with("llm-deepseek") {
+        let thinking = settings
+            .and_then(|store| {
+                settings_namespaces(store)
+                    .into_iter()
+                    .find(|(ns, _)| *ns == route.settings_ns)
+                    .map(|(_, value)| {
+                        value["thinking"].as_str().unwrap_or("enabled").to_string()
+                    })
+            })
+            .unwrap_or_else(|| "enabled".to_string());
+        if thinking == "disabled" {
+            return Vec::new();
+        }
+        // The DeepSeek adapter's own: off, low, high, max.
+        return vec![
+            ReasoningLevel::Low,
+            ReasoningLevel::High,
+            ReasoningLevel::Max,
+        ];
+    }
+    Vec::new()
 }
 
 /// Parse the `llm/listConfigurableProviders` answer. Entries without a
@@ -809,7 +1002,7 @@ mod tests {
         let catalog = parse_provider_catalog(&json!([
             { "provider": "deepseek-official", "displayName": "DeepSeek", "settingsNs": "llm-deepseek", "apiKeyEnv": "DEEPSEEK_API_KEY", "account": true },
             { "provider": "opencode-go", "displayName": "OpenCode Go", "settingsNs": "llm-pi-ai", "apiKeyEnv": "OPENCODE_API_KEY" },
-            { "provider": "chatgpt-subscription", "settingsNs": "llm-pi-ai", "auth": "chatgpt" },
+            { "provider": "openai", "settingsNs": "llm-pi-ai", "auth": "chatgpt" },
             { "provider": "no-ns" },
         ]));
         assert_eq!(catalog.len(), 3, "an entry without settingsNs is skipped: {catalog:?}");
@@ -824,7 +1017,7 @@ mod tests {
         let chatgpt = &catalog[2];
         assert!(chatgpt.chatgpt && !chatgpt.account);
         assert_eq!(chatgpt.credential_ref(), None);
-        assert_eq!(chatgpt.display_name, "chatgpt-subscription", "no displayName falls back to the id");
+        assert_eq!(chatgpt.display_name, "openai", "no displayName falls back to the id");
         assert!(!chatgpt.declared, "only a hand-declared route is removable");
     }
 
@@ -1187,5 +1380,143 @@ mod tests {
         assert_eq!(namespace_revision(&settings, "llm-pi-ai"), Some(4));
         assert_eq!(namespace_revision(&settings, "missing"), None);
         assert!(routes_in_ns(&json!({}), "llm-pi-ai").is_empty());
+    }
+
+    /// A scratch catalog directory for the reasoning-level tests.
+    fn scratch_catalog(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("zeron-dsh-providers-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn route(id: &str, ns: &str) -> GatewayProvider {
+        GatewayProvider {
+            id: id.to_string(),
+            display_name: id.to_string(),
+            settings_ns: ns.to_string(),
+            api_key_env: None,
+            account: false,
+            declared: false,
+            chatgpt: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn reasoning_levels_mirror_the_catalog_and_profile_declarations() {
+        let dir = scratch_catalog("levels");
+        // The installed catalog declares support per model: a map pins the
+        // offered levels to their wire spellings, no map offers the base
+        // levels (so `max` stays out), and `reasoning: false` offers none.
+        std::fs::write(
+            dir.join("acme.json"),
+            json!({ "openai-responses": {
+                "chat:thinker": { "id": "thinker", "type": "chat",
+                    "reasoning": true,
+                    "thinkingLevelMap": { "off": null, "xhigh": "xhigh", "max": "max" } },
+                "chat:base": { "id": "base", "type": "chat", "reasoning": true },
+                "chat:plain": { "id": "plain", "type": "chat", "reasoning": false },
+                "classifier:sorter": { "id": "sorter", "type": "classifier", "reasoning": true },
+            } })
+            .to_string(),
+        )
+        .unwrap();
+        let mut catalogs = std::collections::HashMap::new();
+        let acme = route("acme", "llm-pi-ai");
+        assert_eq!(
+            route_reasoning_levels(&acme, "thinker", None, &dir, &mut catalogs).await,
+            vec![ReasoningLevel::XHigh, ReasoningLevel::Max]
+        );
+        assert_eq!(
+            route_reasoning_levels(&acme, "base", None, &dir, &mut catalogs).await,
+            vec![
+                ReasoningLevel::Minimal,
+                ReasoningLevel::Low,
+                ReasoningLevel::Medium,
+                ReasoningLevel::High
+            ]
+        );
+        assert!(
+            route_reasoning_levels(&acme, "plain", None, &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        assert!(
+            route_reasoning_levels(&acme, "sorter", None, &dir, &mut catalogs)
+                .await
+                .is_empty(),
+            "a classifier catalog entry never reaches a chat picker"
+        );
+        // A stored modelOverrides declaration decides the set over the
+        // catalog; `false` takes the control away entirely.
+        let settings = json!({ "namespaces": [{ "ns": "llm-pi-ai", "value": { "providers": { "acme": {
+            "modelOverrides": {
+                "thinker": { "reasoningEfforts": { "off": null, "high": "high" } },
+                "base": { "reasoningEfforts": false },
+            }
+        } } } }] });
+        assert_eq!(
+            route_reasoning_levels(&acme, "thinker", Some(&settings), &dir, &mut catalogs).await,
+            vec![ReasoningLevel::High]
+        );
+        assert!(
+            route_reasoning_levels(&acme, "base", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn reasoning_levels_declared_route_and_deepseek_switch() {
+        let dir = scratch_catalog("declared");
+        let mut catalogs = std::collections::HashMap::new();
+        // A hand-declared route carries no installed catalog; its models[]
+        // entries' reasoningEfforts are the whole declaration, with only the
+        // levels the harness can run offered.
+        let declared = route("acme-gateway", "llm-pi-ai");
+        let settings = json!({ "namespaces": [{ "ns": "llm-pi-ai", "value": { "providers": { "acme-gateway": {
+            "models": [
+                { "id": "thinking", "reasoningEfforts": { "off": null, "minimal": "min", "high": "high" } },
+                { "id": "silent", "reasoningEfforts": false },
+                { "id": "inherit" },
+            ]
+        } } } }] });
+        assert_eq!(
+            route_reasoning_levels(&declared, "thinking", Some(&settings), &dir, &mut catalogs)
+                .await,
+            vec![ReasoningLevel::Minimal, ReasoningLevel::High]
+        );
+        assert!(
+            route_reasoning_levels(&declared, "silent", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        assert!(
+            route_reasoning_levels(&declared, "inherit", Some(&settings), &dir, &mut catalogs)
+                .await
+                .is_empty(),
+            "no catalog exists to inherit from; nothing is invented"
+        );
+        // A non-pi-ai, non-deepseek route offers nothing.
+        assert!(
+            route_reasoning_levels(&route("x", "other-ns"), "m", None, &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
+        // llm-deepseek routes offer the adapter's efforts while thinking is
+        // enabled, and none once the switch is disabled.
+        let deepseek = route("deepseek-official", "llm-deepseek-api-key");
+        assert_eq!(
+            route_reasoning_levels(&deepseek, "deepseek-v4-pro", None, &dir, &mut catalogs).await,
+            vec![ReasoningLevel::Low, ReasoningLevel::High, ReasoningLevel::Max]
+        );
+        let disabled = json!({ "namespaces": [{ "ns": "llm-deepseek-api-key", "value": { "thinking": "disabled" } }] });
+        assert!(
+            route_reasoning_levels(&deepseek, "deepseek-v4-pro", Some(&disabled), &dir, &mut catalogs)
+                .await
+                .is_empty()
+        );
     }
 }

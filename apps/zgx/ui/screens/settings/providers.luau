@@ -19,6 +19,7 @@ local sessions = require("@account/sessions")
 local visits = require("@app/screens/settings/visits")
 local cloud = require("@account/cloud")
 local search = require("@app/screens/settings/search")
+local ModelVisibility = require("@app/model_visibility")
 
 local M = { ID = "providers", TITLE = "Providers" }
 search.index(M.ID, ui.t("settings.providers.title"), ui.t("settings.providers.routes.terms"), {
@@ -55,8 +56,27 @@ end
 -- (`parse_provider_catalog`): the pinned DSH's `nativeAuth`, the older
 -- `apiKeyEnv`/`auth` fallbacks. Entries without a route or a settings
 -- namespace are skipped, not guessed at.
+-- The catalog's display names are its route ids for the pi-ai routes, which
+-- read as duplicates (`openai`, `openai-codex`) or as one product twice
+-- (`opencode`, `opencode-go`). Name them as people know them.
+local NAMES: { [string]: string } = {
+	openai = "OpenAI",
+	opencode = "OpenCode Zen",
+	["opencode-go"] = "OpenCode Go",
+}
+-- The Codex CLI's own OAuth route: the ChatGPT sign-in here is the `openai`
+-- row, so a second OpenAI row is only a duplicate to read past.
+local HIDDEN: { [string]: boolean } = { ["openai-codex"] = true }
+-- Two products, one env name: pi-ai's catalog gives OpenCode Zen and OpenCode
+-- Go the same `OPENCODE_API_KEY`, but a Zen key is not a Go key. Zen gets a
+-- ref of its own; Go keeps the catalog's, where a saved key already lives.
+local REFS: { [string]: string } = { opencode = "OPENCODE_ZEN_API_KEY" }
+
 local function route_of(entry: any): any?
 	if type(entry) ~= "table" or type(entry.provider) ~= "string" or type(entry.settingsNs) ~= "string" then
+		return nil
+	end
+	if HIDDEN[entry.provider] then
 		return nil
 	end
 	local native = if type(entry.nativeAuth) == "table" then entry.nativeAuth else {}
@@ -71,9 +91,9 @@ local function route_of(entry: any): any?
 		and (entry.account == true or entry.auth == "account" or string.find(id, "deepseek") ~= nil)
 	return {
 		id = id,
-		name = if type(entry.displayName) == "string" then entry.displayName else id,
+		name = NAMES[id] or (if type(entry.displayName) == "string" then entry.displayName else id),
 		settings_ns = entry.settingsNs,
-		key_ref = if type(env) == "string" then env elseif type(entry.apiKeyEnv) == "string" then entry.apiKeyEnv else nil,
+		key_ref = REFS[id] or (if type(env) == "string" then env elseif type(entry.apiKeyEnv) == "string" then entry.apiKeyEnv else nil),
 		chatgpt = chatgpt,
 		oauth = oauth,
 		account = account,
@@ -378,6 +398,19 @@ local function load(): any
 	if #refs > 0 then
 		creds = host.call("DshCredentials", { refs = refs }):await()
 	end
+	-- What each route serves, for the Models section's counts.
+	local counts: { [string]: number } = {}
+	local listed = host.call("ListModels", { harness = "deepseek" }):await()
+	local models = if type(listed) == "table" and type(listed.models) == "table" then listed.models else listed
+	if type(models) == "table" then
+		for _, model in models do
+			local provider = if type(model) == "table" then model.provider else nil
+			local id = if type(provider) == "table" then provider.id else nil
+			if type(id) == "string" then
+				counts[id] = (counts[id] or 0) + 1
+			end
+		end
+	end
 	local authorized = false
 	if want_status then
 		local ok, status = pcall(function(): any
@@ -385,12 +418,31 @@ local function load(): any
 		end)
 		authorized = ok and type(status) == "table" and status.authorized == true
 	end
-	for _, route in routes do
+	for i, route in routes do
+		route.order = i
 		if route.chatgpt then
 			route.authorized = authorized
 		end
 	end
-	return { routes = routes, creds = creds }
+	return { routes = routes, creds = creds, counts = counts }
+end
+
+-- A route's models, on or off: what the composer's picker offers.
+local function model_row(item: any): Node
+	local on = ui.use_state(ModelVisibility.showing(item.id))
+	return ds.Settings.Row {
+		label = ui.t("settings.providers.models.every", { name = item.name }),
+		description = if item.count == 1
+			then ui.t("settings.providers.models.count_one")
+			else ui.t("settings.providers.models.count", { count = item.count }),
+		control = ds.Switch {
+			value = on,
+			label = item.name,
+			on_change = function(value: boolean)
+				ModelVisibility.set_showing(item.id, value)
+			end,
+		},
+	}
 end
 
 function M.body(): Node
@@ -406,19 +458,44 @@ function M.body(): Node
 				creds:set(if type(d.creds) == "table" then d.creds else {})
 			end
 		end)
+		-- What is connected first: a saved key or a grant in place is what a
+		-- visit is usually about, and the rest is a long tail. Read here, not
+		-- in `load`, so a key saved on this visit moves its row at once.
+		-- (By the catalog's own order within each group: `table.sort` is not
+		-- stable.)
 		local catalog = ui.computed(function(): { any }
 			local d = res.data:get()
-			return if d then d.routes else {}
+			local routes = if d then table.clone(d.routes) else {}
+			local saved = creds:get()
+			local function ready(route: any): boolean
+				if route.chatgpt then
+					return route.authorized == true
+				end
+				return route.key_ref ~= nil and configured_in(saved, route.key_ref)
+			end
+			table.sort(routes, function(a: any, b: any): boolean
+				local a_ready, b_ready = ready(a), ready(b)
+				if a_ready ~= b_ready then
+					return a_ready
+				end
+				return a.order < b.order
+			end)
+			return routes
 		end)
 		local function remote(): boolean
 			local target = agents.now:get().target
 			return target ~= nil and target ~= here()
 		end
+		-- A block per provider, as the upstream screen reads: its name over
+		-- its own row (the account or key it takes), not one long list.
 		local rows = ui.column {
 			w_full = true,
-			gap = "$space.2",
+			gap = "$space.4",
 			ds.Settings.Each(catalog, function(item: any, _i: number, _now: State<any>): Node
-				return route_row(item, remote, creds)
+				return ds.Settings.Section {
+					title = item.name,
+					ds.Settings.Group { route_row(item, remote, creds) },
+				}
 			end, { key = function(item: any): string
 				return item.id
 			end }),
@@ -447,14 +524,28 @@ function M.body(): Node
 				ds.Hint { ui.t("settings.providers.routes.refreshing") },
 			}),
 		}
+		-- The routes that serve models, in the catalog's order.
+		local model_routes = ui.computed(function(): { any }
+			local d = res.data:get()
+			if not d then
+				return {}
+			end
+			local counts = if type(d.counts) == "table" then d.counts else {}
+			local out = {}
+			for _, route in d.routes do
+				local count = counts[route.id]
+				if type(count) == "number" and count > 0 then
+					table.insert(out, { id = route.id, name = route.name, count = count })
+				end
+			end
+			return out
+		end)
 		return ui.column {
 			w_full = true,
 			gap = "$space.6",
 			search.anchor(
 				"routes",
 				ds.Settings.Section {
-					title = ui.t("settings.providers.routes.title"),
-					description = ui.t("settings.providers.routes.description"),
 					ui.show(remote, ds.Hint { function(): string
 						local target = agents.now:get().target
 						if target == nil then return "" end
@@ -488,6 +579,28 @@ function M.body(): Node
 					ui.show(function(): boolean
 						return #catalog:get() > 0
 					end, rows),
+				}
+			),
+			-- Which of the routes' models the composer offers.
+			search.anchor(
+				"models",
+				ds.Settings.Section {
+					title = ui.t("settings.providers.models.title"),
+					description = ui.t("settings.providers.models.description"),
+					ui.show(function(): boolean
+						return #model_routes:get() == 0
+					end, ui.row {
+						w_full = true,
+						px = ds.Settings.inset(),
+						ds.Hint { ui.t("settings.providers.models.none") },
+					}),
+					ds.Settings.Group {
+						ds.Settings.Each(model_routes, function(item: any): Node
+							return model_row(item)
+						end, { key = function(item: any): string
+							return item.id
+						end }),
+					},
 				}
 			),
 		}

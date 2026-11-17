@@ -171,6 +171,28 @@ local answers: { [string]: (arg: any) -> any } = {
 				settingsNs = "llm-pi-ai",
 				nativeAuth = { env = {}, oauth = true },
 			},
+			-- The catalog names these by their route id; the page renames
+			-- them (and hides the Codex duplicate).
+			{
+				provider = "openai-codex",
+				displayName = "openai-codex",
+				settingsNs = "llm-pi-ai",
+				nativeAuth = { env = {}, oauth = true },
+			},
+			{
+				provider = "opencode",
+				displayName = "opencode",
+				settingsNs = "llm-pi-ai",
+				nativeAuth = { env = { "OPENCODE_API_KEY" }, oauth = false },
+			},
+		})
+	end,
+	-- The routes' models, for the Models section's counts.
+	["ListModels"] = function()
+		return settled({
+			{ id = "gpt-6-luna", label = "GPT-6 Luna", provider = { id = "openai", name = "OpenAI" }, reasoningLevels = {} },
+			{ id = "gpt-6-luna", label = "GPT-6 Luna", provider = { id = "opencode-go", name = "OpenCode Go" }, reasoningLevels = {} },
+			{ id = "deepseek-flash", label = "DeepSeek V4.1 Flash", reasoningLevels = {} },
 		})
 	end,
 	["DshCredentials"] = function(arg: any)

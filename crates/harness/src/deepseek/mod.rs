@@ -293,14 +293,20 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             "Invalid DeepSeek session identity".into(),
         ));
     }
+    // Every level DSH's `reasoningEffort` names: a model's catalog says which
+    // of them it accepts (`thinkingLevelMap`), and the picker offers that
+    // intersection, so refusing one here would hide a level the model has.
     let effort = match request.reasoning {
         None => None,
+        Some(ReasoningLevel::Minimal) => Some("minimal"),
         Some(ReasoningLevel::Low) => Some("low"),
+        Some(ReasoningLevel::Medium) => Some("medium"),
         Some(ReasoningLevel::High) => Some("high"),
+        Some(ReasoningLevel::XHigh) => Some("xhigh"),
         Some(ReasoningLevel::Max) => Some("max"),
         _ => {
             return Err(HarnessError::Protocol(
-                "DeepSeek supports low, high, and max reasoning".into(),
+                "DeepSeek supports minimal, low, medium, high, xhigh, and max reasoning".into(),
             ));
         }
     };
