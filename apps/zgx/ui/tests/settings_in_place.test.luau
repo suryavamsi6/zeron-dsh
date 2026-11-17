@@ -53,7 +53,7 @@ end
 
 test("the pages list under Personal, Devices and Organization", function()
 	local app = open()
-	for _, label in { "Personal", "Devices", "Organization", "General", "Appearance", "Notifications", "Account", "DeepSeek", "Members" } do
+	for _, label in { "Personal", "Devices", "Organization", "General", "Appearance", "Notifications", "Account", "Providers", "Members" } do
 		expect(app:has(`{NAV} >> "{label}"`)).to_be(true)
 	end
 	-- The account's page is "Account" (its id still `profile`): no "Profile".
@@ -239,21 +239,13 @@ test("each heading shows once, its pages under it, ahead of Archived", function(
 	expect(at("Members") < at("Archived")).to_be(true)
 end)
 
-test("DeepSeek's page asks another device's agents when it's chosen", function()
-	local app = open("DeepSeek")
-	expect(asked(app, "agents.load")).to_be(true)
-	expect(shows(app, PAGE, "Official DeepSeek Harness SDK")).to_be(true)
-	app:click(`{PAGE} >> role:button "Device"`)
-	app:frames(10)
-	app:click('role:menuitem "devbox"')
-	app:frames(20)
-	expect(asked(app, "agents.target:box")).to_be(true)
-	-- Back to this computer: no device named, the engine's own.
-	app:click(`{PAGE} >> role:button "Device"`)
-	app:frames(10)
-	app:click('role:menuitem "MacBook Pro"')
-	app:frames(20)
-	expect(asked(app, "agents.target:")).to_be(true)
+test("Providers asks the gateway for its routes", function()
+	local app = open("Providers")
+	expect(asked(app, "DshProviders")).to_be(true)
+	-- The routes the gateway reports, each with the control it needs.
+	expect(shows(app, PAGE, "OpenCode Go")).to_be(true)
+	expect(shows(app, PAGE, "OpenAI")).to_be(true)
+	expect(shows(app, PAGE, "Sign in with ChatGPT")).to_be(true)
 end)
 
 -- A node's box under `scope`: x, y, w, h.
@@ -1011,14 +1003,14 @@ test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and send
 	expect(shows(app, PAGE, "Capture Appshots")).to_be(true)
 end)
 
-test("DeepSeek stands on the page's middle, as General does", function()
+test("Providers stands on the page's middle, as General does", function()
 	local app = open("General")
 	app:resize(1400, 900)
 	app:frames(30)
 	local gx = box(app, `{PAGE} >> role:heading "General"`)
-	app:click(`{NAV} >> role:tab "DeepSeek"`)
+	app:click(`{NAV} >> role:tab "Providers"`)
 	app:frames(40)
-	local px = box(app, `{PAGE} >> role:heading "DeepSeek"`)
+	local px = box(app, `{PAGE} >> role:heading "Providers"`)
 	expect(gx > 0).to_be(true)
 	expect(math.abs(px - gx) < 1).to_be(true)
 end)

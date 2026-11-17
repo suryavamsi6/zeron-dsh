@@ -83,6 +83,14 @@ local function settled(value: any, word: string?): any
 			ok(value)
 		end
 	end
+	-- A resource's `load` awaits it (`ui.call(...):await()`), as the host's
+	-- own promise is awaited.
+	function p.await(self: any): any
+		if word then
+			error({ message = word })
+		end
+		return value
+	end
 	return p
 end
 
@@ -136,7 +144,66 @@ local function find(list: { any }, id: string): number?
 	return nil
 end
 
+-- Which key refs the stub has stored, and the ChatGPT sign-in's state.
+local keys: { [string]: boolean } = {}
+local chatgpt = { running = false, authorized = false }
+
 local answers: { [string]: (arg: any) -> any } = {
+	-- The provider page's gateway calls (crates/engine/src/dsh_gateway.rs):
+	-- two routes, one that takes a key and the ChatGPT one, so a test can
+	-- walk both controls without an engine or a browser.
+	["DshProviders"] = function()
+		return settled({
+			{
+				provider = "deepseek-official",
+				displayName = "DeepSeek",
+				settingsNs = "llm-deepseek",
+			},
+			{
+				provider = "opencode-go",
+				displayName = "OpenCode Go",
+				settingsNs = "llm-pi-ai",
+				nativeAuth = { env = { "OPENCODE_API_KEY" }, oauth = false },
+			},
+			{
+				provider = "openai",
+				displayName = "OpenAI",
+				settingsNs = "llm-pi-ai",
+				nativeAuth = { env = {}, oauth = true },
+			},
+		})
+	end,
+	["DshCredentials"] = function(arg: any)
+		local out = {}
+		for _, ref in (if type(arg) == "table" and type(arg.refs) == "table" then arg.refs else {}) do
+			out[ref] = { configured = keys[ref] == true }
+		end
+		return settled(out)
+	end,
+	["DshSetCredential"] = function(arg: any)
+		if refuse:peek() then
+			return failed("refused")
+		end
+		if type(arg) ~= "table" or type(arg.ref) ~= "string" or arg.ref == "" then
+			return failed("no ref")
+		end
+		keys[arg.ref] = true
+		return settled(nil)
+	end,
+	["DshChatgptStart"] = function()
+		if refuse:peek() then
+			return failed("refused")
+		end
+		chatgpt.running = true
+		return settled({ url = "https://auth.openai.com/authorize?probe=1", instructions = "" })
+	end,
+	["DshChatgptStatus"] = function()
+		return settled({ authorized = chatgpt.authorized, running = chatgpt.running, url = nil })
+	end,
+	["DshChatgptCancel"] = function()
+		chatgpt.running = false
+		return settled(nil)
+	end,
 	["account.me"] = function()
 		return settled(table.clone(me))
 	end,

@@ -10,7 +10,7 @@ return function(props: Props): Node
 		count = props.count,
 		back = ds.Onboarding.Back { on_click = props.on_back },
 		continue = { label = "Continue", on_click = props.on_continue },
-		form = { measure = ds.Onboarding.LIST_MEASURE, title = "Set up DeepSeek", body = "Use the official DeepSeek Harness SDK on your run device. You can configure it now or later in Settings → DeepSeek." },
+		form = { measure = ds.Onboarding.LIST_MEASURE, title = "Connect a provider", body = "Zeron runs on the provider you configure here. You can do this now, or later in Settings → Providers." },
 		providers.body(),
 	}
 end
