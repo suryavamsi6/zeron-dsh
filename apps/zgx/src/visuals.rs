@@ -724,6 +724,18 @@ fn node_value(node: &zv::Node, path: &str) -> Value {
             f.push(("gap", num(*gap)));
             f.push(("children", children_value(children, path)));
         }
+        // (A plugin's box and its pictures are drawn from a plugin's folder by
+        // the plugin scene, which this side never renders: a box lays its
+        // children out, and a picture takes no room.)
+        zv::NodeKind::Frame(frame) => {
+            f.push(("k", Value::from("column")));
+            f.push(("gap", num(frame.gap)));
+            f.push(("children", children_value(&frame.children, path)));
+        }
+        zv::NodeKind::Image(_) => {
+            f.push(("k", Value::from("space")));
+            f.push(("size", num(0.0f64)));
+        }
         zv::NodeKind::Text(t) => {
             f.push(("k", Value::from("text")));
             f.push(("spans", list(t.spans.iter().map(span_value).collect())));
