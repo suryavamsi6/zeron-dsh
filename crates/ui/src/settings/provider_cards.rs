@@ -794,7 +794,7 @@ impl ProviderCards {
                 .client()
                 .call(methods::DSH_DISCOVER_MODELS, params)
                 .await
-                .map(dsh_providers::parse_models)
+                .map(|value| dsh_providers::parse_models(&value))
                 .map_err(|error| error.to_string());
             let _ = this.update(cx, |page, cx| {
                 if page.target_device != target {
@@ -845,11 +845,10 @@ impl ProviderCards {
         let (configured, account_state, chatgpt, models, busy, test_result, editing_key, input, sign_in) = {
             let card = self.card(&id, cx);
             (
-                key_ref
-                    .as_deref()
-                    .and_then(|r| card.credentials.ready())
-                    .map(|value| dsh_providers::credential_configured(value, r))
-                    .unwrap_or(false),
+                match (&key_ref, card.credentials.ready()) {
+                    (Some(r), Some(value)) => dsh_providers::credential_configured(value, r),
+                    _ => false,
+                },
                 card.account.ready().map(dsh_providers::parse_account_state),
                 card.chatgpt.ready().map(dsh_providers::parse_chatgpt_status),
                 card.models.ready().cloned().unwrap_or_default(),
@@ -916,7 +915,7 @@ impl ProviderCards {
             let pid = id.clone();
             actions = actions.child(
                 widgets::action_button(theme, ActionTone::Quiet)
-                    .id(("provider-key", pid.as_str()))
+                    .id(format!("provider-key-{}", pid.as_str()))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         page.card(&pid, cx).editing_key = true;
                         cx.notify();
@@ -927,7 +926,7 @@ impl ProviderCards {
                 let pid = id.clone();
                 actions = actions.child(
                     widgets::ghost_action(theme)
-                        .id(("provider-key-remove", pid.as_str()))
+                        .id(format!("provider-key-remove-{}", pid.as_str()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.remove_key(&pid, cx);
                         }))
@@ -942,7 +941,7 @@ impl ProviderCards {
             if running || sign_in.is_some() {
                 actions = actions.child(
                     widgets::ghost_action(theme)
-                        .id(("provider-chatgpt-cancel", pid.as_str()))
+                        .id(format!("provider-chatgpt-cancel-{}", pid.as_str()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.cancel_chatgpt_sign_in(&pid, cx);
                         }))
@@ -951,7 +950,7 @@ impl ProviderCards {
             } else {
                 actions = actions.child(
                     widgets::action_button(theme, ActionTone::Quiet)
-                        .id(("provider-chatgpt-start", pid.as_str()))
+                        .id(format!("provider-chatgpt-start-{}", pid.as_str()))
                         .when(!signed_in, |el| {
                             el.on_click(cx.listener(move |page, _, _, cx| {
                                 page.start_chatgpt_sign_in(&pid, cx);
@@ -967,7 +966,7 @@ impl ProviderCards {
             if sign_in.is_some() && !signed_in {
                 actions = actions.child(
                     widgets::ghost_action(theme)
-                        .id(("provider-account-cancel", pid.as_str()))
+                        .id(format!("provider-account-cancel-{}", pid.as_str()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.cancel_account_sign_in(&pid, cx);
                         }))
@@ -976,7 +975,7 @@ impl ProviderCards {
             } else if signed_in {
                 actions = actions.child(
                     widgets::ghost_action(theme)
-                        .id(("provider-sign-out", pid.as_str()))
+                        .id(format!("provider-sign-out-{}", pid.as_str()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.sign_out(&pid, cx);
                         }))
@@ -985,7 +984,7 @@ impl ProviderCards {
             } else {
                 actions = actions.child(
                     widgets::action_button(theme, ActionTone::Quiet)
-                        .id(("provider-account-start", pid.as_str()))
+                        .id(format!("provider-account-start-{}", pid.as_str()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.start_account_sign_in(&pid, cx);
                         }))
@@ -997,7 +996,7 @@ impl ProviderCards {
             let pid = id.clone();
             actions = actions.child(
                 widgets::ghost_action(theme)
-                    .id(("provider-test", pid.as_str(), mode.label()))
+                    .id(format!("provider-test-{}-{}", pid, mode.label()))
                     .tooltip(widgets::text_tooltip(mode.detail()))
                     .on_click(cx.listener(move |page, _, _, cx| {
                         page.run_test(&pid, mode, cx);
@@ -1007,7 +1006,7 @@ impl ProviderCards {
         }
 
         let mut card = widgets::card_row(theme, ix == 0)
-            .id(("provider-card", id.as_str()))
+            .id(format!("provider-card-{}", id.as_str()))
             .child(
                 div()
                     .flex_1()
@@ -1058,7 +1057,7 @@ impl ProviderCards {
                     .child(popover::dialog_field(input.into_any_element()))
                     .child(
                         widgets::action_button(theme, ActionTone::Solid)
-                            .id(("provider-key-save", pid.as_str()))
+                            .id(format!("provider-key-save-{}", pid.as_str()))
                             .on_click(cx.listener(move |page, _, _, cx| {
                                 page.save_key(&pid, cx);
                             }))
@@ -1098,7 +1097,7 @@ impl ProviderCards {
                 let pid = id.clone();
                 rows = rows.child(
                     div()
-                        .id(("provider-model", pid.as_str(), mid.as_str()))
+                        .id(format!("provider-model-{pid}-{mid}"))
                         .flex()
                         .flex_row()
                         .items_center()
@@ -1106,7 +1105,7 @@ impl ProviderCards {
                         .py(px(4.0))
                         .child(
                             div()
-                                .id(("provider-model-star", pid.as_str(), mid.as_str()))
+                                .id(format!("provider-model-star-{pid}-{mid}"))
                                 .cursor_pointer()
                                 .role(gpui::Role::Button)
                                 .aria_label(if starred { "Unstar model" } else { "Star model" })
@@ -1141,7 +1140,7 @@ impl ProviderCards {
                         .when(!is_default, |el| {
                             el.child(
                                 widgets::ghost_action(theme)
-                                    .id(("provider-model-default", pid.as_str(), mid.as_str()))
+                                    .id(format!("provider-model-default-{pid}-{mid}"))
                                     .on_click(cx.listener(move |page, _, _, cx| {
                                         page.set_default_model(&pid, &mid, cx);
                                     }))
@@ -1156,7 +1155,7 @@ impl ProviderCards {
                 .child(rows)
                 .child(
                     widgets::ghost_action(theme)
-                        .id(("provider-models-refresh", pid.as_str()))
+                        .id(format!("provider-models-refresh-{}", pid.as_str()))
                         .tooltip(widgets::text_tooltip(TestMode::Live.detail()))
                         .on_click(cx.listener(move |page, _, _, cx| {
                             page.refresh_models(&pid, cx);
