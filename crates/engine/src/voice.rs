@@ -1,13 +1,10 @@
-//! Exclusive, local, ephemeral voice ownership. Native media remains in Codex's helper.
-pub(crate) mod remote;
+//! Exclusive, local, ephemeral voice ownership.
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tokio_util::sync::CancellationToken;
-use zeron_harness::codex::realtime::{RealtimeHandle, VoiceCommand};
-use zeron_proto::{SessionStatus, voice::*};
+use zeron_proto::voice::*;
 
 #[derive(Clone, Default)]
 pub struct VoiceManager {
@@ -16,13 +13,8 @@ pub struct VoiceManager {
 #[derive(Default)]
 struct Inner {
     slot: Mutex<Option<Slot>>,
-    attempts:
-        Mutex<std::collections::HashMap<zeron_proto::voice::remote::AttemptKey, remote::Attempt>>,
     generation: AtomicU64,
     identity_epoch: AtomicU64,
-    // A successor waits until the old native stop completes, even after its owner is dropped.
-    preparation: tokio::sync::Mutex<()>,
-    native_lifecycle: Arc<tokio::sync::Mutex<()>>,
 }
 struct Slot {
     lease: VoiceLease,
@@ -31,9 +23,6 @@ struct Slot {
     owner_attached: bool,
     events: Option<mpsc::Receiver<VoiceEvent>>,
     sender: mpsc::Sender<VoiceEvent>,
-    cancel: CancellationToken,
-    provider: Option<RealtimeHandle>,
-    remote: Option<remote::RemoteSlot>,
 }
 pub struct VoiceOwner {
     manager: VoiceManager,
@@ -52,9 +41,6 @@ impl Drop for VoiceOwner {
 }
 
 impl VoiceManager {
-    pub(crate) async fn preparation(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.inner.preparation.lock().await
-    }
     pub(crate) fn identity_epoch(&self) -> u64 {
         self.inner.identity_epoch.load(Ordering::Acquire)
     }
@@ -104,9 +90,6 @@ impl VoiceManager {
             owner_attached: false,
             events: Some(events),
             sender,
-            cancel: CancellationToken::new(),
-            provider: None,
-            remote: None,
         });
         drop(state);
         let manager = self.clone();
@@ -141,46 +124,11 @@ impl VoiceManager {
         }
         let events = slot.events.take().ok_or(VoiceRejection::InvalidLease)?;
         slot.owner_attached = true;
-        if let Some(remote) = &mut slot.remote {
-            remote.last_report = Instant::now();
-        }
         Ok(VoiceOwner {
             manager: self.clone(),
             lease,
             events,
         })
-    }
-    fn publish(&self, lease: &VoiceLease, event: VoiceEvent) -> Result<(), VoiceRejection> {
-        let result = {
-            let state = self.inner.slot.lock().unwrap();
-            let slot = state
-                .as_ref()
-                .filter(|s| Self::matches(s, lease))
-                .ok_or(VoiceRejection::InvalidLease)?;
-            slot.sender
-                .try_send(event)
-                .map_err(|_| VoiceRejection::Overflow)
-        };
-        if result.is_err() {
-            let _ = self.stop(lease);
-        }
-        result
-    }
-    fn update(
-        &self,
-        lease: &VoiceLease,
-        f: impl FnOnce(&mut VoiceSnapshot),
-    ) -> Result<(), VoiceRejection> {
-        let snapshot = {
-            let mut state = self.inner.slot.lock().unwrap();
-            let slot = state
-                .as_mut()
-                .filter(|s| Self::matches(s, lease))
-                .ok_or(VoiceRejection::InvalidLease)?;
-            f(&mut slot.snapshot);
-            slot.snapshot.clone()
-        };
-        self.publish(lease, VoiceEvent::Snapshot { snapshot })
     }
     pub fn stop(&self, lease: &VoiceLease) -> Result<(), VoiceRejection> {
         self.finish(lease, None)
@@ -203,10 +151,6 @@ impl VoiceManager {
         Ok(())
     }
     fn close_slot(s: Slot, reason: Option<VoiceRejection>) {
-        s.cancel.cancel();
-        if let Some(provider) = s.provider.as_ref() {
-            provider.abort_voice(s.lease.generation);
-        }
         let _ = s.sender.try_send(VoiceEvent::Closed {
             generation: s.lease.generation,
             reason,
@@ -226,9 +170,6 @@ impl VoiceManager {
         // The same lock covers reservation and identity changes: a pending probe
         // may never create a lease after account/profile retirement.
         self.inner.identity_epoch.fetch_add(1, Ordering::AcqRel);
-        for attempt in self.inner.attempts.lock().unwrap().values() {
-            attempt.cancel.cancel();
-        }
         self.inner.generation.fetch_add(1, Ordering::AcqRel);
         let old = state.take();
         drop(state);

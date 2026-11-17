@@ -1447,20 +1447,20 @@ mod tests {
     #[test]
     fn the_agents_step_says_what_it_found() {
         assert_eq!(agents_summary(&Loadable::Loading), AgentsSummary::Looking);
-        let none = Loadable::Ready(vec![
-            descriptor(HarnessId::ClaudeCode, "Claude Code", false),
-            descriptor(HarnessId::Codex, "Codex", false),
-        ]);
+        let none = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek", false)]);
         assert_eq!(agents_summary(&none), AgentsSummary::NoneInstalled);
-        let some = Loadable::Ready(vec![
+        // A retired provider that is installed is not an agent this build
+        // runs, so the step still says nothing was found.
+        let retired = Loadable::Ready(vec![
             descriptor(HarnessId::ClaudeCode, "Claude Code", true),
-            descriptor(HarnessId::Codex, "Codex", false),
-            descriptor(HarnessId::Cursor, "Cursor", true),
+            descriptor(HarnessId::Codex, "Codex", true),
         ]);
+        assert_eq!(agents_summary(&retired), AgentsSummary::NoneInstalled);
+        let some = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek", true)]);
         let AgentsSummary::Installed(names) = agents_summary(&some) else {
             panic!("expected installed agents");
         };
-        assert_eq!(join_names(&names), "Claude Code and Cursor");
+        assert_eq!(join_names(&names), "DeepSeek");
         let many: Vec<String> = ["A", "B", "C", "D", "E"].map(String::from).into();
         assert_eq!(short_names(&many), "A, B and 3 more");
         assert_eq!(short_names(&many[..3]), "A, B and C");

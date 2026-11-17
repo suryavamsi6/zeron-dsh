@@ -428,12 +428,12 @@ apis.invite = function(_org: string, emails: { string }): any
 	end
 	return settled({ sent = sent, failed = failed })
 end
--- This computer's agents and another device's (account/agents): one each, so
--- a switch of device shows whose.
+-- This computer's agents and another device's (account/agents): the one
+-- runtime this build runs, on each.
 local agents = require("@account/agents")
 local function agents_of(target: string?): any
-	-- Cloud (the engine answers for it from the vault): Claude Code and
-	-- Codex, always installed; Codex with an account, so on.
+	-- Cloud (the engine answers for it from the vault): the DeepSeek
+	-- Harness, always installed.
 	if target == "cloud" then
 		local function one(id: string, name: string, mark: string, accounts: { any }): any
 			return { id = id, name = name, mark = mark, installed = true, can_install = false, enabled = #accounts > 0, version = nil, installing = false, login = "idle", accounts = accounts }
@@ -442,21 +442,18 @@ local function agents_of(target: string?): any
 			state = "ready",
 			target = target,
 			list = {
-				one("claude-code", "Claude Code", "claude", {}),
-				one("codex", "Codex", "openai", { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }),
+				one("deepseek", "DeepSeek", "provider-deepseek", { { id = "c1", email = "ada@example.com", plan = "Pro", session = 0.1, week = 0.2, active = true } }),
 			},
 		}
 	end
-	local name = if target then "Codex" else "Claude Code"
-	local id = if target then "codex" else "claude-code"
 	return {
 		state = "ready",
 		target = target,
 		list = {
 			{
-				id = id,
-				name = name,
-				mark = if target then "openai" else "claude",
+				id = "deepseek",
+				name = "DeepSeek",
+				mark = "provider-deepseek",
 				installed = true,
 				can_install = true,
 				enabled = true,
@@ -631,7 +628,5 @@ ui.command {
 -- Cloud, Billing and GitHub for Cloud (Settings → Cloud and → Billing),
 -- the same way: none until `cloud_stub.offer`.
 require("./cloud_stub")
--- The ACP registry's agents (Settings → Providers → Add an agent).
-require("./registry_stub")
 
 return M

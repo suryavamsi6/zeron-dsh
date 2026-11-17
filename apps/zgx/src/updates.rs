@@ -590,6 +590,7 @@ fn harness_wire(harness: &HarnessId) -> String {
 /// An agent's name, as the shipping app's list says it.
 fn agent_name(harness: &HarnessId) -> &str {
     match harness {
+        HarnessId::DeepSeek => "DeepSeek",
         HarnessId::ClaudeCode => "Claude Code",
         HarnessId::Codex => "Codex",
         HarnessId::Cursor => "Cursor",

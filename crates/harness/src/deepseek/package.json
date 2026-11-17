@@ -1,0 +1,13 @@
+{
+  "name": "zeron-deepseek-sidecar",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.9.0" },
+  "dependencies": {
+    "@deepseek-ai/dsh-sdk-client": "0.2.2-rc.3",
+    "@deepseek-ai/dsh": "0.2.2-rc.3"
+  },
+  "scripts": {
+    "test": "node --test ../../tests/deepseek_sdk.test.mjs"
+  }
+}

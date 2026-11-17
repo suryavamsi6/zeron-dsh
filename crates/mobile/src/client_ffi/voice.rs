@@ -364,12 +364,13 @@ async fn present(
 
 #[uniffi::export]
 impl CoreClient {
-    /// Returns immediately. Callbacks are dispatched on the core runtime; the
-    /// platform must hop to its media/UI executor and call complete_media.
+    /// Remote voice is not available: the DeepSeek Harness SDK exposes no
+    /// realtime voice contract. The handle closes at once with an explicit
+    /// reason; local dictation stays on the platform.
     pub fn start_voice(
         &self,
-        host_device_id: String,
-        voice: Option<String>,
+        _host_device_id: String,
+        _voice: Option<String>,
         media: Arc<dyn VoiceMediaListener>,
         listener: Arc<dyn VoiceSessionListener>,
     ) -> Arc<VoiceCall> {
@@ -379,49 +380,14 @@ impl CoreClient {
             next: AtomicU64::new(0),
             closed: AtomicBool::new(false),
         });
-        let cancel = self.client.voice_cancellation();
-        let (muted, rx) = watch::channel(false);
-        let presented_mute = rx.clone();
+        let (muted, _) = watch::channel(false);
         let handle = Arc::new(VoiceCall {
             media: platform.clone(),
-            cancel: cancel.clone(),
+            cancel: self.client.voice_cancellation(),
             muted,
         });
-        let client = self.client.clone();
-        zc::runtime::handle().spawn(async move {
-            let (events, receiver) = mpsc::channel(32);
-            let forward = tokio::spawn(present(listener.clone(), receiver, presented_mute));
-            let operation = async {
-                let control = client
-                    .voice_transport(&host_device_id)
-                    .await
-                    .map_err(|_| VoiceRejection::RemoteHost)?;
-                let config = zeron_proto::ChatConfig {
-                    harness: zeron_proto::HarnessId::Codex,
-                    model: None,
-                    reasoning: None,
-                    model_options: Default::default(),
-                    sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                    access: Default::default(),
-                    plan: false,
-                };
-                zeron_voice_session::run(
-                    control,
-                    platform.clone(),
-                    config,
-                    voice,
-                    cancel.clone(),
-                    events,
-                    rx,
-                )
-                .await
-            };
-            let result = tokio::select! {biased;_=cancel.cancelled()=>Ok(()),r=operation=>r};
-            platform.close();
-            // Every sender is gone: the presenter drains what was queued.
-            let _ = forward.await;
-            listener.on_voice_closed(result.err().map(VoiceEndReason::from));
-        });
+        platform.close();
+        listener.on_voice_closed(Some(VoiceEndReason::from(VoiceRejection::Unsupported)));
         handle
     }
 }

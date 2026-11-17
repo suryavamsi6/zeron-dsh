@@ -7926,7 +7926,7 @@ impl Composer {
         }
         let harness = self.pickers.read(cx).resolved(cx).harness;
         let preferences =
-            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::Codex));
+            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::DeepSeek));
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
@@ -8019,7 +8019,7 @@ impl Composer {
             this.update(cx, |this, cx| {
                 let harness = this.pickers.read(cx).resolved(cx).harness;
                 let preferences = crate::settings::current(cx)
-                    .skill_completion(harness.unwrap_or(HarnessId::Codex));
+                    .skill_completion(harness.unwrap_or(HarnessId::DeepSeek));
                 let current = format!(
                     "{}:{}:{preferences:?}",
                     this.completion_connection_context(cx),
@@ -8432,7 +8432,7 @@ impl Composer {
     fn update_slash(&mut self, text: &str, cursor: usize, cx: &mut Context<Self>) {
         let harness = self.pickers.read(cx).resolved(cx).harness;
         let preferences =
-            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::Codex));
+            crate::settings::current(cx).skill_completion(harness.unwrap_or(HarnessId::DeepSeek));
         let (token, skill, include_skills, commands_allowed) =
             completion_trigger(text, cursor, preferences);
         if token.is_none() {
@@ -8743,7 +8743,7 @@ impl Composer {
                                 "This agent does not advertise skills"
                             }
                         } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
+                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::DeepSeek))
                             .separate_from_slash
                         {
                             "No commands or skills available"
@@ -8754,7 +8754,7 @@ impl Composer {
                         if self.slash.skill {
                             "No matching skills"
                         } else if !crate::settings::current(cx)
-                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::Codex))
+                            .skill_completion(self.slash.harness.unwrap_or(HarnessId::DeepSeek))
                             .separate_from_slash
                         {
                             "No matching commands or skills"
@@ -14850,7 +14850,7 @@ mod tests {
         cx.update(|cx| {
             crate::settings::update(crate::settings::SavePolicy::Immediate, cx, |settings| {
                 settings.skill_completion_by_harness.insert(
-                    HarnessId::Opencode,
+                    HarnessId::DeepSeek,
                     crate::settings::SkillCompletionSettings {
                         dollar: true,
                         separate_from_slash: true,
@@ -14918,7 +14918,7 @@ mod tests {
         cx.run_until_parked();
         composer.read_with(cx, |composer, _| {
             assert_eq!(visible_names(composer), current_names);
-            assert_eq!(composer.slash.harness, Some(HarnessId::Opencode));
+            assert_eq!(composer.slash.harness, Some(HarnessId::DeepSeek));
         });
 
         // Acceptance, ordinary prose and changing trigger characters must all

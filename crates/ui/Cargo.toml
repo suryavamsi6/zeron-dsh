@@ -6,7 +6,7 @@ license.workspace = true
 publish.workspace = true
 
 [features]
-voice-experimental = [] # Compatibility flag; native subscription voice uses Codex's packaged helper.
+voice-experimental = []
 project-palette-fixture = []
 # New project's typed path against a real engine, filmed in process.
 project-path-fixture = ["gpui_platform/test-support"]
@@ -109,6 +109,10 @@ name = "settings-search-fixture"
 required-features = ["appshots-fixture"]
 
 [[example]]
+name = "deepseek-settings-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "right-panel-fixture"
 required-features = ["appshots-fixture"]
 
@@ -117,7 +121,6 @@ name = "session-card-fixture"
 required-features = ["appshots-fixture"]
 
 [dependencies]
-zeron-voice-media.workspace = true
 zeron-voice-session.workspace = true
 zeron-orb.workspace = true
 zeron-veil.workspace = true

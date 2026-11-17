@@ -1,6 +1,6 @@
 # Zeron
 
-Control your coding agents (Claude Code, Codex, Cursor, Devin, Grok, Hermes, Pi, Antigravity) locally by default, with optional multi-device sync.
+Run DeepSeek coding sessions through the official [DeepSeek Harness SDK](https://github.com/deepseek-ai/deepseek-harness), locally by default, with optional multi-device sync. Zeron supports DeepSeek only; sessions saved under earlier providers stay readable but unsupported. See the SDK's own documentation for installation and authentication.
 
 *English | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | [日本語](README.ja.md) | [Español](README.es.md)*
 

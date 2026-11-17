@@ -283,8 +283,7 @@ class CloudStore(private val scope: CoroutineScope, private val client: () -> Co
 
     companion object {
         val agents = listOf(
-            Agent("claude-code", "Claude Code", "claude", "anthropic-key", "Sign in with Claude", "Anthropic API key"),
-            Agent("codex", "Codex", "codex", "openai-key", "Sign in with ChatGPT", "OpenAI API key"),
+            Agent("deepseek", "DeepSeek", "deepseek-key", "deepseek-key", "Add DeepSeek API key", "DeepSeek API key"),
         )
 
         /** The agents Cloud runs. */
@@ -388,15 +387,5 @@ class BrowserReturns {
  * on the phone). Throws [CancellationException] when the page was closed.
  */
 suspend fun AppModel.signInToCloud(context: Context, agent: CloudStore.Agent) {
-    val c = client.value ?: throw CoreException.Closed()
-    val start = c.providerLoginStart(agent.login, BrowserReturns.SIGNED_IN)
-    val done = browser.browseUntil(context, start.url, "signed-in") {
-        c.providerLoginFinish(start.loginId)
-        true
-    }
-    if (done == null) {
-        c.providerLoginCancel(start.loginId)
-        throw CancellationException("The sign-in page was closed")
-    }
-    cloud.refreshAccounts()
+    throw CoreException.Unsupported("Browser sign-in is unsupported. Add a DeepSeek API key in Settings → DeepSeek.")
 }

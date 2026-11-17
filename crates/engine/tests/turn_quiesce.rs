@@ -1,6 +1,6 @@
 //! Turn-quiesce watchdog + parked self-continuation, mocked against the
-//! 2026-08-12 stuck-Working incident workflow (chat 15c8be78, Claude via
-//! claude-agent-acp — but the failure shape is harness-agnostic):
+//! 2026-08-12 stuck-Working incident workflow (chat 15c8be78 — the failure
+//! shape is harness-agnostic):
 //!
 //! 1. A turn completes (Done) → the session parks Idle.
 //! 2. The agent re-invokes ITSELF on a background-task notification and

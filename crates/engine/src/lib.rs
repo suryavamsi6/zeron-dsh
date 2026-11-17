@@ -59,7 +59,6 @@ mod http_error;
 pub mod instance_lock;
 pub mod local_import;
 pub mod managed;
-mod hosted_models;
 mod model_catalogs;
 mod plugin_agents;
 pub mod plugins;
@@ -408,13 +407,6 @@ impl EngineCore {
         // against this store and pushes staged bytes to remote hosts.
         doc_host.set_uploads(uploads.clone());
         let agent_accounts_config = AgentAccountsConfig::detect(data_dir);
-        // A Cloud device's Codex runs in the broker's managed CODEX_HOME.
-        let codex_home = if runner::is_cloud_platform() {
-            credentials::managed_codex_home(data_dir)
-        } else {
-            agent_accounts_config.codex_home.clone()
-        };
-        sessions.set_generated_images(uploads.clone(), codex_home.join("generated_images"));
         let local_import = (profile.scope() == WorkspaceScope::Synced).then(|| {
             local_import::LocalImporter::new(
                 data_dir,
@@ -434,14 +426,6 @@ impl EngineCore {
         registry.set_account_environment(Arc::new(agent_accounts::PinRunEnvironment(
             agent_accounts.clone(),
         )));
-        // A chat's first run asks the plugins that pin (`run.preparing`).
-        {
-            let agents = plugins.agents().clone();
-            agent_accounts.set_pin_hook(Arc::new(move |harness, chat| {
-                let agents = agents.clone();
-                Box::pin(async move { agents.preparing(harness, &chat).await })
-            }));
-        }
         // Plugins' agent ops (usage, accounts, models: plugins/agents) reach
         // the engine as Settings and the composer do, and hear what changes.
         plugins.agents().set_host(Arc::new(plugin_agents::EngineAgentHost {
@@ -458,9 +442,6 @@ impl EngineCore {
             sessions.watch_sessions(),
             workspace.watch_chats(),
         );
-        // Agents added from the ACP registry (this engine's own, under its
-        // data dir): harnesses before the update coordinator lists them.
-        acp_registry::start(data_dir, &registry);
         let harness_updates =
             harness_updates::HarnessUpdateCoordinator::new(data_dir, registry.clone());
         harness_updates.start();
@@ -1013,7 +994,7 @@ impl Engine {
         Ok(EngineInfo {
             device_id: load_or_create_device_id(&config.data_dir)?,
             workspace_scope,
-            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
+            cursor_sdk_version: None,
             capabilities: {
                 let mut capabilities = zeron_proto::capabilities::current();
                 if desktop_notify::enabled() {
@@ -1288,15 +1269,6 @@ impl Engine {
         }
         core.set_updater(updater);
         tracing::info!(device_id = %core.device_id, "engine core assembled");
-        // Managed ACP adapters install in the background at boot (agents
-        // whose CLI is present but whose adapter isn't yet), so a first chat
-        // never waits on — or dies inside — an npm run.
-        // Not on a Cloud device: it registers only Codex + Claude Code, and
-        // a sandbox's lazy CLI shims install themselves when merely probed.
-        if !runner::is_cloud_platform() {
-            zeron_harness::acp::prewarm_managed_adapters();
-        }
-
         let host_relay = edge.as_ref().map(|edge| {
             let mut link_config =
                 zeron_rpc::LinkCacheConfig::new(edge.url.clone(), Arc::new(auth.clone()));

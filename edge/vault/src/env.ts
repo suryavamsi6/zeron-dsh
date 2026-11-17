@@ -27,7 +27,7 @@ export interface Env {
   /** The App's URL slug (`github.com/apps/{slug}`), for the install link. */
   readonly GITHUB_APP_SLUG?: string;
 
-  /** User whose codex + github credentials the daily cron force-refreshes. */
+  /** User whose github login the daily canary reports (and refreshes when due). */
   readonly CANARY_USER_ID?: string;
 }
 

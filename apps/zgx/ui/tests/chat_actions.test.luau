@@ -73,12 +73,12 @@ test("a model picked in a session waits for a message: nothing of the session ch
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s2")
-	expect(app:state("chat_model")).to_be("sonnet")
+	expect(app:state("chat_model")).to_be("deepseek-v4-pro")
 	local before = running_with(app)
-	-- Another agent's model, picked and not sent.
-	app:set_state("chat_model", "gpt")
+	-- Another model, picked and not sent.
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	settle(app)
-	expect(app:state("chat_model")).to_be("gpt")
+	expect(app:state("chat_model")).to_be("deepseek-v4-pro-max")
 	-- No call, and the session (its agent, so its icon) as it was.
 	expect(configured(app, "s2")).to_be(false)
 	expect(running_with(app)).to_be(before)
@@ -87,21 +87,21 @@ end)
 test("a pick goes with the message, and the session takes it then", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
-	-- (Codex's models join the catalog.)
+	-- (Another model joins the catalog.)
 	app:command("catalog_grows")
 	settle(app)
 	open(app, "s2")
-	app:set_state("chat_model", "gpt")
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	settle(app)
-	app:type('role:textbox "Message"', "Try it with GPT")
+	app:type('role:textbox "Message"', "Try the Pro Max")
 	app:key("Enter")
 	settle(app)
-	expect(app:wait('~"Try it with GPT"', { timeout_ms = 1000 })).to_be(true)
+	expect(app:wait('~"Try the Pro Max"', { timeout_ms = 1000 })).to_be(true)
 	settle(app)
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:Try it with GPT")
-	expect(calls).to_contain("took:s2:codex|gpt|")
-	expect(running_with(app)).to_be("codex|gpt")
+	expect(calls).to_contain("send:s2:Try the Pro Max")
+	expect(calls).to_contain("took:s2:deepseek|deepseek-v4-pro-max|")
+	expect(running_with(app)).to_be("deepseek|deepseek-v4-pro-max")
 	-- Through the send, not a change of its own.
 	expect(configured(app, "s2")).to_be(false)
 	-- Taken: no pick left to carry.
@@ -112,18 +112,18 @@ test("an unsent pick stays with its chat; picking the session's own again leaves
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
 	open(app, "s2")
-	app:set_state("chat_model", "gpt")
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	settle(app)
 	-- Another chat shows its own model, not this pick.
 	open(app, "s1")
-	expect(app:state("chat_model")).to_be("opus")
+	expect(app:state("chat_model")).to_be("deepseek-flash")
 	expect(app:state("chat_effort")).to_be("high")
 	-- Back: the pick, still unsent.
 	open(app, "s2")
-	expect(app:state("chat_model")).to_be("gpt")
+	expect(app:state("chat_model")).to_be("deepseek-v4-pro-max")
 	expect(configured(app, "s2")).to_be(false)
 	-- The session's own model again: nothing kept.
-	app:set_state("chat_model", "sonnet")
+	app:set_state("chat_model", "deepseek-v4-pro")
 	settle(app)
 	expect(app:state("chat.composer.picks").s2).to_be(nil)
 	expect(configured(app, "s2")).to_be(false)
@@ -313,6 +313,9 @@ end)
 -- The model chip's label rolls as the model changes: frame by frame, its
 -- box eases once from the old name's width to the new's, and the roll ends
 -- exactly where the settled text stands (no shrink, no shift on hand-back).
+-- (The two names share their head, which stays put as one text while the
+-- rest rolls a letter at a time.)
+local ROLL_HEAD, ROLL_TO = "DeepSeek V4", "DeepSeek V4.1 Flash"
 local function chip(app: any): (number?, { [string]: number })
 	local tree = app:tree('role:button "Model"')
 	local w: number? = nil
@@ -337,7 +340,7 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 	app:click('role:button "Model"')
 	app:frames(30)
 	local before = chip(app)
-	app:set_state("chat_model", "opus")
+	app:set_state("chat_model", "deepseek-flash")
 	local widths: { number } = {}
 	local last_rolling: { [string]: number }? = nil
 	local settled_at: number? = nil
@@ -345,13 +348,13 @@ test("a model's name rolls into place: the chip eases once, and nothing moves as
 		app:wait("#never-shown", { timeout_ms = 16 })
 		local w, texts = chip(app)
 		table.insert(widths, w or 0)
-		if texts["O"] then
+		if texts[ROLL_HEAD] then
 			last_rolling = texts
-		elseif texts["Opus"] and last_rolling and not settled_at then
+		elseif texts[ROLL_TO] and last_rolling and not settled_at then
 			settled_at = f
-			-- Handed back: the settled name stands where its rolled letters
-			-- ended.
-			expect(texts["Opus"]).to_be(last_rolling["O"])
+			-- Handed back: the settled name stands where its rolled head
+			-- stood.
+			expect(texts[ROLL_TO]).to_be(last_rolling[ROLL_HEAD])
 		end
 	end
 	expect(settled_at ~= nil).to_be(true)
@@ -583,8 +586,11 @@ end)
 test("a model's options are picked under it in the composer's picker", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
+	-- (The model with options joins the catalog.)
+	app:command("catalog_grows")
+	settle(app)
 	open(app, "s2")
-	app:set_state("chat_model", "fusion")
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	settle(app)
 	app:click('role:button "Model"')
 	settle(app)
@@ -601,7 +607,7 @@ test("a model's options are picked under it in the composer's picker", function(
 	settle(app)
 	expect(app:wait('~"Go"', { timeout_ms = 1000 })).to_be(true)
 	-- Sent: the pick went with it (the model's, as a pick of the chat).
-	expect(app:state("calls")).to_contain("took:s2:claude-code|fusion|")
+	expect(app:state("calls")).to_contain("took:s2:deepseek|deepseek-v4-pro-max|")
 	expect(app:error()).to_be(nil)
 end)
 
@@ -710,16 +716,16 @@ test("an agent's completion settings decide what $ and / open", function()
 	typed("/")
 	expect(lists("/review")).to_be(true)
 	expect(lists("Code Review")).to_be(false)
-	-- This agent's (Claude Code's) both off.
-	app:set_state("settings_skill_completion", { ["claude-code"] = { dollar = false, separate = false } })
+	-- This agent's (DeepSeek's) both off.
+	app:set_state("settings_skill_completion", { deepseek = { dollar = false, separate = false } })
 	settle(app)
 	typed("$")
 	expect(popup()).to_be(false)
 	typed("/")
 	expect(lists("/review")).to_be(true)
 	expect(lists("Code Review")).to_be(true)
-	-- Another agent's settings leave this one alone.
-	app:set_state("settings_skill_completion", { codex = { dollar = false } })
+	-- A retired provider's kept settings leave this one alone.
+	app:set_state("settings_skill_completion", { ["claude-code"] = { dollar = false } })
 	settle(app)
 	typed("$")
 	expect(popup()).to_be(true)

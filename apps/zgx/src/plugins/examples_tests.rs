@@ -4020,21 +4020,6 @@ fn own_plugin(id: &str, permissions: &[&str], init: &str) -> (tempfile::TempDir,
 }
 
 #[test]
-fn account_rotate_says_what_its_service_did() {
-    let (mut app, heard) = shell_with_agents(vec![example("account-rotate")], json!({}));
-    assert_eq!(app.error(), None, "the shell with the example failed");
-    tell(&mut app, "account-rotate", "rotating", json!({ "status": "waiting", "to": "b@example.com", "window": "Session", "remaining": 6 }));
-    tell(&mut app, "account-rotate", "rotated", json!({ "to": "b@example.com" }));
-    tell(&mut app, "account-rotate", "stuck", json!({ "window": "Week", "remaining": 4 }));
-    let toasts = said(&heard, "plugin.account-rotate.toast");
-    assert_eq!(toasts.len(), 3, "{toasts:?}");
-    assert!(toasts[0].contains("when its chats finish"), "{toasts:?}");
-    assert!(toasts[1].contains("switched to b@example.com"), "{toasts:?}");
-    assert!(toasts[2].contains("no other saved account"), "{toasts:?}");
-    assert_eq!(app.error(), None);
-}
-
-#[test]
 fn a_window_listens_through_the_engine_and_hears_only_its_own_listeners() {
     let init = r#"
 local zeron = require("./zeron")("watcher")
@@ -4085,19 +4070,6 @@ end)
     tell(&mut app, "watcher", "zeron:plugin.notice", json!({ "listener": "@notice", "data": { "notice": "Its usage.changed listener failed (3 times in a row): boom" } }));
     let problems = said(&heard, "plugin.watcher.problem");
     assert!(problems.iter().any(|p| p.contains("Its usage.changed listener failed (3 times in a row)")), "{problems:?}");
-    assert_eq!(app.error(), None);
-}
-
-#[test]
-fn account_pin_says_what_its_service_did() {
-    let (mut app, heard) = shell_with_agents(vec![example("account-pin")], json!({}));
-    assert_eq!(app.error(), None, "the shell with the example failed");
-    tell(&mut app, "account-pin", "pinned", json!({ "chat": "s-unknown", "to": "b@example.com" }));
-    tell(&mut app, "account-pin", "lost", json!({ "account": "acct-b", "chat": "s-unknown" }));
-    let toasts = said(&heard, "plugin.account-pin.toast");
-    assert_eq!(toasts.len(), 2, "{toasts:?}");
-    assert!(toasts[0].contains("running on b@example.com"), "{toasts:?}");
-    assert!(toasts[1].contains("saved account was removed"), "{toasts:?}");
     assert_eq!(app.error(), None);
 }
 

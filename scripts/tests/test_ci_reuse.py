@@ -228,9 +228,9 @@ class ReusePlanTests(unittest.TestCase):
         skip = plan.reused_jobs(suites, passed)
         running = plan.jobs_to_run(suites, skip)
         self.assertEqual(running["windows"], [("app", "windows")])
-        self.assertEqual(running["voice"], [("windows-runtime", "windows")])
+        self.assertEqual(running["voice"], [])
         counts = plan.reservation(running, "pull_request", "refs/pull/1/merge")
-        self.assertEqual(counts, {"linux": 1, "windows": 2, "macos": 0})
+        self.assertEqual(counts, {"linux": 1, "windows": 1, "macos": 0})
 
     def test_unselected_suites_are_not_reused(self):
         suites = {s: False for s in plan.SUITE_JOBS}

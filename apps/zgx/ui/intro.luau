@@ -42,7 +42,7 @@ type Agent = {
 }
 local AGENTS: { Agent } = {
 	{
-		mark = "claude-mark",
+		mark = "provider-deepseek",
 		x = -0.33,
 		y = 0.2,
 		s = 96,
@@ -56,7 +56,7 @@ local AGENTS: { Agent } = {
 		wob = -2,
 	},
 	{
-		mark = "openai-mark",
+		mark = "provider-deepseek",
 		x = 0.28,
 		y = 0.12,
 		s = 84,
@@ -70,7 +70,7 @@ local AGENTS: { Agent } = {
 		wob = 2,
 	},
 	{
-		mark = "opencode-mark-dark",
+		mark = "provider-deepseek",
 		x = -0.08,
 		y = 0.1,
 		s = 48,
@@ -84,7 +84,7 @@ local AGENTS: { Agent } = {
 		wob = 3,
 	},
 	{
-		mark = "antigravity-mark",
+		mark = "provider-deepseek",
 		x = 0.11,
 		y = 0.21,
 		s = 56,
@@ -98,7 +98,7 @@ local AGENTS: { Agent } = {
 		wob = -3,
 	},
 	{
-		mark = "devin-mark",
+		mark = "provider-deepseek",
 		x = -0.44,
 		y = 0.46,
 		s = 64,
@@ -112,7 +112,7 @@ local AGENTS: { Agent } = {
 		wob = 2,
 	},
 	{
-		mark = "pi-mark",
+		mark = "provider-deepseek",
 		x = 0.21,
 		y = 0.71,
 		s = 60,
@@ -126,7 +126,7 @@ local AGENTS: { Agent } = {
 		wob = -2,
 	},
 	{
-		mark = "cursor-mark",
+		mark = "provider-deepseek",
 		x = 0.41,
 		y = 0.4,
 		s = 76,
@@ -140,7 +140,7 @@ local AGENTS: { Agent } = {
 		wob = 3,
 	},
 	{
-		mark = "grok-mark",
+		mark = "provider-deepseek",
 		x = -0.17,
 		y = 0.67,
 		s = 68,
@@ -154,7 +154,7 @@ local AGENTS: { Agent } = {
 		wob = -3,
 	},
 	{
-		mark = "hermes-mark",
+		mark = "provider-deepseek",
 		x = 0.39,
 		y = 0.6,
 		s = 52,
@@ -168,7 +168,7 @@ local AGENTS: { Agent } = {
 		wob = 2,
 	},
 	{
-		mark = "muse-mark",
+		mark = "provider-deepseek",
 		x = -0.36,
 		y = 0.82,
 		s = 80,

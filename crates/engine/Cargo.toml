@@ -41,7 +41,6 @@ portable-pty.workspace = true
 base64 = "0.22"
 # Cloud runner identity: Ed25519 device key (already in the tree via rustls).
 ring = "0.17"
-toml = "0.8"
 libc.workspace = true
 gethostname.workspace = true
 tokio-util = { workspace = true, features = ["rt"] }
@@ -78,10 +77,6 @@ zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }
-zip.workspace = true
 tokio-tungstenite.workspace = true
-# A registry build of the fake ACP agent (tests/acp_registry_rpc.rs).
-tar = "0.4"
-flate2 = "1"
 # In-process registry server for the two-engine workspace integration tests.
 zeron-sync = { workspace = true, features = ["mock-server"] }

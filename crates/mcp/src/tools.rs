@@ -29,8 +29,8 @@ pub(crate) use plugins::is_plugin_tool_name;
 
 /// Default and ceiling for the blocking waits.
 const MAX_BATCH: usize = 32;
-/// Cloud runs these agents (Codex and Claude Code): a Cloud chat's harness.
-const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::ClaudeCode, HarnessId::Codex];
+/// Cloud runs these agents (DeepSeek): a Cloud chat's harness.
+const CLOUD_HARNESSES: &[HarnessId] = &[HarnessId::DeepSeek];
 const DEFAULT_WAIT: Duration = Duration::from_secs(600);
 const MAX_WAIT: Duration = Duration::from_secs(3600);
 
@@ -97,7 +97,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "list_harnesses",
-            description: "Agent harnesses (claude-code, codex, cursor, …) on the chosen device (local when omitted). `connected` = installed, enabled and not known to be signed out: those are the providers you can delegate to, whichever provider you are. `signedIn` is null when the login state is unknown.",
+            description: "DeepSeek Harness on the chosen device (local when omitted). `connected` means installed, enabled and not known to be signed out. `signedIn` is null when key readiness is unknown.",
             input_schema: json!({ "type": "object", "properties": { "device": device_schema() } }),
         },
         ToolDef {
@@ -106,7 +106,7 @@ fn catalog() -> Vec<ToolDef> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "harness": { "type": "string", "description": "Harness id, e.g. claude-code or codex." },
+                    "harness": { "type": "string", "description": "Harness id: deepseek only." },
                     "device": device_schema()
                 },
                 "required": ["harness"]
@@ -133,7 +133,7 @@ fn catalog() -> Vec<ToolDef> {
         },
         ToolDef {
             name: "create_chat",
-            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (Codex or Claude Code), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
+            description: "Create a child of your chat to delegate work to (kind subagent, the default when you speak from a chat or pass parent: listed under that chat's Subagents and in its transcript's subagent block), a side chat (kind side: only when the person should treat it as a side conversation of their own), or a standalone session (kind chat, no parent). Any connected provider works (see list_harnesses), whichever provider you run on. Delegation is one level deep: a chat that has a parent cannot create chats. With cloud, the chat runs on a Cloud machine of its own (DeepSeek), from a Cloud chat or a project with a GitHub repository. Select a project and/or device; catalogs are validated on that host. Optionally send a first prompt and wait for the reply. For parallel delegation use create_chats, or launch with wait=false and wait only after all chats have started.",
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -141,7 +141,7 @@ fn catalog() -> Vec<ToolDef> {
                     "project": { "type": "string", "description": "Project id, path, or name. Belongs to a specific device; when device is supplied, search only there. Optional." },
                     "device": { "type": "string", "description": "Host device (id or name). With project, it must own that project. Without either, use the local engine." },
                     "parent": { "type": "string", "description": "Parent chat to record (id, prefix, or title). Defaults to the chat you are speaking from." },
-                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Prefers a connected provider, claude-code first." },
+                    "harness": { "type": "string", "description": "Harness id (see list_harnesses with the chosen device). Only deepseek is supported." },
                     "model": { "type": "string", "description": "Model id from list_models on the chosen device. Omit for the harness default." },
                     "reasoning": { "type": "string", "description": "Reasoning level the model supports (e.g. low, medium, high, max)." },
                     "sandbox": { "type": "string", "enum": ["read-only", "workspace-write", "danger-full-access"], "default": "workspace-write", "description": "Never wider than the sandbox of the chat you are speaking from: more is lowered to it (accessCapped)." },
@@ -1033,7 +1033,7 @@ impl Tools {
         };
         let harnesses = self.zeron.harnesses_on(device.as_deref()).await?;
         Ok(json!({
-            "harnesses": harnesses.iter().map(|h| json!({
+            "harnesses": harnesses.iter().filter(|h| h.id == HarnessId::DeepSeek).map(|h| json!({
                 "id": h.id,
                 "name": h.name,
                 "available": h.available(),
@@ -1051,6 +1051,7 @@ impl Tools {
     async fn list_models(&self, args: ListModelsArgs) -> anyhow::Result<Value> {
         let harness: HarnessId =
             parse_enum("harness", &args.harness).map_err(anyhow::Error::msg)?;
+        anyhow::ensure!(harness == HarnessId::DeepSeek, "Only DeepSeek is supported; legacy provider settings are unchanged");
         let device = match args.device.as_deref() {
             Some(key) => Some(self.zeron.resolve_device_id(Some(key)).await?),
             None => None,
@@ -1206,13 +1207,14 @@ impl Tools {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
                 anyhow::ensure!(
                     CLOUD_HARNESSES.contains(&id),
-                    "Cloud runs Codex and Claude Code only"
+                    "Cloud runs DeepSeek only"
                 );
                 id
             }
             None if args.cloud => CLOUD_HARNESSES[0],
             Some(raw) => {
                 let id: HarnessId = parse_enum("harness", raw).map_err(anyhow::Error::msg)?;
+                anyhow::ensure!(id == HarnessId::DeepSeek, "Only DeepSeek is supported; legacy provider settings are unchanged");
                 anyhow::ensure!(
                     harnesses.iter().any(|h| h.id == id && h.available()),
                     "harness {raw} is not available on device {device_id} (see list_harnesses with device)"
@@ -1743,6 +1745,7 @@ impl Tools {
             .as_ref()
             .map(|c| c.harness)
             .map_or_else(|| default_harness(harnesses), Ok)?;
+        anyhow::ensure!(harness == HarnessId::DeepSeek, "This legacy chat cannot run. Select DeepSeek explicitly; its existing history is unchanged");
         let (status, _) = status_of(session);
         // A quiet tool call can outlive the UI's stale-status window. Route
         // through steering and let the host decide whether a live run exists.
@@ -1971,27 +1974,13 @@ impl Tools {
     }
 }
 
-/// claude-code when it is ready here, else the first ready harness — a
-/// provider that is installed but signed out only when nothing else is.
 fn default_harness(harnesses: &[HarnessInfo]) -> anyhow::Result<HarnessId> {
-    let real = |h: &&HarnessInfo| h.id != HarnessId::Mock;
     harnesses
         .iter()
-        .find(|h| h.id == HarnessId::ClaudeCode && h.connected())
-        .or_else(|| harnesses.iter().filter(real).find(|h| h.connected()))
-        .or_else(|| {
-            harnesses
-                .iter()
-                .find(|h| h.id == HarnessId::ClaudeCode && h.available())
-        })
-        .or_else(|| {
-            harnesses
-                .iter()
-                .find(|h| h.available() && h.id != HarnessId::Mock)
-        })
+        .find(|h| h.id == HarnessId::DeepSeek && h.available())
         .map(|h| h.id)
         .ok_or_else(|| {
-            anyhow::anyhow!("no harness is available on this device (see list_harnesses)")
+            anyhow::anyhow!("DeepSeek Harness SDK is not available on this device (see list_harnesses)")
         })
 }
 
@@ -2080,7 +2069,7 @@ mod tests {
                     {
                         "id": "chat-alpha-1", "deviceId": "dev-local", "title": "Alpha",
                         "archived": false, "spaceId": "space-1",
-                        "config": { "harness": "claude-code", "model": "opus", "reasoning": null, "sandbox": "workspace-write" },
+                        "config": { "harness": "deepseek", "model": "deepseek-v4-pro", "reasoning": null, "sandbox": "workspace-write" },
                         "createdAt": "2026-09-01T00:00:00Z"
                     },
                     {
@@ -2116,21 +2105,20 @@ mod tests {
                 }
                 methods::WATCH_SESSIONS => stream(json!([])),
                 methods::LIST_HARNESSES if remote => RpcReply::Value(json!([
-                    {"id":"codex", "name":"Remote Codex", "installed":true},
+                    {"id":"deepseek", "name":"Remote DeepSeek", "installed":true},
                     {"id":"cursor", "name":"Disabled Cursor", "installed":true, "enabled":false}
                 ])),
                 methods::LIST_HARNESSES => RpcReply::Value(json!([
-                    { "id": "claude-code", "name": "Claude Code", "supportsSteering": true,
+                    { "id": "deepseek", "name": "DeepSeek", "supportsSteering": true,
                       "steeringMode": "step-boundary", "reasoningLevels": [], "installed": true, "enabled": true,
                       "accessModes": ["supervised", "auto-accept-edits", "full-access"], "supportsPlan": true },
-                    { "id": "codex", "name": "Codex", "supportsSteering": true,
-                      "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": false, "enabled": true }
+                    { "id": "codex", "name": "Unsupported legacy provider", "supportsSteering": false, "installed": false, "enabled": false }
                 ])),
                 methods::LIST_MODELS if remote => RpcReply::Value(json!([
                     {"id":"remote-model", "label":"Remote model"}
                 ])),
                 methods::LIST_MODELS => RpcReply::Value(json!([
-                    { "id": "opus", "label": "Opus" }, { "id": "sonnet", "label": "Sonnet" }
+                    { "id": "deepseek-v4-pro", "label": "DeepSeek Pro" }, { "id": "deepseek-flash", "label": "DeepSeek Flash" }
                 ])),
                 methods::WATCH_DOC_MESSAGES => stream(json!({ "reset": [
                     { "id": "u1", "role": "user", "createdAt": 1, "deviceId": "dev-local",
@@ -2445,8 +2433,8 @@ mod tests {
         assert!(prompt.ends_with("please review"));
         assert!(prompt.contains("tool, chat chat-beta-2.]"), "{prompt}");
         assert_eq!(params["command"]["request"]["cwd"], "/repo/comet");
-        assert_eq!(params["command"]["request"]["harness"], "claude-code");
-        assert_eq!(params["command"]["request"]["model"], "opus");
+        assert_eq!(params["command"]["request"]["harness"], "deepseek");
+        assert_eq!(params["command"]["request"]["model"], "deepseek-v4-pro");
     }
 
     #[tokio::test]
@@ -2577,7 +2565,7 @@ mod tests {
         let created = tools
             .call(
                 "create_chat",
-                json!({ "project": "space-1", "model": "sonnet", "title": "Review", "prompt": "go" }),
+                json!({ "project": "space-1", "model": "deepseek-flash", "title": "Review", "prompt": "go" }),
             )
             .await
             .unwrap();
@@ -2591,8 +2579,8 @@ mod tests {
             writes[0].1.get("parentChatId").is_none(),
             "no origin, no parent"
         );
-        assert_eq!(writes[0].1["config"]["harness"], "claude-code");
-        assert_eq!(writes[0].1["config"]["model"], "sonnet");
+        assert_eq!(writes[0].1["config"]["harness"], "deepseek");
+        assert_eq!(writes[0].1["config"]["model"], "deepseek-flash");
         assert_eq!(writes[1].1["op"], "renameChat");
         assert_eq!(writes[2].0, methods::QUEUE_COMMAND);
         assert_eq!(writes[2].1["command"]["request"]["prompt"], "go");
@@ -2757,7 +2745,7 @@ mod tests {
             );
             (tools.has("wait_on_background"), tools.waits_on_background())
         };
-        // A chat on a runtime that brings its agent back (Claude Code, Muse).
+        // A chat on a runtime that brings its agent back (DeepSeek, Muse).
         assert_eq!(offered(Some("chat-alpha-1"), true), (true, true));
         // A chat on one that doesn't (Codex): a turn that ends is the agent
         // done, so there's nothing to say.
@@ -2799,7 +2787,7 @@ mod tests {
         let supervised = json!({
             "id": "chat-careful", "deviceId": "dev-local", "title": "Careful",
             "archived": false, "spaceId": "space-1",
-            "config": { "harness": "claude-code", "sandbox": "workspace-write", "access": "supervised" },
+            "config": { "harness": "deepseek", "sandbox": "workspace-write", "access": "supervised" },
             "createdAt": "2026-09-01T00:00:00Z"
         });
         let world = Arc::new(World {
@@ -2917,7 +2905,7 @@ mod tests {
         // The engine names the new machine and its checkout.
         assert_eq!(created["deviceId"], "cloud-child");
         assert_eq!(
-            created["harness"], "claude-code",
+            created["harness"], "deepseek",
             "Cloud's first agent by default"
         );
         let sent = world
@@ -2935,25 +2923,25 @@ mod tests {
             .call("create_chat", json!({"cloud": true, "harness": "cursor"}))
             .await
             .unwrap_err();
-        assert!(refused.contains("Codex and Claude Code"), "{refused}");
+        assert!(refused.contains("DeepSeek"), "{refused}");
     }
 
     #[tokio::test]
     async fn connected_means_installed_enabled_and_not_known_signed_out() {
         let accounts = |active: bool| {
             json!({ "accounts": [{
-                "id": "a1", "harness": "claude-code", "active": active,
+                "id": "a1", "harness": "deepseek", "active": active,
                 "email": null, "planLabel": null
             }], "warnings": [] })
         };
         // No accounts endpoint: login state unknown, nothing held against it.
         let unknown = tools(Arc::new(World::default()), Origin::default());
         let listed = unknown.call("list_harnesses", json!({})).await.unwrap();
-        let claude = &listed["harnesses"][0];
-        assert_eq!(claude["signedIn"], Value::Null);
-        assert_eq!(claude["connected"], true);
+        let deepseek = &listed["harnesses"][0];
+        assert_eq!(deepseek["signedIn"], Value::Null);
+        assert_eq!(deepseek["connected"], true);
         // Codex is not installed here: never connected.
-        assert_eq!(listed["harnesses"][1]["connected"], false);
+        assert_eq!(listed["harnesses"].as_array().unwrap().len(), 1);
 
         let signed_out = Arc::new(World {
             accounts: Some(accounts(false)),
@@ -2965,7 +2953,7 @@ mod tests {
         assert_eq!(listed["harnesses"][0]["connected"], false);
         assert_eq!(listed["harnesses"][0]["available"], true);
         let created = tools_out
-            .call("create_chat", json!({"harness": "claude-code"}))
+            .call("create_chat", json!({"harness": "deepseek"}))
             .await
             .unwrap();
         assert!(
@@ -2995,7 +2983,7 @@ mod tests {
             deep: true,
             accounts: Some(json!({"accounts": [], "warnings": []})),
             remote_accounts: Some(json!({"accounts": [{
-                "id": "remote-account", "harness": "codex", "active": true,
+                "id": "remote-account", "harness": "deepseek", "active": true,
                 "email": null, "planLabel": null
             }], "warnings": []})),
             ..Default::default()
@@ -3005,9 +2993,10 @@ mod tests {
             .call("list_harnesses", json!({"device":"Worker"}))
             .await
             .unwrap();
+        assert_eq!(listed["harnesses"].as_array().unwrap().len(), 1);
+        assert_eq!(listed["harnesses"][0]["id"], "deepseek");
         assert_eq!(listed["harnesses"][0]["signedIn"], true);
         assert_eq!(listed["harnesses"][0]["connected"], true);
-        assert_eq!(listed["harnesses"][1]["connected"], false);
         let created = top
             .call("create_chat", json!({"kind":"side", "device":"Worker"}))
             .await
@@ -3015,7 +3004,7 @@ mod tests {
         assert_eq!(created["kind"], "side");
         assert_eq!(created["parentChatId"], "chat-alpha-1");
         assert_eq!(created["deviceId"], "dev-remote");
-        assert_eq!(created["harness"], "codex");
+        assert_eq!(created["harness"], "deepseek");
         assert!(created.get("warning").is_none(), "{created}");
         // Delegates create nothing, whatever the kind or host; the batch
         // form reports it per item.
@@ -3146,7 +3135,7 @@ mod tests {
                 .unwrap();
             assert_eq!(created["deviceId"], "dev-remote");
             assert_eq!(created["project"]["id"], "space-remote");
-            assert_eq!(created["harness"], "codex");
+            assert_eq!(created["harness"], "deepseek");
         }
         let created = tools
             .call("create_chat", json!({"project":"unique"}))
@@ -3188,35 +3177,35 @@ mod tests {
         );
         assert_eq!(
             tools.call("list_harnesses", json!({})).await.unwrap()["harnesses"][0]["id"],
-            "claude-code"
+            "deepseek"
         );
         assert_eq!(
             tools
                 .call("list_harnesses", json!({"device":"Worker"}))
                 .await
                 .unwrap()["harnesses"][0]["id"],
-            "codex"
+            "deepseek"
         );
         assert_eq!(
             tools
-                .call("list_models", json!({"harness":"codex", "device":"Worker"}))
+                .call("list_models", json!({"harness":"deepseek", "device":"Worker"}))
                 .await
                 .unwrap()["models"][0]["id"],
             "remote-model"
         );
         assert_eq!(
             tools
-                .call("list_models", json!({"harness":"claude-code"}))
+                .call("list_models", json!({"harness":"deepseek"}))
                 .await
                 .unwrap()["models"][0]["id"],
-            "opus"
+            "deepseek-v4-pro"
         );
         for args in [
             json!({"device":"Worker", "harness":"claude-code"}),
             json!({"device":"Worker", "harness":"cursor"}),
             json!({"device":"Laptop", "harness":"codex"}),
             json!({"device":"Laptop", "harness":"mock"}),
-            json!({"device":"Worker", "harness":"codex", "model":"opus"}),
+            json!({"device":"Worker", "harness":"deepseek", "model":"deepseek-v4-pro"}),
         ] {
             assert!(tools.call("create_chat", args).await.is_err());
             assert!(world.writes.lock().unwrap().is_empty());
@@ -3224,11 +3213,11 @@ mod tests {
         let created = tools
             .call(
                 "create_chat",
-                json!({"device":"Worker", "harness":"codex", "model":"remote-model"}),
+                json!({"device":"Worker", "harness":"deepseek", "model":"remote-model"}),
             )
             .await
             .unwrap();
-        assert_eq!(created["harness"], "codex");
+        assert_eq!(created["harness"], "deepseek");
         assert_eq!(created["model"], "remote-model");
         for method in [methods::LIST_HARNESSES, methods::LIST_MODELS] {
             let broken = Arc::new(World {
@@ -3268,7 +3257,7 @@ mod tests {
         );
         assert_eq!(
             world.writes.lock().unwrap().last().unwrap().1["command"]["request"]["harness"],
-            "codex"
+            "deepseek"
         );
     }
 
@@ -3338,7 +3327,7 @@ mod tests {
                     {
                         rows.as_array_mut().unwrap().push(json!({
                             "id": chat, "deviceId":"dev-remote", "archived":false,
-                            "createdAt":chrono::Utc::now(), "config":{"harness":"codex", "sandbox":"workspace-write"}
+                            "createdAt":chrono::Utc::now(), "config":{"harness":"deepseek", "sandbox":"workspace-write"}
                         }));
                     }
                     Ok(stream(rows))

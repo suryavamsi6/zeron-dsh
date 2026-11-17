@@ -143,9 +143,6 @@ fun NewSessionScreen(
     var models by remember(modelsKey) {
         mutableStateOf(modelCache[modelsKey] ?: catalogModels().filter { !runsOnCloud || it.harness in sh.zeron.android.core.CloudStore.harnesses })
     }
-    LaunchedEffect(modelsKey, models) {
-        if (runsOnCloud && models.none { it.harness == draft.harness }) models.firstOrNull()?.let { draft = draft.copy(harness = it.harness, model = null, effort = null) }
-    }
     LaunchedEffect(modelsKey, client) {
         val c = client ?: return@LaunchedEffect
         if (runsOnCloud) {

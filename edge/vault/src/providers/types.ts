@@ -41,11 +41,7 @@ export type ParseResult<S> = { readonly ok: true; readonly secret: S } | { reado
 export interface GrantMaterial {
   readonly accessToken: string;
   readonly expiresAt: number;
-  readonly accountId?: string;
-  readonly idToken?: string;
   readonly account?: string;
-  readonly scopes?: readonly string[];
-  readonly subscriptionType?: string;
 }
 
 export interface ProviderAdapter<S> {

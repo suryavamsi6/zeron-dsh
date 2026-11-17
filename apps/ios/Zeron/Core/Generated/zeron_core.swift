@@ -1408,6 +1408,8 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
      */
     func deviceActivateAccount(deviceId: String, harness: String, accountId: String) async throws  -> [DeviceAccountInfo]
     
+    func deviceAddApiKey(deviceId: String, key: String) async throws  -> [DeviceAccountInfo]
+    
     /**
      * The CLI logins on `device_id`, every agent's.
      */
@@ -1439,8 +1441,9 @@ public protocol CoreClientProtocol: AnyObject, Sendable {
     func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool) async throws  -> [HarnessInfo]
     
     /**
-     * Returns immediately. Callbacks are dispatched on the core runtime; the
-     * platform must hop to its media/UI executor and call complete_media.
+     * Remote voice is not available: the DeepSeek Harness SDK exposes no
+     * realtime voice contract. The handle closes at once with an explicit
+     * reason; local dictation stays on the platform.
      */
     func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaListener, listener: VoiceSessionListener)  -> VoiceCall
     
@@ -2825,6 +2828,22 @@ open func deviceActivateAccount(deviceId: String, harness: String, accountId: St
         )
 }
     
+open func deviceAddApiKey(deviceId: String, key: String)async throws  -> [DeviceAccountInfo]  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_zeron_mobile_fn_method_coreclient_device_add_api_key(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(deviceId),FfiConverterString.lower(key)
+                )
+            },
+            pollFunc: ffi_zeron_mobile_rust_future_poll_rust_buffer,
+            completeFunc: ffi_zeron_mobile_rust_future_complete_rust_buffer,
+            freeFunc: ffi_zeron_mobile_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterSequenceTypeDeviceAccountInfo.lift,
+            errorHandler: FfiConverterTypeCoreError_lift
+        )
+}
+    
     /**
      * The CLI logins on `device_id`, every agent's.
      */
@@ -2948,8 +2967,9 @@ open func setHarnessEnabled(deviceId: String, harness: String, enabled: Bool)asy
 }
     
     /**
-     * Returns immediately. Callbacks are dispatched on the core runtime; the
-     * platform must hop to its media/UI executor and call complete_media.
+     * Remote voice is not available: the DeepSeek Harness SDK exposes no
+     * realtime voice contract. The handle closes at once with an explicit
+     * reason; local dictation stays on the platform.
      */
 open func startVoice(hostDeviceId: String, voice: String?, media: VoiceMediaListener, listener: VoiceSessionListener) -> VoiceCall  {
     return try!  FfiConverterTypeVoiceCall_lift(try! rustCall() {
@@ -22413,6 +22433,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_activate_account() != 7247) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_zeron_mobile_checksum_method_coreclient_device_add_api_key() != 38001) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_zeron_mobile_checksum_method_coreclient_device_agent_accounts() != 45781) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -22434,7 +22457,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_zeron_mobile_checksum_method_coreclient_set_harness_enabled() != 59215) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 62086) {
+    if (uniffi_zeron_mobile_checksum_method_coreclient_start_voice() != 23891) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_zeron_mobile_checksum_method_coreclient_attach_terminal() != 239) {

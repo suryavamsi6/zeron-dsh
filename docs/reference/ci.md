@@ -12,7 +12,7 @@ Pull requests, `main` and the merge queue all go through one workflow,
 3. **The suites** all start together. Each is a reusable workflow:
    `ui-tests.yml` (Linux), `windows.yml`, `macos.yml` (macOS and iOS),
    `voice-tests.yml`, `android.yml`, `preview-tests.yml`,
-   `linux-installer.yml` and `cursor-compatibility.yml`.
+   `linux-installer.yml` and `deepseek-compatibility.yml`.
 4. **CI result** passes when no suite failed or was cancelled. This is the
    check to require in the ruleset and the merge queue.
 
@@ -20,7 +20,7 @@ Pull requests, `main` and the merge queue all go through one workflow,
 
 | | Pull request (fast tier) | `main`, merge queue, manual run (full tier) |
 |---|---|---|
-| Linux core and UI, Cursor, edge, installer | when their files change | when their files change |
+| Linux core and UI, DeepSeek compatibility, edge, installer | when their files change | when their files change |
 | iOS core (Linux) | app or mobile core changed | app or mobile core changed |
 | iOS simulator | the app, `crates/mobile` or `crates/client` changed | with iOS core |
 | Windows tests, macOS | only when the change looks platform specific | when their files change |
@@ -69,12 +69,9 @@ Pull requests and `main` use nextest's `ci` profile (`scripts/ci/nextest.toml`).
 It leaves out these slow and soak tests, which the nightly runs keep:
 
 - the doc_host sync tests at 48-chat scale or against the real 30 s quantum;
-- the Codex dying-server backoff test;
+- the slow DeepSeek runtime-restart tests;
 - the preview leak test;
 - two preview discovery tests that assert nothing happens during a sleep.
-
-The Cursor shim stress test runs 14 rounds instead of 100
-(`ZERON_STRESS_ROUNDS`).
 
 Test binaries that run nothing on Linux are not built there:
 
@@ -283,8 +280,8 @@ admission:
 - refetches a run's jobs only when the run changed;
 - polls every 30 s at the head of the queue, 1 and 2 min at the next two
   places, 5 min further back, and 10 min when fewer than 400 requests are
-  left. The quota is shared with every workflow (releases, the Cursor SDK
-  update, CI emergency).
+  left. The quota is shared with every workflow (releases, DeepSeek SDK
+  updates, CI emergency).
 
 ## Caches
 

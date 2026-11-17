@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/voice",
-    "crates/voice-media",
     "crates/voice-session",
     "crates/orb",
     "crates/veil",
@@ -49,7 +48,6 @@ zeron-orb = { path = "crates/orb" }
 zeron-veil = { path = "crates/veil" }
 zeron-term = { path = "crates/term" }
 zeron-term-link = { path = "crates/term-link" }
-zeron-voice-media = { path = "crates/voice-media" }
 zeron-audio = { path = "crates/audio" }
 zeron-proto = { path = "crates/proto" }
 zeron-preview = { path = "crates/preview" }
@@ -142,9 +140,6 @@ async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 json5 = "0.4"
-# antigravity writes `settings.json` but reads it back with `hjson.load`, so a
-# user's comments and unquoted keys have to survive our read of the same file.
-deser-hjson = "2.2"
 plist = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
@@ -168,7 +163,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
-zip = { version = "7.2", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 notify = "7"
 portable-pty = "0.8"
 alacritty_terminal = "0.26"

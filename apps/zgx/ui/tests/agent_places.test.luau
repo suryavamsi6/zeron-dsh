@@ -72,11 +72,17 @@ test("Agent places: a side chat's lane carries its agent's mark", function()
 	expect(app:has('#session-lanes >> role:button "Open side chat Looking at the tests" >> .registry-mark')).to_be(true)
 end)
 
+-- The chip carries the mark of the agent its model runs on: the one
+-- runtime's. A chat kept from a retired agent (s9) has none to draw — the
+-- picker lists the one runtime alone.
 test("Agent places: the composer's model chip carries its agent's mark", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(1100, 760)
-	app:command("catalog_registry")
+	app:command("go_s2")
+	settle(app)
+	expect(app:tree('#chat-composer >> role:button "Model"')).to_contain("img")
+	expect(app:tree('#chat-composer >> role:button "Model"')).to_contain("DeepSeek V4 Pro")
 	app:command("go_s9")
 	settle(app)
-	expect(app:has('#chat-composer >> role:button "Model" >> .registry-mark')).to_be(true)
+	expect(app:tree('#chat-composer >> role:button "Model"')).never.to_contain("img")
 end)

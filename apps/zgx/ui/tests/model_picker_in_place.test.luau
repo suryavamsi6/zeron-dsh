@@ -2,9 +2,8 @@
 -- models that both have levels keeps the slider (its groove, its level's
 -- name) the same nodes, its levels the new model's. (It was built again for
 -- each model, its field and thumb starting over.) And a model's options
--- (Devin Fusion's lead and sidekick) sit under it, above its reasoning, with
--- no card beside its row. On the picker in
--- ui/picker_fixture.luau.
+-- (its lead and sidekick) sit under it, above its reasoning, with no card
+-- beside its row. On the picker in ui/picker_fixture.luau.
 
 -- A node's identity, by its kind and label (or text): `@id`.
 local function node(app: any, kind: string?, label: string): string?
@@ -48,11 +47,11 @@ test("moving between models keeps the reasoning slider", function()
 	expect(groove).never.to_be_nil()
 
 	-- Another model with the same levels, then one with five.
-	app:set_state("test_picker_model", "opus")
+	app:set_state("test_picker_model", "deepseek/deepseek-v4-pro")
 	settle(app)
 	expect(`groove @{node(app, nil, "REASONING")}`).to_be(`groove @{groove}`)
 	expect(`title @{node(app, "text", "REASONING")}`).to_be(`title @{title}`)
-	app:set_state("test_picker_model", "gpt")
+	app:set_state("test_picker_model", "deepseek/deepseek-v4-pro-max")
 	settle(app)
 	expect(`groove @{node(app, nil, "REASONING")}`).to_be(`groove @{groove}`)
 	expect(app:state("test_picker_effort")).to_be("medium")
@@ -64,10 +63,10 @@ test("moving between models keeps the reasoning slider", function()
 	expect(app:wait('"Extra high"', { timeout_ms = 2000 })).to_be(true)
 
 	-- A model without levels has none; back to one with them, a slider.
-	app:set_state("test_picker_model", "mini")
+	app:set_state("test_picker_model", "deepseek/deepseek-lite")
 	settle(app)
 	expect(node(app, nil, "REASONING")).to_be_nil()
-	app:set_state("test_picker_model", "sonnet")
+	app:set_state("test_picker_model", "deepseek/deepseek-flash")
 	settle(app)
 	expect(node(app, nil, "REASONING")).never.to_be_nil()
 end)
@@ -79,7 +78,7 @@ end)
 test("a model's options sit under it, above its reasoning, and are picked beside it", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(700, 700)
-	app:set_state("test_picker_model", "fusion")
+	app:set_state("test_picker_model", "deepseek/deepseek-v4-pro-tuned")
 	settle(app)
 	app:click('role:button "Model"')
 	settle(app)
@@ -106,35 +105,34 @@ test("a model's options sit under it, above its reasoning, and are picked beside
 	settle(app)
 	expect(options(app).lead).to_be(nil)
 	-- A model without options has no rows.
-	app:set_state("test_picker_model", "sonnet")
+	app:set_state("test_picker_model", "deepseek/deepseek-flash")
 	settle(app)
 	expect(line_of(app, 'button "Lead"')).to_be_nil()
 	expect(node(app, nil, "REASONING")).never.to_be_nil()
 	expect(app:error()).to_be(nil)
 end)
 
--- Devin Fusion has no card beside its row: picked, its options are the
--- tray's rows under it, as any model's are.
-test("Fusion is picked like any model, its options then under it", function()
+-- A model with options has no card beside its row: picked, its options are
+-- the tray's rows under it, as any model's are.
+test("a model with options is picked like any model, its options then under it", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(700, 700)
 	app:click('role:button "Model"')
 	settle(app)
 	-- Opened out (a press on the chosen model: the layer over its one
-	-- row), on Devin's tab.
+	-- row).
 	app:click(".folded")
 	settle(app)
-	app:click('role:tab "Devin"')
-	settle(app)
-	-- Resting on Fusion opens nothing beside it.
-	app:hover('role:option ~"Fusion"')
+	-- Resting on it opens nothing beside it: the one panel, its rows.
+	local panels = app:count("role:dialog")
+	app:hover('role:option ~"DeepSeek V4 Pro Tuned"')
 	app:wait("#a-moment-passes", { timeout_ms = 400 })
 	settle(app)
-	expect(line_of(app, '"Fusion options"')).to_be_nil()
+	expect(app:count("role:dialog")).to_be(panels)
 	-- Picked, its Lead and Sidekick sit under it, above its reasoning.
-	app:click('role:option ~"Fusion"')
+	app:click('role:option ~"DeepSeek V4 Pro Tuned"')
 	settle(app)
-	expect(app:state("test_picker_model")).to_be("fusion")
+	expect(app:state("test_picker_model")).to_be("deepseek/deepseek-v4-pro-tuned")
 	if not app:has('role:button "Lead"') then
 		app:click('role:button "Model"')
 		settle(app)
@@ -146,13 +144,13 @@ test("Fusion is picked like any model, its options then under it", function()
 	expect(app:error()).to_be(nil)
 end)
 
--- Moving between tabs (opened out) keeps the panel as it is: the same
--- panel, the same size every frame, only its list changing. (The list's
--- window took each tab's height, easing to it: on Wayland a popup that
--- changes size is a new `xdg_popup`, and the compositor faded each one in
--- and the last out, so the menu flickered see-through, two of it
--- overlapping, on every switch.)
-test("moving between tabs keeps the panel's size, its list changing in place", function()
+-- The list changing (opened out) keeps the panel as it is: the same panel,
+-- the same size every frame, only its list changing. (The list's window
+-- took each list's height, easing to it: on Wayland a popup that changes
+-- size is a new `xdg_popup`, and the compositor faded each one in and the
+-- last out, so the menu flickered see-through, two of it overlapping, on
+-- every switch.)
+test("the list changing keeps the panel's size, in place", function()
 	local app = mount("picker_fixture.luau")
 	app:resize(600, 700)
 	settle(app)
@@ -174,28 +172,25 @@ test("moving between tabs keeps the panel's size, its list changing in place", f
 	expect(id).never.to_be_nil()
 	-- The reasoning (its title and its slider), once.
 	local reasoning = app:count('"REASONING"')
-	-- Claude's two models, Codex's two, the starred (none), Devin's two:
-	-- frame by frame through each switch, the same panel at the same size.
-	for _, tab in { "Codex", "Starred", "Devin", "Claude" } do
-		app:click(`role:tab "{tab}"`)
+	-- Every model, one, none, every model again: frame by frame through
+	-- each, the same panel at the same size.
+	for _, search in { "deepseek", "flash", "zz", "" } do
+		app:fill('role:textbox "Search"', search)
 		for _ = 1, 20 do
 			app:frames(1)
 			local now_id, now_size = panel()
-			expect(`{tab}: @{now_id} {now_size}`).to_be(`{tab}: @{id} {size}`)
+			expect(`{search}: @{now_id} {now_size}`).to_be(`{search}: @{id} {size}`)
 			expect(app:count('"REASONING"')).to_be(reasoning)
 		end
 	end
-	-- Its list is the tab's: Claude's models again.
-	expect(app:has('role:option ~"Sonnet"')).to_be(true)
-	expect(app:has('role:option ~"GPT"')).to_be(false)
-	-- A search that finds nothing keeps it too.
-	app:type('role:textbox "Search"', "zz")
-	for _ = 1, 20 do
-		app:frames(1)
-		local now_id, now_size = panel()
-		expect(`search: @{now_id} {now_size}`).to_be(`search: @{id} {size}`)
-	end
-	expect(app:has('role:option ~"Sonnet"')).to_be(false)
+	-- Its list is the search's: the Flash alone, then every model again.
+	app:fill('role:textbox "Search"', "flash")
+	settle(app)
+	expect(app:has('role:option ~"DeepSeek V4.1 Flash"')).to_be(true)
+	expect(app:has('role:option ~"DeepSeek V4 Pro"')).to_be(false)
+	app:fill('role:textbox "Search"', "")
+	settle(app)
+	expect(app:has('role:option ~"DeepSeek V4 Pro"')).to_be(true)
 	expect(app:error()).to_be(nil)
 end)
 

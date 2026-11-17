@@ -114,7 +114,7 @@ test("/ in a side chat offers the agent's commands, then Zeron's", function()
 	local app = open()
 	app:type(BOX, "/")
 	app:frames(30)
-	expect(calls(app)).to_contain("invocations:codex:side-a")
+	expect(calls(app)).to_contain("invocations:deepseek:side-a")
 	expect(app:has('"/review"')).to_be(true)
 	expect(app:has('"/stop"')).to_be(true)
 end)
@@ -280,8 +280,8 @@ test("a side chat sent from another computer reads that computer's accounts, not
 	local app = open()
 	app:set_state("private_text_hidden", false)
 	app:set_state("agents.on_device", {
-		[""] = { ["codex"] = { { id = "a1", email = "mine@example.test", plan = "Max", active = true, can_switch = true, windows = {} } } },
-		box = { ["codex"] = { { id = "b1", email = "box@example.test", plan = "Team", active = true, can_switch = true, windows = {} } } },
+		[""] = { deepseek = { { id = "a1", email = "mine@example.test", plan = "Max", active = true, can_switch = true, windows = {} } } },
+		box = { deepseek = { { id = "b1", email = "box@example.test", plan = "Team", active = true, can_switch = true, windows = {} } } },
 	})
 	app:command("side_on_box")
 	app:frames(20)

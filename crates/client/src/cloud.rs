@@ -432,16 +432,9 @@ impl Client {
     /// own API key, made the one Cloud uses (the subscription login steps
     /// aside, as on desktop).
     pub async fn vault_put_api_key(&self, provider: VaultProvider, key: &str) -> Result<()> {
-        let login = match provider {
-            VaultProvider::AnthropicKey => VaultProvider::Claude,
-            VaultProvider::OpenaiKey => VaultProvider::Codex,
-            other => {
-                return Err(ClientError::InvalidArgument(format!(
-                    "{} isn't an API key provider",
-                    other.as_str()
-                )));
-            }
-        };
+        if provider != VaultProvider::DeepseekKey {
+            return Err(ClientError::Unsupported("Only DeepSeek API keys are supported. Historical credentials are unchanged.".into()));
+        }
         let key = key.trim();
         if key.is_empty() {
             return Err(ClientError::InvalidArgument(
@@ -458,7 +451,7 @@ impl Client {
         }
         self.put_credential(provider, serde_json::json!({ "key": key }), None)
             .await?;
-        self.vault_activate(login, None).await.map(drop)
+        self.vault_activate(VaultProvider::DeepseekKey, None).await.map(drop)
     }
 
     /// `PUT /vault/{org}/credentials/{provider}` for the logical Cloud device:
@@ -708,6 +701,7 @@ impl Client {
     /// machine is asked); the last list read while the edge is out of reach;
     /// the curated static list before the first.
     pub async fn cloud_models(&self, harness: &str) -> Vec<crate::catalog::ModelInfo> {
+        if harness != "deepseek" { return Vec::new(); }
         const CLOUD_CATALOG: &str = "cloud";
         #[derive(Deserialize)]
         struct Models {
@@ -930,7 +924,7 @@ mod demo {
         VaultStatus {
             connections: vec![
                 connection(VaultProvider::Github, "octocat"),
-                connection(VaultProvider::Claude, "you@example.com"),
+                connection(VaultProvider::DeepseekKey, "DeepSeek API key"),
             ],
             devices: Vec::new(),
             available: true,
@@ -940,8 +934,8 @@ mod demo {
 
     pub(super) fn accounts(provider: VaultProvider) -> Vec<VaultAccount> {
         match provider {
-            VaultProvider::Claude => vec![VaultAccount {
-                slot: "demo-claude".into(),
+            VaultProvider::DeepseekKey => vec![VaultAccount {
+                slot: "demo-deepseek".into(),
                 status: VaultConnectionStatus::Connected,
                 active: true,
                 kind: "oauth".into(),

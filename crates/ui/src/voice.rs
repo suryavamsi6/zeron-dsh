@@ -1,14 +1,11 @@
-//! Window-owned voice orchestrator. Each session runs in the host's own
-//! projectless Codex chat, resumed across calls, and survives navigation
-//! between threads; only an explicit end, an engine change or a provider
-//! failure closes it. No automatic reconnect or microphone resume.
+//! Window-owned voice state. Remote voice is retired: the DeepSeek Harness SDK
+//! exposes no realtime voice contract, so no call can start and the footer
+//! trigger stays hidden. Local dictation and local recording are unaffected.
 use crate::orb::OrbState;
 use crate::state::EngineHandle;
 use gpui::{Context, Task};
-use gpui_tokio::Tokio;
 use zeron_proto::voice::*;
 mod permissions;
-mod remote;
 
 pub enum VoiceControl {
     Mute(bool),
@@ -34,14 +31,6 @@ pub struct VoiceController {
     epoch: u64,
     task: Option<Task<()>>,
     cancellation: tokio_util::sync::CancellationToken,
-    /// Whether this device's Codex is installed and enabled: no Codex, no
-    /// voice. `None` until the catalog answers.
-    codex_ready: Option<bool>,
-    /// The connection `codex_ready` was read from, and its read in flight.
-    codex_engine: Option<EngineHandle>,
-    codex_check: Option<Task<()>>,
-    /// This call played its start sound and owes its end sound.
-    cued: bool,
 }
 impl Default for VoiceController {
     fn default() -> Self {
@@ -62,162 +51,33 @@ impl Default for VoiceController {
             epoch: 0,
             task: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
-            codex_ready: None,
-            codex_engine: None,
-            codex_check: None,
-            cued: false,
         }
     }
 }
 impl VoiceController {
-    /// Voice can be offered here. An unread catalog counts as yes, so a slow
-    /// or failed read never hides it; a live call or its failure stays.
-    pub fn offered(&self) -> bool {
-        self.codex_ready != Some(false) || self.is_live() || self.reason.is_some()
-    }
+    /// DeepSeek Harness has no realtime voice contract, so no remote call is
+    /// ever offered. Local dictation is a separate, fully local feature.
+    pub fn offered(&self) -> bool { false }
 
-    /// Read whether `engine`'s device can take a call: installed and enabled
-    /// in Settings → Agents. `force` re-reads a connection already read.
-    pub fn check_codex(&mut self, engine: &EngineHandle, force: bool, cx: &mut Context<Self>) {
-        let same = self
-            .codex_engine
-            .as_ref()
-            .is_some_and(|e| e.same_connection(engine));
-        if same && !force {
-            return;
-        }
-        if !same {
-            self.codex_ready = None;
-        }
-        self.codex_engine = Some(engine.clone());
-        let engine = engine.clone();
-        self.codex_check = Some(cx.spawn(async move |this, cx| {
-            let ready = engine
-                .client()
-                .call(zeron_rpc::methods::LIST_HARNESSES, serde_json::json!({}))
-                .await
-                .ok()
-                .and_then(|value| {
-                    serde_json::from_value::<Vec<zeron_engine::registry::HarnessDescriptor>>(value)
-                        .ok()
-                })
-                .map(|list| {
-                    list.iter().any(|d| {
-                        d.id == zeron_proto::HarnessId::Codex
-                            && d.installed
-                            && zeron_engine::registry::descriptor_enabled(d)
-                    })
-                });
-            this.update(cx, |voice, cx| {
-                if ready.is_some() && ready != voice.codex_ready {
-                    voice.codex_ready = ready;
-                    cx.notify();
-                }
-            })
-            .ok();
-        }));
+    /// Drop everything the finished or cancelled call held. The phase is the
+    /// caller's to set; engine ownership is the caller's to clear.
+    fn reset_session(&mut self) {
+        self.snapshot = None;
+        self.caption = Default::default();
+        self.microphone_level = 0;
+        self.speaker_level = 0;
+        self.stage_open = false;
+        self.host_name = None;
+        self.speaker_last_loud = None;
+        self.active_since = None;
+        self.chat_id = None;
+        self.controls = None;
+        self.task = None;
     }
 
     /// A session is underway (including its preparation and native stop).
     pub fn is_live(&self) -> bool {
         matches!(self.phase, VoicePhase::Checking) || self.phase.replaces_composer()
-    }
-
-    /// Start an orchestrator in a new projectless Codex chat on `host_device_id`.
-    /// `config` is the chat's Codex configuration; its harness must be Codex.
-    pub fn start(
-        &mut self,
-        engine: EngineHandle,
-        host_device_id: String,
-        config: zeron_proto::ChatConfig,
-        voice: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.cancel(cx);
-        // The call sounds as it is placed, well before the microphone opens.
-        crate::sound::play_voice(true);
-        self.cued = true;
-        self.engine = Some(engine.clone());
-        self.phase = VoicePhase::Checking;
-        self.chat_id = None;
-        self.reason = None;
-        let epoch = self.epoch;
-        let cancellation = self.cancellation.clone();
-        let (controls, control_rx) = tokio::sync::mpsc::channel(8);
-        self.controls = Some(controls);
-        let (events, mut event_rx) = tokio::sync::mpsc::channel(32);
-        let query = Tokio::spawn(cx, async move {
-            // Media belongs to this viewport, even when the chosen host is
-            // this device. The execution host never opens audio devices.
-            remote::run(
-                engine,
-                host_device_id,
-                config,
-                voice,
-                cancellation,
-                events,
-                control_rx,
-            )
-            .await
-        });
-        self.task = Some(cx.spawn(async move |this, cx| {
-            let receive = async {
-                while let Some(event) = event_rx.recv().await {
-                    if this
-                        .update(cx, |controller, cx| {
-                            if controller.epoch == epoch {
-                                controller.reduce(event, cx);
-                            }
-                        })
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            };
-            receive.await;
-            let result = query.await.unwrap_or(Err(VoiceRejection::Protocol));
-            let _ = this.update(cx, |controller, cx| {
-                if controller.epoch != epoch {
-                    return;
-                }
-                match result {
-                    // A provider failure already reduced to Failed keeps its reason.
-                    Ok(()) if controller.phase == VoicePhase::Failed => {}
-                    Ok(()) => {
-                        controller.phase = VoicePhase::Closed;
-                    }
-                    Err(reason) => {
-                        controller.phase = VoicePhase::Failed;
-                        controller.reason = Some(reason);
-                    }
-                }
-                controller.reset_session();
-                cx.notify();
-            });
-        }));
-        cx.notify();
-    }
-
-    /// Ending now sounds: a hang-up or a connected call ending. A failure to
-    /// connect only explains itself.
-    fn end_sounds(&self) -> bool {
-        self.cued && (self.active_since.is_some() || self.reason.is_none())
-    }
-
-    fn reset_session(&mut self) {
-        if self.end_sounds() {
-            crate::sound::play_voice(false);
-        }
-        self.cued = false;
-        self.snapshot = None;
-        self.caption.clear();
-        self.microphone_level = 0;
-        self.speaker_level = 0;
-        self.controls = None;
-        self.task = None;
-        self.stage_open = false;
-        self.active_since = None;
     }
 
     /// End the session (any phase). The provider stop runs in the background.
@@ -386,37 +246,8 @@ impl VoiceController {
         }
         cx.notify();
     }
-    pub fn reason_text(&self) -> &'static str {
-        match self.reason {
-            Some(VoiceRejection::CreditExclusionUnverified) => {
-                "Codex controls subscription usage and any enabled additional credits."
-            }
-            Some(VoiceRejection::WrongHarness) => "Voice requires Codex.",
-            Some(VoiceRejection::RemoteHost) => "Voice runs on this device only.",
-            Some(VoiceRejection::IncludedUsageUnavailable) => {
-                "Codex usage is currently unavailable."
-            }
-            Some(VoiceRejection::AudioFormatUnverified) => {
-                "This Codex voice format has not been verified."
-            }
-            Some(VoiceRejection::ChatgptRequired) => "Sign in to Codex with ChatGPT to use voice.",
-            // Remote calls still play audio here, through this device's Codex helper.
-            Some(VoiceRejection::NativeRuntimeUnavailable) => {
-                "Install or update Codex on this device with its official installer to use voice. npm installs lack the voice runtime."
-            }
-            Some(VoiceRejection::DeviceUnavailable) => {
-                "Check microphone permission and your audio devices."
-            }
-            Some(VoiceRejection::MicrophonePermissionDenied) => {
-                "Allow Zeron to use the microphone in System Settings → Privacy & Security → Microphone."
-            }
-            Some(VoiceRejection::MicrophoneMetadataMissing) => {
-                "Microphone setup is missing. Rebuild or reinstall Zeron, then restart it."
-            }
-            Some(VoiceRejection::Busy) => "Another window already owns the voice session.",
-            Some(_) => "Voice could not connect. Try again in a moment.",
-            None => "",
-        }
+    pub fn reason_text(&self) -> String {
+        "Voice is unavailable. DeepSeek Harness has no realtime voice contract; use local dictation instead.".into()
     }
 }
 
@@ -460,31 +291,9 @@ mod tests {
     }
 
     #[test]
-    fn voice_is_offered_unless_codex_is_known_missing() {
-        let mut voice = VoiceController::default();
-        assert!(voice.offered(), "an unread catalog never hides voice");
-        voice.codex_ready = Some(true);
-        assert!(voice.offered());
-        voice.codex_ready = Some(false);
+    fn remote_voice_is_never_offered_without_a_host_contract() {
+        let voice = VoiceController::default();
         assert!(!voice.offered());
-        // A failure explains itself before the trigger goes away.
-        voice.reason = Some(VoiceRejection::NativeRuntimeUnavailable);
-        assert!(voice.offered());
-        voice.reason = None;
-        voice.phase = VoicePhase::Checking;
-        assert!(voice.offered(), "a call in progress keeps its trigger");
-    }
-
-    #[test]
-    fn only_a_hang_up_or_a_connected_call_sounds_its_end() {
-        let mut voice = VoiceController::default();
-        assert!(!voice.end_sounds(), "no call was placed");
-        voice.cued = true;
-        assert!(voice.end_sounds(), "hanging up while connecting");
-        voice.reason = Some(VoiceRejection::Busy);
-        assert!(!voice.end_sounds(), "a failure to connect stays quiet");
-        voice.active_since = Some(std::time::Instant::now());
-        assert!(voice.end_sounds(), "a connected call that drops");
     }
 
     #[gpui::test]

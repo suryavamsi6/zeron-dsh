@@ -1,7 +1,7 @@
 -- The model picker's accounts, as Zeron's composer has them: an Account row and
 -- a usage ring on the chip, for the composer's device (this one or another),
--- reading the fuller window (Cursor's, the pool of the model chosen); no usage
--- reported, no ring; one that can't be switched to, not offered.
+-- reading the fuller window; no usage reported, no ring; one that can't be
+-- switched to, not offered.
 
 local function window(label: string, used: number): any
 	return { label = label, used = used }
@@ -25,7 +25,7 @@ local function with_accounts(on_device: { [string]: any }): any
 end
 
 local function here(list: { any }): { [string]: any }
-	return { [""] = { ["claude-code"] = list } }
+	return { [""] = { deepseek = list } }
 end
 
 test("an agent with accounts has the row, the address and how much is used", function()
@@ -53,7 +53,7 @@ test("Hide email addresses hides them in the row and the list, and a press still
 	expect(app:has('role:switch "Show email"')).to_be(false)
 	app:click('~"Pro · 5h 5% · Week 91%"')
 	app:frames(30)
-	expect(app:state("calls")).to_contain("switch_on::claude-code:a2")
+	expect(app:state("calls")).to_contain("switch_on::deepseek:a2")
 end)
 
 test("the fullest window is the figure shown, whichever and however many", function()
@@ -67,9 +67,9 @@ end)
 
 test("a chat on another computer reads that computer's accounts", function()
 	local app = with_accounts({
-		[""] = { ["claude-code"] = accounts() },
+		[""] = { deepseek = accounts() },
 		box = {
-			["claude-code"] = {
+			deepseek = {
 				{ id = "b1", email = "box@example.test", plan = "Max", active = true, can_switch = true, windows = { window("Week", 0.77) } },
 				{ id = "b2", email = "spare@example.test", plan = "Pro", active = false, can_switch = true, windows = {} },
 			},
@@ -88,7 +88,7 @@ test("a chat on another computer reads that computer's accounts", function()
 	app:frames(30)
 	app:click('~"spare@example.test"')
 	app:frames(30)
-	expect(app:state("calls")).to_contain("switch_on:box:claude-code:b2")
+	expect(app:state("calls")).to_contain("switch_on:box:deepseek:b2")
 end)
 
 -- A chat on a Cloud machine: its accounts are Cloud's, the vault's (as
@@ -96,9 +96,9 @@ end)
 -- which isn't asked (it would be woken).
 test("a chat on a Cloud machine reads and switches Cloud's accounts", function()
 	local app = with_accounts({
-		[""] = { ["claude-code"] = accounts() },
+		[""] = { deepseek = accounts() },
 		cloud = {
-			["claude-code"] = {
+			deepseek = {
 				{ id = "v1", email = "team@example.test", plan = "Max", active = true, can_switch = true, windows = { window("Week", 0.4) } },
 				{ id = "v2", email = "spare@example.test", plan = "Pro", active = false, can_switch = true, windows = {} },
 			},
@@ -115,7 +115,7 @@ test("a chat on a Cloud machine reads and switches Cloud's accounts", function()
 	app:frames(30)
 	app:click('~"spare@example.test"')
 	app:frames(30)
-	expect(app:state("calls")).to_contain("switch_on:cloud:claude-code:v2")
+	expect(app:state("calls")).to_contain("switch_on:cloud:deepseek:v2")
 end)
 
 test("a computer whose accounts haven't come has neither, and is asked", function()
@@ -175,15 +175,15 @@ test("the chip's model doesn't roll for a change from elsewhere, and does for a 
 	app:frames(60)
 	local at_rest = letters(app)
 	-- (As moving to a chat on another model, or refocusing a pane, does.)
-	app:set_state("chat_model", "sonnet")
+	app:set_state("chat_model", "deepseek-v4-pro")
 	app:frames(3)
 	expect(letters(app)).to_be(at_rest)
-	expect(app:tree('role:button "Model"')).to_contain("Sonnet")
+	expect(app:tree('role:button "Model"')).to_contain("DeepSeek V4 Pro")
 	app:frames(60)
 	-- Picked in its panel: it rolls.
 	app:click('role:button "Model"')
 	app:frames(30)
-	app:set_state("chat_model", "opus")
+	app:set_state("chat_model", "deepseek-flash")
 	app:frames(3)
 	expect(letters(app) > at_rest).to_be(true)
 end)
@@ -210,8 +210,8 @@ local function box_of(app: any, find: string): { y: number, h: number }?
 end
 
 test("an agent Zeron can't add an account to ends its list at its last account", function()
-	-- (Claude Code: no "Add … account" action, so no rule and no gap under
-	-- the last row.)
+	-- (DeepSeek: no "Add … account" action, so no rule and no gap under the
+	-- last row.)
 	local app = with_accounts(here(accounts()))
 	app:click('role:button "Model"')
 	app:frames(30)

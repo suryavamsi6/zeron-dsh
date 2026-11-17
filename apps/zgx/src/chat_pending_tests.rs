@@ -31,7 +31,7 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
     CHATS.with(|chats| {
         chats.made(
             "new-chat",
-            json!({ "id": "new-chat", "config": { "harness": "codex" } }),
+            json!({ "id": "new-chat", "config": { "harness": "deepseek" } }),
         );
         chats.made("other-chat", json!({ "id": "other-chat" }));
     });
@@ -44,7 +44,7 @@ fn pending_chat() -> (TestApp, Rc<View>, Sending) {
                 ("message_id", Value::from("first-message")),
                 ("text", Value::from("Find the startup bug")),
                 ("fresh", Value::Bool(true)),
-                ("harness", Value::from("codex")),
+                ("harness", Value::from("deepseek")),
                 (
                     "attachments",
                     Value::List(

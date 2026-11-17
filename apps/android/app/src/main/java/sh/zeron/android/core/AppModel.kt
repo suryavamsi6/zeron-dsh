@@ -201,7 +201,7 @@ class AppModel(private val app: Application) {
     private fun storedDraft() = NewSessionDraft(
         projectId = settings.getString("draft.project", null),
         hostId = settings.getString("draft.host", null),
-        harness = settings.getString("draft.harness", null) ?: "claude-code",
+        harness = settings.getString("draft.harness", null) ?: "deepseek",
         model = settings.getString("draft.model", null),
         effort = settings.getString("draft.effort", null),
         cloud = settings.getBoolean("draft.cloud", false),
@@ -785,7 +785,7 @@ fun projectGroups(rows: List<SessionRow>, projects: List<ProjectView>): List<Pro
 data class NewSessionDraft(
     val projectId: String? = null,
     val hostId: String? = null,
-    val harness: String = "claude-code",
+    val harness: String = "deepseek",
     val model: String? = null,
     val effort: String? = null,
     val branch: String? = null,

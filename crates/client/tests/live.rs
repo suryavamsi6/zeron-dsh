@@ -80,8 +80,8 @@ fn host_rows(now: chrono::DateTime<Utc>) -> (Device, Space, Chat) {
             observed_at: now,
         }),
         config: Some(ChatConfig {
-            harness: HarnessId::ClaudeCode,
-            model: Some("claude-opus-5".into()),
+            harness: HarnessId::DeepSeek,
+            model: Some("deepseek-v4.1-flash".into()),
             reasoning: None,
             model_options: Default::default(),
             sandbox: SandboxLevel::WorkspaceWrite,
@@ -564,15 +564,15 @@ impl zeron_rpc::RpcService for HostService {
         use zeron_rpc::{RpcReply, methods as m};
         let value = match method {
             m::LIST_HARNESSES => json!([
-                {"id": "claude-code", "name": "Claude Code", "supportsSteering": true,
-                 "steeringMode": "step-boundary", "reasoningLevels": ["high"], "installed": true,
+                {"id": "deepseek", "name": "DeepSeek", "supportsSteering": true,
+                 "steeringMode": "step-boundary", "reasoningLevels": ["low", "high", "max"], "installed": true,
                  "canInstall": false, "enabled": true},
                 {"id": "mock", "name": "Mock", "supportsSteering": false,
                  "steeringMode": "turn-boundary", "reasoningLevels": [], "installed": true, "canInstall": false},
             ]),
             m::LIST_MODELS => json!([
-                {"id": "claude-opus-5", "label": "claude-opus-5", "reasoningLevels": ["high"], "options": []},
-                {"id": "claude-opus-5[1m]", "label": "Opus 5 (1M)", "reasoningLevels": ["high"], "options": []},
+                {"id": "deepseek-v4.1-flash", "label": "DeepSeek V4.1 Flash", "reasoningLevels": ["low", "high", "max"], "options": []},
+                {"id": "default", "label": "Default", "reasoningLevels": [], "options": []},
             ]),
             m::LIST_REFS => {
                 json!([{ "name": "main", "current": true }, { "name": "feature/live", "current": false, "worktreePath": "/wt/live" }])
@@ -673,17 +673,18 @@ async fn host_rpcs_ride_the_device_relay() {
     .unwrap();
     assert_eq!(
         harnesses.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
-        ["claude-code"]
+        ["deepseek"]
     );
     assert_eq!(harnesses[0].mid_turn_steering(), Some(true));
 
     let c = client.clone();
     let models =
-        zeron_client::runtime::run(async move { Ok(c.list_models(HOST, "claude-code").await) })
+        zeron_client::runtime::run(async move { Ok(c.list_models(HOST, "deepseek").await) })
             .await
             .unwrap();
-    assert_eq!(models.len(), 1, "[1m] variant folded: {models:?}");
-    assert_eq!(models[0].label, "Opus 5");
+    assert_eq!(models.len(), 1, "the default alias is dropped: {models:?}");
+    assert_eq!(models[0].id, "deepseek-v4.1-flash");
+    assert_eq!(models[0].label, "DeepSeek V4.1 Flash");
 
     let c = client.clone();
     let refs =
@@ -1098,9 +1099,9 @@ async fn await_chat(client: &Client, chat: &str) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn immediate_exit_after_first_send_recovers_new_chat_on_each_host_platform() {
     for (platform, harness) in [
-        ("windows", HarnessId::Codex),
-        ("macos", HarnessId::Cursor),
-        ("linux", HarnessId::ClaudeCode),
+        ("windows", HarnessId::DeepSeek),
+        ("macos", HarnessId::DeepSeek),
+        ("linux", HarnessId::DeepSeek),
     ] {
         let edge = MockEdge::start().await;
         let host = HostRegistry::start(&edge).await;

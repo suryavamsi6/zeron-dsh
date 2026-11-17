@@ -504,7 +504,7 @@ zeron.on("usage.threshold", function(e)
 end, { below = 10, provider = "claude-code" })
 ```
 
-`plugins-dev/account-rotate` is this whole: its service switches Claude Code to the next saved account with more left when the active one drops below 10%, once its chats finish, and its window says so in a toast.
+Historical example only: provider account rotation no longer applies, since Zeron runs DeepSeek alone.
 
 ### Pinning chats to accounts
 
@@ -527,7 +527,7 @@ zeron.on("run.preparing", function(e)
 end, { provider = "claude-code" })
 ```
 
-`plugins-dev/account-pin` is the whole of it: it answers with the saved account that has the fewest chats (counted from `zeron.pins()`), so new chats take turns.
+Historical example only: provider account pinning no longer applies, since Zeron runs DeepSeek alone.
 
 
 ## Sending messages

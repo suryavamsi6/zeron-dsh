@@ -57,9 +57,9 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         device,
         title,
         preview,
-        harness: ClaudeCode,
-        model: "claude-fable-5",
-        reasoning: XHigh,
+        harness: DeepSeek,
+        model: "deepseek-flash",
+        reasoning: High,
         branch: None,
         pr: None,
         status: None,
@@ -93,7 +93,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             last_ago_ms: 2 * MIN,
             created_ago_ms: 2 * HOUR,
             seen: false,
-            model: "claude-opus-5",
+            model: "deepseek-v4-pro",
             ..chat(
                 "chat-picker",
                 Some("space-zeron"),
@@ -103,8 +103,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             )
         },
         DemoChat {
-            harness: Codex,
-            model: "gpt-5.6-terra",
+            model: "deepseek-v4-pro",
             reasoning: High,
             branch: Some("fix/tool-colors"),
             pr: Some((77, Closed, "Refine tool group colors")),
@@ -151,9 +150,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
             last_ago_ms: 80 * MIN,
             seen: false,
             sleep: Some((-30 * MIN, DAY)),
-            harness: Codex,
-            model: "gpt-6-astra",
-            reasoning: Ultra,
+            model: "deepseek-v4-pro",
+            reasoning: Max,
             ..chat(
                 "chat-ios-scroll",
                 Some("space-mobile"),
@@ -176,8 +174,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             last_ago_ms: 2 * HOUR,
-            model: "claude-sonnet-5",
-            reasoning: Medium,
+            model: "deepseek-v4-pro",
+            reasoning: High,
             ..chat(
                 "chat-home",
                 None,
@@ -233,8 +231,7 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             parent: Some("chat-veil"),
-            harness: Codex,
-            model: "gpt-5.6-terra",
+            model: "deepseek-v4-pro",
             reasoning: High,
             last_ago_ms: 6 * MIN,
             ..chat(
@@ -247,6 +244,11 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             archived: true,
+            // History: this chat ran on a provider the app no longer offers,
+            // so it stays read-only until a DeepSeek model is chosen.
+            harness: ClaudeCode,
+            model: "claude-fable-5",
+            reasoning: XHigh,
             last_ago_ms: 3 * DAY,
             created_ago_ms: 4 * DAY,
             ..chat(
@@ -259,6 +261,8 @@ pub(crate) fn chats() -> Vec<DemoChat> {
         },
         DemoChat {
             archived: true,
+            // The studio's engine predates provider switching, so its history
+            // cannot be moved to DeepSeek from here.
             harness: Codex,
             model: "gpt-5.5",
             reasoning: High,
@@ -270,6 +274,23 @@ pub(crate) fn chats() -> Vec<DemoChat> {
                 VPS,
                 "Presence beat coalescing",
                 "Batched to one beat per 25s.",
+            )
+        },
+        DemoChat {
+            archived: true,
+            // Retired with the studio's old engine: its provider is gone and
+            // the studio cannot move the chat to DeepSeek.
+            harness: Codex,
+            model: "gpt-5.5",
+            reasoning: High,
+            last_ago_ms: 8 * DAY,
+            created_ago_ms: 9 * DAY,
+            ..chat(
+                "chat-studio-old",
+                Some("space-blog"),
+                STUDIO,
+                "Presence on the old studio",
+                "Kept for its transcript.",
             )
         },
     ]

@@ -473,22 +473,8 @@ impl CoreClient {
         provider: String,
         done_url: String,
     ) -> CoreResult<ProviderLoginInfo> {
-        let provider = match provider.as_str() {
-            "claude" => zc::LoginProvider::Claude,
-            "codex" => zc::LoginProvider::Codex,
-            other => {
-                return Err(CoreError::InvalidArgument {
-                    message: format!("{other} can't be signed in from here"),
-                });
-            }
-        };
-        let client = self.client.clone();
-        on_runtime(async move { client.provider_login_start(provider, &done_url).await })
-            .await
-            .map(|start| ProviderLoginInfo {
-                login_id: start.login_id,
-                url: start.url,
-            })
+        let _ = (provider, done_url);
+        Err(CoreError::Unsupported { message: "Browser provider sign-in is unsupported. Add a DeepSeek API key on the run device.".into() })
     }
 
     /// Wait for a started sign-in to land in Cloud's vault.

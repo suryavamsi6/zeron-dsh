@@ -188,14 +188,14 @@ test("a new side chat starts on its parent's agent and model, and its first mess
 	local app = open()
 	app:click('#session-lanes >> role:button "New side chat"')
 	app:frames(30)
-	expect(app:has('.side-chat-tab >> role:button "Model" >> "Opus 5.5"')).to_be(true)
+	expect(app:has('.side-chat-tab >> role:button "Model" >> "DeepSeek V4 Pro"')).to_be(true)
 	app:type('.side-chat-tab >> role:textbox', "first words")
 	app:key("Enter")
 	app:frames(30)
 	local made = calls(app):match("create:chat%-1:([%w%-]+)")
 	expect(made).never.to_be_nil()
 	expect(calls(app)).to_contain(`send:{made}:first words:fresh`)
-	expect(calls(app)).to_contain(`pick:{made}:claude-code/opus-5.5:claude-code:high`)
+	expect(calls(app)).to_contain(`pick:{made}:deepseek/deepseek-v4-pro:deepseek:high`)
 	expect(app:has('.side-chat-tab >> "Your message didn\'t send"')).to_be(false)
 end)
 
@@ -203,27 +203,27 @@ test("a side chat's own model shows in its picker; a changed pick goes with its 
 	local app = open()
 	app:click('#session-lanes >> role:button "Open side chat Looking at the tests"')
 	app:frames(30)
-	-- (Its own: Codex's GPT-6.1, never its parent's.)
-	expect(app:has('.side-chat-tab >> role:button "Model" >> "GPT-6.1"')).to_be(true)
+	-- (Its own: the V4 Pro, never its parent's.)
+	expect(app:has('.side-chat-tab >> role:button "Model" >> "DeepSeek V4 Pro"')).to_be(true)
 	app:click('.side-chat-tab >> role:button "Model"')
 	app:frames(30)
 	-- (It lists the side chat's agent's models.)
-	expect(app:has('role:option "GPT-6.1 mini"')).to_be(true)
+	expect(app:has('role:option "DeepSeek V4.1 Flash"')).to_be(true)
 	app:key("Escape")
 	app:frames(10)
 	-- Another picked (the picker's pick, kept by the chat).
-	app:set_state("chat_lane_model_side-a", "codex/gpt-6.1-mini")
+	app:set_state("chat_lane_model_side-a", "deepseek/deepseek-v4-pro-max")
 	app:frames(20)
 	-- (Its label rolls in a letter at a time: read whole.)
 	local label = {}
 	for t in app:tree('.side-chat-tab >> role:button "Model"'):gmatch('text "([^"]*)"') do
 		table.insert(label, t)
 	end
-	expect(table.concat(label)).to_be("GPT-6.1 mini")
+	expect(table.concat(label)).to_be("DeepSeek V4 Pro Max")
 	app:type('.side-chat-tab >> role:textbox', "again")
 	app:key("Enter")
 	app:frames(20)
-	expect(calls(app)).to_contain("pick:side-a:codex/gpt-6.1-mini:codex:medium")
+	expect(calls(app)).to_contain("pick:side-a:deepseek/deepseek-v4-pro-max:deepseek:medium")
 end)
 
 test("a message that didn't go says so above the side chat's composer, never over it, and keeps its words", function()
@@ -293,7 +293,7 @@ test("a new side chat's footer is the chat page's: access, where it works, the m
 	app:frames(30)
 	local made = calls(app):match("create:chat%-1:([%w%-]+)") :: string
 	expect(calls(app)).never.to_contain(`place:{made}`)
-	expect(calls(app)).to_contain(`pick:{made}:claude-code/opus-5.5:claude-code:high:supervised`)
+	expect(calls(app)).to_contain(`pick:{made}:deepseek/deepseek-v4-pro:deepseek:high:supervised`)
 end)
 
 test("a side chat's access and place picks stick per chat and go with its first message; then it's fixed", function()
@@ -327,7 +327,7 @@ test("a side chat's access and place picks stick per chat and go with its first 
 	app:key("Enter")
 	app:frames(30)
 	expect(calls(app)).to_contain(`place:{chat}:p2:d:feature:/zephyr:`)
-	expect(calls(app)).to_contain(`pick:{chat}:claude-code/opus-5.5:claude-code:high:edits:worktree`)
+	expect(calls(app)).to_contain(`pick:{chat}:deepseek/deepseek-v4-pro:deepseek:high:edits:worktree`)
 	-- Made: where it works is said, no longer picked.
 	expect(app:has('.side-chat-tab >> role:button "Branch"')).to_be(false)
 	expect(app:has('.side-chat-tab >> "Branch feature"')).to_be(true)
@@ -343,7 +343,7 @@ test("a side chat that's made shows where it works, fixed, and its own access", 
 	app:type('.side-chat-tab >> role:textbox', "next")
 	app:key("Enter")
 	app:frames(20)
-	expect(calls(app)).to_contain("pick:side-a:codex/gpt-6.1:codex:medium:edits")
+	expect(calls(app)).to_contain("pick:side-a:deepseek/deepseek-v4-pro:deepseek:medium:edits")
 end)
 
 test("a side chat's composer has the chat page's context ring, from its own numbers", function()

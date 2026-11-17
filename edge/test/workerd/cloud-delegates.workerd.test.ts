@@ -27,7 +27,7 @@ const readyChild = async (u: TestUser, runner: string, parent: string) => {
   const started = await call("POST", `/cloud/${u.orgId}/sessions`, runner, {
     chatId,
     parentChatId: parent,
-    config: { harness: "codex" }
+    config: { harness: "deepseek" }
   });
   expect(started.status, await started.clone().text()).toBe(200);
   const { deviceId } = (await started.json()) as { deviceId: string };
@@ -90,7 +90,7 @@ const world = async () => {
 };
 
 const startChild = (u: TestUser, runner: string, chatId: string, parentChatId: string, body: Record<string, unknown> = {}) =>
-  call("POST", `/cloud/${u.orgId}/sessions`, runner, { chatId, parentChatId, config: { harness: "codex" }, ...body });
+  call("POST", `/cloud/${u.orgId}/sessions`, runner, { chatId, parentChatId, config: { harness: "deepseek" }, ...body });
 
 describe("Cloud delegates", () => {
   it("a delegate never takes an existing or deleted chat's id", async () => {
@@ -119,6 +119,19 @@ describe("Cloud delegates", () => {
     expect(find(after, "chats", gone)).toBeUndefined();
   });
 
+  it("refuses a delegate config for a removed provider", async () => {
+    const { u, main, runner } = await world();
+    for (const harness of ["codex", "claude-code", "", 7]) {
+      const refused = await call("POST", `/cloud/${u.orgId}/sessions`, runner, {
+        chatId: `child-${rand()}`,
+        parentChatId: main.chatId,
+        config: { harness }
+      });
+      expect(refused.status, String(harness)).toBe(400);
+      await refused.arrayBuffer();
+    }
+  });
+
   it("a main chat's machine starts a child on a machine of its own, with its chat row", async () => {
     const { u, user, main, runner } = await world();
     const child = `child-${rand()}`;
@@ -136,7 +149,7 @@ describe("Cloud delegates", () => {
       spaceId: main.spaceId,
       roomGen: 2,
       archived: false,
-      config: { harness: "codex" }
+      config: { harness: "deepseek" }
     });
     // Again: the same session, not a second machine.
     const again = await startChild(u, runner, child, main.chatId);
@@ -255,8 +268,8 @@ describe("Cloud delegates", () => {
     expect((await call("POST", "/vault/org1/grant", childRunner, { ...asChild, repo: "acme/other" })).status).toBe(403);
 
     // Another provider's grant asks nothing of the session.
-    const codex = { provider: "codex", deviceId, ts: Date.now(), sig: "c2ln" };
-    expect((await call("POST", "/vault/org1/grant", childRunner, codex)).status).toBe(200);
-    expect(await lastGrant()).toEqual(codex);
+    const keyGrant = { provider: "deepseek-key", deviceId, ts: Date.now(), sig: "c2ln" };
+    expect((await call("POST", "/vault/org1/grant", childRunner, keyGrant)).status).toBe(200);
+    expect(await lastGrant()).toEqual(keyGrant);
   });
 });

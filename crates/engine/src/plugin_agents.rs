@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use futures::future::BoxFuture;
 use zeron_doc::SessionCommandPayload;
-use zeron_proto::{AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session, SessionStatus, UserInputAnswer};
+use zeron_proto::{
+    AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, HarnessId, Model, Session,
+    SessionStatus, UserInputAnswer,
+};
 
 use crate::agent_accounts::AgentAccounts;
 use crate::plugins::agents::{AgentHost, Delivery, NewChat, Pin};
@@ -45,11 +48,18 @@ impl AgentHost for EngineAgentHost {
         Box::pin(async move { accounts.list(force).await.map_err(|e| e.to_string()) })
     }
 
-    fn activate(&self, harness: HarnessId, account: String) -> BoxFuture<'static, Result<AgentAccountsSnapshot, String>> {
+    fn activate(
+        &self,
+        harness: HarnessId,
+        account: String,
+    ) -> BoxFuture<'static, Result<AgentAccountsSnapshot, String>> {
         let (accounts, voice) = (self.accounts.clone(), self.sessions.voice_manager());
         Box::pin(async move {
             voice.retire();
-            accounts.activate(harness, &account).await.map_err(|e| e.to_string())
+            accounts
+                .activate(harness, &account)
+                .await
+                .map_err(|e| e.to_string())
         })
     }
 
@@ -73,13 +83,25 @@ impl AgentHost for EngineAgentHost {
     }
 
     fn set_chat_config(&self, chat: &str, config: ChatConfig) -> Result<(), String> {
+        if !config.harness.can_run() {
+            return Err("This legacy provider is no longer supported; select DeepSeek.".into());
+        }
         self.sessions.voice_manager().retire_chat(chat);
-        self.workspace.set_chat_config(chat, &config).map(drop).map_err(|e| e.to_string())
+        self.workspace
+            .set_chat_config(chat, &config)
+            .map(drop)
+            .map_err(|e| e.to_string())
     }
 
     fn status(&self, chat: &str) -> Option<SessionStatus> {
         // This device's own, else the row its host mirrors to the workspace.
-        let here = self.sessions.watch_sessions().borrow().iter().find(|s| s.chat_id == chat).map(|s| s.status);
+        let here = self
+            .sessions
+            .watch_sessions()
+            .borrow()
+            .iter()
+            .find(|s| s.chat_id == chat)
+            .map(|s| s.status);
         here.or_else(|| {
             self.workspace
                 .read_sessions()
@@ -90,18 +112,32 @@ impl AgentHost for EngineAgentHost {
         })
     }
 
-    fn deliver(&self, chat: &str, text: &str, attachments: Vec<String>, how: Delivery) -> Result<String, String> {
+    fn deliver(
+        &self,
+        chat: &str,
+        text: &str,
+        attachments: Vec<String>,
+        how: Delivery,
+    ) -> Result<String, String> {
         let failed = |e: crate::EngineError| e.to_string();
         match how {
             // (As the composer's `QueueMessage`: held for the turn's end.)
-            Delivery::Queue => self.doc_host.queue_message_with_behavior(chat, text, attachments, true).map_err(failed),
+            Delivery::Queue => self
+                .doc_host
+                .queue_message_with_behavior(chat, text, attachments, true)
+                .map_err(failed),
             Delivery::Steer => {
                 if !attachments.is_empty() {
                     return Err("A steer carries words only: queue a message with files".into());
                 }
                 let id = crate::new_id();
-                let payload = SessionCommandPayload::Steer { prompt: text.to_owned(), message_id: Some(id.clone()) };
-                self.doc_host.queue_command_with_transfers(chat, payload, Vec::new()).map_err(failed)?;
+                let payload = SessionCommandPayload::Steer {
+                    prompt: text.to_owned(),
+                    message_id: Some(id.clone()),
+                };
+                self.doc_host
+                    .queue_command_with_transfers(chat, payload, Vec::new())
+                    .map_err(failed)?;
                 Ok(id)
             }
             Delivery::Run => {
@@ -115,32 +151,44 @@ impl AgentHost for EngineAgentHost {
                 }
                 request.attachments = attachments;
                 let id = crate::new_id();
-                let payload = SessionCommandPayload::Run { request, message_id: id.clone() };
-                self.doc_host.queue_command_with_transfers(chat, payload, Vec::new()).map_err(failed)?;
+                let payload = SessionCommandPayload::Run {
+                    request,
+                    message_id: id.clone(),
+                };
+                self.doc_host
+                    .queue_command_with_transfers(chat, payload, Vec::new())
+                    .map_err(failed)?;
                 Ok(id)
             }
         }
     }
 
-    fn pin_mechanism(&self, account: &AgentAccount) -> Option<&'static str> {
-        self.accounts.pin_mechanism(account)
+    fn pin_mechanism(&self, _account: &AgentAccount) -> Option<&'static str> {
+        None
     }
 
     fn pins(&self) -> Vec<Pin> {
-        self.accounts
-            .pins()
-            .into_iter()
-            .map(|p| Pin { chat: p.chat, harness: p.harness, account: p.account, since: p.since })
-            .collect()
+        Vec::new()
     }
 
-    fn set_pin(&self, harness: HarnessId, chat: &str, account: Option<&str>) -> Result<(), String> {
-        self.accounts.set_pin(harness, chat, account);
-        Ok(())
+    fn set_pin(
+        &self,
+        _harness: HarnessId,
+        _chat: &str,
+        _account: Option<&str>,
+    ) -> Result<(), String> {
+        Err("DeepSeek credentials are managed for this device, not pinned per chat.".into())
     }
 
     fn create_chat(&self, new: &NewChat) -> Result<(), String> {
-        if new.device.as_deref().is_some_and(|d| zeron_proto::is_cloud_device(d, "")) {
+        if !new.config.harness.can_run() {
+            return Err("This legacy provider is no longer supported; select DeepSeek.".into());
+        }
+        if new
+            .device
+            .as_deref()
+            .is_some_and(|d| zeron_proto::is_cloud_device(d, ""))
+        {
             return Err("A Cloud chat is started from the composer".into());
         }
         self.workspace
@@ -161,9 +209,19 @@ impl AgentHost for EngineAgentHost {
         self.doc_host.pending_input(chat).map_err(|e| e.to_string())
     }
 
-    fn answer(&self, chat: &str, request: &str, answers: Vec<UserInputAnswer>) -> Result<String, String> {
-        let payload = SessionCommandPayload::RespondInput { request_id: request.to_owned(), answers };
-        self.doc_host.queue_command_with_transfers(chat, payload, Vec::new()).map_err(|e| e.to_string())
+    fn answer(
+        &self,
+        chat: &str,
+        request: &str,
+        answers: Vec<UserInputAnswer>,
+    ) -> Result<String, String> {
+        let payload = SessionCommandPayload::RespondInput {
+            request_id: request.to_owned(),
+            answers,
+        };
+        self.doc_host
+            .queue_command_with_transfers(chat, payload, Vec::new())
+            .map_err(|e| e.to_string())
     }
 
     fn mark_sent_by(&self, chat: &str, id: &str, by: serde_json::Value) {

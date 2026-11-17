@@ -53,7 +53,7 @@ impl SpeakerActivity {
 /// Speaker turns the caption remembers; older ones can no longer complete.
 const CAPTION_TURNS: usize = 8;
 
-/// The live caption across speaker turns. Codex interleaves them: a user
+/// The live caption across speaker turns. Providers may interleave them: a user
 /// turn's final often lands after the assistant has started answering. Each
 /// turn keeps its own text and the caption stays on the newest one, so a late
 /// final never takes the caption back and deltas never restart it.
@@ -468,7 +468,7 @@ mod tests {
         }
     }
 
-    /// The order Codex really sends: the user's final lands after the
+    /// A final transcript can arrive out of order: the user's final lands after the
     /// assistant has started answering.
     #[test]
     fn a_late_user_final_never_takes_the_caption_from_the_assistant() {

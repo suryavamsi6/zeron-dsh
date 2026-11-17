@@ -722,7 +722,7 @@ impl SettingsSection {
             "devices" => SettingsSection::Devices,
             "cloud" => SettingsSection::Cloud,
             "billing" => SettingsSection::Billing,
-            "providers" | "harnesses" => SettingsSection::Harnesses,
+            "providers" | "harnesses" | "deepseek" => SettingsSection::Harnesses,
             "agents" => SettingsSection::Agents,
             "appearance" => SettingsSection::Appearance,
             "files" => SettingsSection::Files,
@@ -749,8 +749,8 @@ impl SettingsSection {
             SettingsSection::Devices => "Devices",
             SettingsSection::Cloud => "Cloud",
             SettingsSection::Billing => "Billing",
-            SettingsSection::Harnesses => "Providers",
-            SettingsSection::Agents => "Accounts",
+            SettingsSection::Harnesses => "DeepSeek",
+            SettingsSection::Agents => "DeepSeek setup",
             SettingsSection::Appearance => "Appearance",
             SettingsSection::Files => "Files",
             SettingsSection::Notifications => "Notifications",
@@ -2111,7 +2111,6 @@ pub struct Shell {
     /// The chat selected when the stage opened; picking another closes it.
     voice_stage_selection: Option<String>,
     _voice_observation: gpui::Subscription,
-    _voice_catalog: gpui::Subscription,
     /// Measured height of the bottom chrome stack (status strip + composer +
     /// terminal dock) the full-height transcript scrolls under. Paint-time
     /// measurement schedules another frame whenever this value changes.
@@ -2564,11 +2563,6 @@ impl Shell {
                 .visible(false)
         });
         let voice_observation = cx.observe(&voice, |_: &mut Shell, _, cx| cx.notify());
-        // Settings → Agents installed or toggled Codex: voice follows.
-        let voice_catalog =
-            cx.observe_global::<crate::pickers::HarnessCatalogChanged>(|this: &mut Shell, cx| {
-                this.check_voice_codex(true, cx)
-            });
         let links = Self::session_links(None, cx);
         transcript.update(cx, |transcript, _| {
             transcript.set_workspace_link_handler(links)
@@ -2734,7 +2728,6 @@ impl Shell {
             voice_stage_changed_at: None,
             voice_stage_selection: None,
             _voice_observation: voice_observation,
-            _voice_catalog: voice_catalog,
             // Seed with the compact composer stack's rough height so the
             // first frame's clearance isn't zero (the measure corrects it).
             bottom_stack: std::rc::Rc::new(std::cell::Cell::new(120.0)),
@@ -13921,9 +13914,6 @@ impl Render for Shell {
                         // Coming back to the app (often after sleep) checks
                         // at once when a check is due by the wall clock.
                         update.read(cx).poke();
-                    }
-                    if window.is_window_active() && !this.voice.read(cx).offered() {
-                        this.check_voice_codex(true, cx);
                     }
                     if !window.is_window_active() {
                         this.reset_command_palette_key_state();
