@@ -171,7 +171,7 @@ local icon_of = M.icon
 -- `shown`.
 -- (`extra`: more choices after the computers, each `{ value, label, icon }`:
 -- Providers' Cloud, whose accounts every Cloud machine uses.)
-function M.picker(shown: () -> string?, choose: (id: string) -> (), extra: (() -> { any })?): Node
+function M.picker(shown: () -> string?, choose: (id: string) -> (), extra: (() -> { any })?, compact: boolean?): Node
 	local function computers(): { sessions.Device }
 		return sessions.computers(sessions.devices:get(), true)
 	end
@@ -188,7 +188,7 @@ function M.picker(shown: () -> string?, choose: (id: string) -> (), extra: (() -
 	end
 	return ui.show(
 		function(): boolean
-			return #computers() > 1 or #extras() > 0
+			return #computers() > (if compact then 0 else 1) or #extras() > 0
 		end,
 		ui.component(function(): Node
 			local chosen = ui.use_state(shown() or here())
@@ -202,7 +202,7 @@ function M.picker(shown: () -> string?, choose: (id: string) -> (), extra: (() -
 				value = chosen,
 				name = ui.t("settings.providers.device"),
 				size = "sm",
-				w = 200,
+				w = if compact then 173 else 200,
 				options = function(): { any }
 					local options = {}
 					for _, d in computers() do

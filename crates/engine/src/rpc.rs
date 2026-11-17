@@ -949,12 +949,29 @@ impl EngineRpc {
                 harness.home(),
             ))
         });
-        let signed_in = gateway
-            .call("zeron-chatgpt/status", serde_json::json!({}))
-            .await
-            .map(|value| value["authorized"].as_bool().unwrap_or(false))
-            .unwrap_or(false);
-        crate::dsh_providers::route_models(gateway, signed_in).await
+        let mut signed_in = std::collections::HashSet::new();
+        for provider in ["openai", "openai-codex"] {
+            if gateway
+                .call("zeron-chatgpt/status", serde_json::json!({"provider": provider}))
+                .await
+                .is_ok_and(|value| value["provider"] == provider && value["authorized"] == true)
+            {
+                signed_in.insert(provider.to_string());
+            }
+        }
+        let mut oauth_signed_in = std::collections::HashSet::new();
+        if let Ok(catalog) = gateway.call("llm/listConfigurableProviders", serde_json::json!({})).await {
+            for route in crate::dsh_providers::parse_provider_catalog(&catalog).into_iter().filter(|route| route.oauth) {
+                if gateway
+                    .call("zeron-provider-auth/status", serde_json::json!({"provider": route.id}))
+                    .await
+                    .is_ok_and(|value| value["authorized"] == true)
+                {
+                    oauth_signed_in.insert(route.id);
+                }
+            }
+        }
+        crate::dsh_providers::route_models(gateway, &signed_in, &oauth_signed_in).await
     }
 
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API

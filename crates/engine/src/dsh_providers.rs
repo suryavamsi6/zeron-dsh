@@ -33,6 +33,8 @@ pub struct GatewayProvider {
     /// Whether the route is the ChatGPT subscription, served by Zeron's own
     /// plugin on the same gateway (`zeron-chatgpt/*`).
     pub chatgpt: bool,
+    /// Whether the route has an interactive OAuth flow on this gateway.
+    pub oauth: bool,
 }
 
 impl GatewayProvider {
@@ -50,7 +52,8 @@ impl GatewayProvider {
 /// cannot answer contributes nothing and the caller keeps its own list.
 pub async fn route_models(
     gateway: &zeron_harness::deepseek::gateway::Gateway,
-    chatgpt_signed_in: bool,
+    chatgpt_signed_in: &std::collections::HashSet<String>,
+    oauth_signed_in: &std::collections::HashSet<String>,
 ) -> Vec<zeron_proto::Model> {
     use zeron_proto::{Model, ModelProvider};
 
@@ -71,6 +74,7 @@ pub async fn route_models(
             .ok()
     };
     let mut models = Vec::new();
+    let mut settings = gateway.call("settings/describe", json!({})).await.ok();
     // `llm/discoverModels` strips capability data: the adapter emits id,
     // name, contextWindow, maxTokens and inputModalities only, and the host
     // re-projects those same fields (`discoverModels` in dsh-llm-pi-ai and
@@ -94,7 +98,6 @@ pub async fn route_models(
     // `deepseek::configuration`), so supported levels outside those — pi-ai's
     // `minimal`/`medium`/`xhigh`, and every route's `off` — are filtered out
     // of what the picker offers.
-    let settings = gateway.call("settings/describe", json!({})).await.ok();
     let catalog_dir = zeron_harness::deepseek::DeepSeekHarness::new()
         .sdk_root()
         .join("node_modules/@earendil-works/pi-ai/dist/providers/data");
@@ -104,9 +107,29 @@ pub async fn route_models(
         let ready = route
             .credential_ref()
             .is_some_and(|key| describe.as_ref().is_some_and(|d| credential_configured(d, key)))
-            || (route.chatgpt && chatgpt_signed_in);
+            || (route.chatgpt && chatgpt_signed_in.contains(&route.id))
+            || (route.oauth && oauth_signed_in.contains(&route.id));
         if !ready {
             continue;
+        }
+        // Discovery can list a catalog model before the pi-ai adapter has a
+        // configured profile for its route. A signed-in route needs that
+        // profile registered before the runtime can dispatch requests to it.
+        if route.settings_ns == PI_AI_NS
+            && (route.chatgpt || route.oauth)
+            && settings.as_ref().is_none_or(|store| !provider_profile_exists(store, &route.id))
+        {
+            if gateway
+                .call(
+                    "settings/mutate",
+                    json!({ "ns": PI_AI_NS, "ops": [{ "op": "set", "path": ["providers", route.id], "value": {} }] }),
+                )
+                .await
+                .is_err()
+            {
+                continue;
+            }
+            settings = gateway.call("settings/describe", json!({})).await.ok();
         }
         let Ok(found) = gateway
             .call(
@@ -325,22 +348,35 @@ pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
             // The ChatGPT subscription only — not every route that *can* sign
             // in through OAuth. A grant on this one must not make the others
             // look configured.
-            let chatgpt = id == "openai" || id.starts_with("zeron-chatgpt");
+            let chatgpt = id == "openai" || id == "openai-codex";
+            // Mistral Vibe's browser sign-in yields a Mistral API key. It is
+            // served by Zeron's dedicated flow, while the DSH provider keeps
+            // owning the actual Mistral model requests.
+            let oauth = (entry["nativeAuth"]["oauth"].as_bool() == Some(true)
+                && id != "openai"
+                && id != "openai-codex")
+                || id == "mistral";
             let account = !chatgpt
                 && (entry["account"].as_bool() == Some(true)
                     || entry["auth"].as_str() == Some("account")
                     || id.contains("deepseek"));
             Some(GatewayProvider {
-                display_name: entry["displayName"]
-                    .as_str()
-                    .unwrap_or(&id)
-                    .to_string(),
+                // Keep the provider's product name in the picker even when
+                // the upstream catalog exposes its internal route id.
+                display_name: if id == "openai-codex" {
+                    "Codex".to_string()
+                } else if id == "mistral" {
+                    "Mistral Vibe".to_string()
+                } else {
+                    entry["displayName"].as_str().unwrap_or(&id).to_string()
+                },
                 id,
                 settings_ns,
                 api_key_env,
                 account,
                 declared: entry["declared"].as_bool().unwrap_or(false),
                 chatgpt,
+                oauth,
             })
         })
         .collect()
@@ -454,6 +490,15 @@ pub fn settings_namespaces(value: &Value) -> Vec<(&str, &Value)> {
         .flatten()
         .filter_map(|ns| Some((ns["ns"].as_str()?, ns.get("value").unwrap_or(&Value::Null))))
         .collect()
+}
+
+/// Whether pi-ai has the route profile whose presence registers its runtime
+/// adapter. Model discovery alone can succeed without this profile.
+fn provider_profile_exists(settings: &Value, route: &str) -> bool {
+    settings_namespaces(settings)
+        .into_iter()
+        .find(|(ns, _)| *ns == PI_AI_NS)
+        .is_some_and(|(_, value)| value["providers"].get(route).is_some())
 }
 
 /// The models a route offers, read offline from the store (no provider call).
@@ -1400,6 +1445,7 @@ mod tests {
             account: false,
             declared: false,
             chatgpt: false,
+            oauth: false,
         }
     }
 

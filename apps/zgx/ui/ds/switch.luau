@@ -4,6 +4,7 @@
 
 export type Props = {
 	value: State<boolean>,
+	compact: boolean?,
 	-- What assistive technology calls it.
 	label: Label?,
 	on_change: ((on: boolean) -> ())?,
@@ -15,6 +16,7 @@ local W, H, KNOB, INSET = 40, 24, 18, 3
 
 return function(props: Props): Node
 	local value = props.value
+	local W, H, KNOB, INSET = if props.compact then 34 else W, if props.compact then 20 else H, if props.compact then 16 else KNOB, if props.compact then 2 else INSET
 	local function flip()
 		value:toggle()
 		if props.on_change then

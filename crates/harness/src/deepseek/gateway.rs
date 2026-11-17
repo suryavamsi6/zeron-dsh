@@ -37,6 +37,8 @@ const CALL_TIMEOUT: Duration = Duration::from_secs(30);
 /// through the credential seam, which is the only route the shipped adapter
 /// leaves open.
 const CHATGPT_PLUGIN: &str = include_str!("chatgpt.mjs");
+const CHATGPT_ACCOUNTS: &str = include_str!("chatgpt-accounts.mjs");
+const PROVIDER_AUTH_PLUGIN: &str = include_str!("provider-auth.mjs");
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
@@ -149,12 +151,20 @@ impl Gateway {
         tokio::fs::write(&plugin, CHATGPT_PLUGIN)
             .await
             .map_err(|error| GatewayError::Start(error.to_string()))?;
+        tokio::fs::write(directory.join("chatgpt-accounts.mjs"), CHATGPT_ACCOUNTS)
+            .await
+            .map_err(|error| GatewayError::Start(error.to_string()))?;
+        let provider_auth = directory.join("provider-auth.mjs");
+        tokio::fs::write(&provider_auth, PROVIDER_AUTH_PLUGIN)
+            .await
+            .map_err(|error| GatewayError::Start(error.to_string()))?;
         let patch = directory.join("chatgpt.patch.yml");
         let body = format!(
-            "- insert:\n    - id: zeron-chatgpt\n      name: {}\n      config:\n        home: {}\n        sdkRoot: {}\n",
+            "- insert:\n    - id: zeron-chatgpt\n      name: {}\n      config:\n        home: {}\n        sdkRoot: {}\n    - id: zeron-provider-auth\n      name: {}\n",
             quoted(&file_url(&plugin)),
             quoted(&self.home.to_string_lossy()),
             quoted(&self.sdk_root.to_string_lossy()),
+            quoted(&file_url(&provider_auth)),
         );
         tokio::fs::write(&patch, body)
             .await
