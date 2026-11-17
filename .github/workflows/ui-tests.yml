@@ -33,13 +33,13 @@ jobs:
   # scripts/ci/test-core.sh) split into two nextest partitions that run side by
   # side (scripts/ci/plan.py counts both runners and skips both passes
   # together). Both shards build the same graph; both restore the core cache,
-  # and only shard 0 saves it. Including the voice protocol and transport tests
+  # and only shard 1 saves it. Including the voice protocol and transport tests
   # that need no audio stack.
   core-tests:
     if: inputs.core
     strategy:
       matrix:
-        shard: [0, 1]
+        shard: [1, 2]
       fail-fast: false
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -48,9 +48,9 @@ jobs:
       - uses: ./.github/actions/linux-ci
         with:
           rust-cache: core
-          save-rust-cache: ${{ matrix.shard == 0 && 'true' || 'false' }}
+          save-rust-cache: ${{ matrix.shard == 1 && 'true' || 'false' }}
       - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
-        run: scripts/ci/test-core.sh --partition hash:$(( matrix.shard + 1 ))/2
+        run: scripts/ci/test-core.sh --partition hash:${{ matrix.shard }}/2
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
