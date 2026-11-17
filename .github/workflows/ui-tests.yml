@@ -52,7 +52,7 @@ jobs:
           rust-cache: core
           save-rust-cache: ${{ matrix.shard == 0 && 'true' || 'false' }}
       - name: Harness, engine, sync, update, doc, preview, MCP and voice protocol tests
-        run: scripts/ci/test-core.sh --partition hash:2/${{ matrix.shard }}
+        run: scripts/ci/test-core.sh --partition hash:$(( matrix.shard + 1 ))/2
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
