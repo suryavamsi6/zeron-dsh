@@ -108,6 +108,14 @@ pub mod methods {
     pub const DSH_CANCEL_SIGN_IN: &str = "DshCancelSignIn";
     pub const DSH_SIGN_OUT: &str = "DshSignOut";
     pub const DSH_DISCOVER_MODELS: &str = "DshDiscoverModels";
+    /// DSH's token meter, read where it lives: the sessions it records ({} ->
+    /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
+    /// that carries `tokenUsage`) and one session's exact projections
+    /// ({sessionId} -> the sequenced baseline, migration hints, or null).
+    /// Read-only: the meter has no write surface and no cross-session
+    /// aggregate, so a total is a sum over the sessions a caller listed.
+    pub const DSH_SESSIONS: &str = "DshSessions";
+    pub const DSH_PROJECTIONS: &str = "DshProjections";
     /// Zeron's own ChatGPT subscription sign-in, served by the plugin Zeron
     /// loads into DSH's gateway: begun ({} -> the authorize URL and whether a
     /// flow is already running), cancelled ({}), and its state ({} ->

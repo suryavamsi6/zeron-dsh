@@ -29,6 +29,8 @@ pub mod files;
 pub mod harnesses;
 pub mod notifications;
 pub mod provider_cards;
+pub mod provider_declaration;
+pub mod provider_usage;
 pub mod search;
 pub mod shortcuts;
 pub mod thread_naming;

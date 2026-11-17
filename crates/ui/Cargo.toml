@@ -37,6 +37,10 @@ name = "windows-render-fixture"
 required-features = ["windows-render-fixture"]
 
 [[example]]
+name = "provider-cards-fixture"
+required-features = ["appshots-fixture"]
+
+[[example]]
 name = "appshots-fixture"
 required-features = ["appshots-fixture"]
 
