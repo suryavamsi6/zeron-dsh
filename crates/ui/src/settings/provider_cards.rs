@@ -1094,7 +1094,10 @@ impl ProviderCards {
                 let is_default = default_model.as_deref() == Some(model.id.as_str());
                 let starred = self.is_favorite(cx, &model.id);
                 let mid = model.id.clone();
+                let star_mid = mid.clone();
+                let default_mid = mid.clone();
                 let pid = id.clone();
+                let default_pid = pid.clone();
                 rows = rows.child(
                     div()
                         .id(format!("provider-model-{pid}-{mid}"))
@@ -1111,7 +1114,7 @@ impl ProviderCards {
                                 .aria_label(if starred { "Unstar model" } else { "Star model" })
                                 .tab_index(0)
                                 .on_click(cx.listener(move |page, _, _, cx| {
-                                    page.toggle_favorite(&mid, cx);
+                                    page.toggle_favorite(&star_mid, cx);
                                 }))
                                 .child(
                                     crate::icons::icon(if starred {
@@ -1142,7 +1145,7 @@ impl ProviderCards {
                                 widgets::ghost_action(theme)
                                     .id(format!("provider-model-default-{pid}-{mid}"))
                                     .on_click(cx.listener(move |page, _, _, cx| {
-                                        page.set_default_model(&pid, &mid, cx);
+                                        page.set_default_model(&default_pid, &default_mid, cx);
                                     }))
                                     .child("Set default"),
                             )
