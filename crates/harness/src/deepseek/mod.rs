@@ -1,3 +1,4 @@
+pub mod gateway;
 mod normalize;
 #[cfg(test)]
 mod tests;
@@ -30,6 +31,9 @@ use crate::{
 
 pub const SDK_VERSION: &str = "0.2.2-rc.3";
 pub const DEFAULT_MODEL: &str = "deepseek-flash";
+/// The provider route a run takes when the host names none: DSH's own
+/// API-key route, which is the one this build has always run.
+pub const DEFAULT_PROVIDER: &str = "deepseek-official";
 const SHIM: &str = include_str!("shim.mjs");
 const POLICY: &str = include_str!("policy.mjs");
 const ENVIRONMENT: &str = include_str!("environment.mjs");
@@ -133,6 +137,17 @@ impl DeepSeekHarness {
     pub fn discover() -> Self {
         Self::new()
     }
+
+    /// Where the pinned SDK lives, as the gateway service is started from it.
+    pub fn sdk_root(&self) -> &Path {
+        &self.sdk_root
+    }
+
+    /// The harness home: one store of settings and credentials for this
+    /// device, read by every session and by the service that configures them.
+    pub fn home(&self) -> &Path {
+        &self.home
+    }
 }
 
 impl Default for DeepSeekHarness {
@@ -220,10 +235,47 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             "The host must select an absolute DeepSeek home".into(),
         ));
     }
-    let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
-    if ![DEFAULT_MODEL, "deepseek-v4-pro"].contains(&model) {
+    // The host decides whether this run reads Zeron's own credential store or
+    // a fenced per-run file, and which provider route it runs on. Both are
+    // host-stamped (`RunRequest::env` never rides the wire), so a sender can
+    // neither widen a run's credentials nor pick a route the host did not.
+    let shared_home = request
+        .env
+        .get("ZERON_DEEPSEEK_SHARED_HOME")
+        .is_some_and(|value| value == "1");
+    let provider = request
+        .env
+        .get("ZERON_DEEPSEEK_PROVIDER")
+        .map(String::as_str)
+        .unwrap_or(DEFAULT_PROVIDER);
+    if provider.is_empty()
+        || provider.len() > 64
+        || !provider
+            .bytes()
+            .enumerate()
+            .all(|(at, b)| b.is_ascii_lowercase() || b.is_ascii_digit() || (b == b'-' && at > 0))
+    {
         return Err(HarnessError::Protocol(
-            "Only official deepseek-flash and deepseek-v4-pro models are supported".into(),
+            "Invalid DeepSeek provider route".into(),
+        ));
+    }
+    let model = request.model.as_deref().unwrap_or(DEFAULT_MODEL);
+    if provider == DEFAULT_PROVIDER {
+        if ![DEFAULT_MODEL, "deepseek-v4-pro"].contains(&model) {
+            return Err(HarnessError::Protocol(
+                "Only official deepseek-flash and deepseek-v4-pro models are supported".into(),
+            ));
+        }
+    } else if model.is_empty()
+        || model.len() > 128
+        || !model
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
+    {
+        // Any other route's models are the store's to name; DSH resolves them
+        // and reports an unknown one itself.
+        return Err(HarnessError::Protocol(
+            "Invalid model for this provider route".into(),
         ));
     }
     if request.plan {
@@ -272,7 +324,8 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
     let cwd = std::path::absolute(&request.cwd)?;
     let mut config = json!({
         "type": "start", "sessionId": session, "resume": request.resume.is_some(),
-        "dshHome": home, "cwd": cwd, "model": model, "access": request.access,
+        "dshHome": home, "cwd": cwd, "model": model, "provider": provider,
+        "sharedHome": shared_home, "access": request.access,
         "sandbox": request.sandbox, "policySource": POLICY, "environmentSource": ENVIRONMENT,
         "mcp": request.mcp.iter().chain(request.extra_mcp.iter()).collect::<Vec<_>>()
     });

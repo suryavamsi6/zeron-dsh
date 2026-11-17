@@ -28,6 +28,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod provider_cards;
 pub mod search;
 pub mod shortcuts;
 pub mod thread_naming;
@@ -561,6 +562,12 @@ pub fn current(cx: &App) -> UiSettings {
     cx.try_global::<SettingsStore>()
         .map(|store| store.current.clone())
         .unwrap_or_default()
+}
+
+/// The app's data directory, where composer defaults (favorites) persist.
+pub fn data_dir(cx: &App) -> Option<std::path::PathBuf> {
+    cx.try_global::<SettingsStore>()
+        .map(|store| store.data_dir.clone())
 }
 
 /// Read the picker preference without cloning the full settings for each model row.

@@ -56,9 +56,21 @@ async function start(config) {
   const [major, minor] = process.versions.node.split('.').map(Number);
   if (major < 24 || major === 24 && minor < 9) throw new Error('DeepSeek SDK requires Node >=24.9');
   if (!isAbsolute(config.dshHome) || !isAbsolute(config.cwd)) throw new Error('Explicit absolute Harness home and workspace are required');
-  if (!models.has(config.model)) throw new Error('Unsupported official DeepSeek model');
+  // A shared home reads Zeron's own credential store, so the provider and the
+  // model are whatever that store configures: the official route keeps its two
+  // models, and any other route is resolved by DSH's own provider layer.
+  const shared = config.sharedHome === true;
+  const provider = config.provider ?? 'deepseek-official';
+  if (typeof provider !== 'string' || !/^[a-z0-9][a-z0-9-]{0,63}$/.test(provider)) throw new Error('Unsupported DeepSeek provider route');
+  if (provider === 'deepseek-official') {
+    if (!models.has(config.model)) throw new Error('Unsupported official DeepSeek model');
+  } else if (typeof config.model !== 'string' || !/^[\w.:/-]{1,128}$/.test(config.model)) {
+    throw new Error('Unsupported model for this provider route');
+  }
   if (!['supervised', 'auto-accept-edits', 'full-access'].includes(config.access)) throw new Error('Unknown access mode');
-  if (!process.env.DEEPSEEK_API_KEY?.trim()) throw new Error('Set DEEPSEEK_API_KEY before starting DeepSeek Harness');
+  // The store is the authority once it is shared; a fenced run has only the
+  // environment to read its key from.
+  if (!shared && !process.env.DEEPSEEK_API_KEY?.trim()) throw new Error('Set DEEPSEEK_API_KEY before starting DeepSeek Harness');
   if (config.reasoningEffort && !['low', 'high', 'max'].includes(config.reasoningEffort)) throw new Error('Unsupported DeepSeek reasoning effort');
   if (config.maxTokens !== undefined && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) throw new Error('Invalid maxTokens');
   const require = createRequire(join(sdkRoot, 'package.json'));
@@ -78,10 +90,17 @@ async function start(config) {
   const { runtimeEnvironment } = await import(pathToFileURL(environmentPath).href);
   const environment = { ...runtimeEnvironment(process.env), DSH_PERMISSION_MODE: config.sandbox };
   let patch = [
-    { id: 'credentials', disabled: false, config: { path: join(runtimeDirectory, 'credentials.yaml'), watch: false } },
-    { id: 'deepseek-account', disabled: true },
-    { id: 'llm-deepseek-account', disabled: true },
-    { id: 'llm-pi-ai', disabled: true },
+    // A shared home is the store the gateway writes, watched so a settings
+    // change reaches a session already running; a fenced run gets its own file
+    // and the account and pi-ai routes stay off.
+    shared
+      ? { id: 'credentials', disabled: false, config: { path: join(config.dshHome, '.credentials.yaml'), watch: true } }
+      : { id: 'credentials', disabled: false, config: { path: join(runtimeDirectory, 'credentials.yaml'), watch: false } },
+    ...(shared ? [] : [
+      { id: 'deepseek-account', disabled: true },
+      { id: 'llm-deepseek-account', disabled: true },
+      { id: 'llm-pi-ai', disabled: true },
+    ]),
     { id: 'tool-plugin-manager', disabled: true },
     { id: 'approval', config: { policy: 'ask' } },
     { id: 'permission', config: {
@@ -111,7 +130,7 @@ async function start(config) {
   for (const [key, value] of Object.entries(environment)) if (/key|token|secret/i.test(key) && value) secrets.add(value);
   harness = new DeepSeekHarness({
     profile: 'sdk', dshHome: config.dshHome, cwd: config.cwd, processCwd: config.cwd,
-    provider: 'deepseek-official', model: config.model,
+    provider, model: config.model,
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
     ...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
     env: environment, patches: [patchPath], approvalRequests: true,

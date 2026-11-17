@@ -331,7 +331,17 @@ impl AccountsPage {
             };
             (methods::VAULT_PUT_API_KEY, serde_json::json!({ "provider": "deepseek-key", "key": key, "authorizedDevices": [device] }))
         } else {
-            (methods::ADD_AGENT_API_KEY, serde_json::json!({ "harness": "deepseek", "provider": "deepseek", "key": key, "targetDeviceId": self.target_device }))
+            // The gateway's shared store is the authority a run reads: the
+            // official route's env-shaped ref, written through DSH's own
+            // credentials controller (routed to the target device).
+            let mut params = zeron_engine::dsh_providers::set_credential_params(
+                crate::settings::provider_cards::DEEPSEEK_API_KEY_REF,
+                &key,
+            );
+            if let (Some(target), Some(object)) = (&self.target_device, params.as_object_mut()) {
+                object.insert("targetDeviceId".into(), serde_json::json!(target));
+            }
+            (methods::DSH_SET_CREDENTIAL, params)
         };
         self.saving = true;
         self.error = None;

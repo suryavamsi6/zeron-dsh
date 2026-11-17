@@ -280,6 +280,13 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             "ZERON_DEEPSEEK_HOME".into(),
             self.0.config.deepseek_home.to_string_lossy().into_owned(),
         );
+        // Zeron's own Harness home is the one credential store: the gateway
+        // writes it and every run reads it, so a provider configured in the
+        // app is the provider the next run uses. A run that must not see the
+        // store leaves this unset and gets a fenced per-run file instead.
+        request
+            .env
+            .insert("ZERON_DEEPSEEK_SHARED_HOME".into(), "1".into());
         if !request.env.contains_key("DEEPSEEK_API_KEY")
             && let Some(key) = self.0.stored_key().map_err(|error| error.to_string())?
         {
@@ -406,6 +413,9 @@ mod tests {
             request.env["ZERON_DEEPSEEK_HOME"],
             config.deepseek_home.to_string_lossy()
         );
+        // Every run the host drives reads Zeron's own store, so a provider
+        // configured in the app is the provider the next run uses.
+        assert_eq!(request.env["ZERON_DEEPSEEK_SHARED_HOME"], "1");
         assert!(!serde_json::to_string(&request).unwrap().contains(key));
         assert!(!format!("{request:?}").contains(key));
         let fingerprint = env.credential(HarnessId::DeepSeek, None).await.unwrap();

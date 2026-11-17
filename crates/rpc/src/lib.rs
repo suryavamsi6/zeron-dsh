@@ -87,6 +87,35 @@ pub mod methods {
     pub const SET_NATIVE_SUBAGENTS: &str = "SetNativeSubagents";
     pub const SET_HARNESS_ENABLED: &str = "SetHarnessEnabled";
     pub const LIST_MODELS: &str = "ListModels";
+    /// DSH's own provider surface, answered by the device that runs the
+    /// agents: the configurable providers and their settings namespaces
+    /// ({} -> the catalog), one namespace's redacted view ({} -> namespaces
+    /// with schema, base, user value and revision), a path-addressed edit to
+    /// one namespace ({ns, ops, expectedRevision}), the credential records a
+    /// call names ({refs}), setting and forgetting one ({ref, value} /
+    /// {ref}), the DeepSeek account's state ({}), its sign-in begun
+    /// ({locale?, timezoneOffsetSeconds?} -> the authorize URL and attempt),
+    /// cancelled ({attemptId}) and ended ({}), and model discovery for one
+    /// namespace ({settingsNs, request?}).
+    pub const DSH_PROVIDERS: &str = "DshProviders";
+    pub const DSH_SETTINGS: &str = "DshSettings";
+    pub const DSH_MUTATE_SETTINGS: &str = "DshMutateSettings";
+    pub const DSH_CREDENTIALS: &str = "DshCredentials";
+    pub const DSH_SET_CREDENTIAL: &str = "DshSetCredential";
+    pub const DSH_UNSET_CREDENTIAL: &str = "DshUnsetCredential";
+    pub const DSH_ACCOUNT: &str = "DshAccount";
+    pub const DSH_SIGN_IN: &str = "DshSignIn";
+    pub const DSH_CANCEL_SIGN_IN: &str = "DshCancelSignIn";
+    pub const DSH_SIGN_OUT: &str = "DshSignOut";
+    pub const DSH_DISCOVER_MODELS: &str = "DshDiscoverModels";
+    /// Zeron's own ChatGPT subscription sign-in, served by the plugin Zeron
+    /// loads into DSH's gateway: begun ({} -> the authorize URL and whether a
+    /// flow is already running), cancelled ({}), and its state ({} ->
+    /// `authorized`, `running`, `url`). DSH's own login path refuses this
+    /// provider, so it is Zeron's surface rather than DSH's.
+    pub const DSH_CHATGPT_START: &str = "DshChatgptStart";
+    pub const DSH_CHATGPT_CANCEL: &str = "DshChatgptCancel";
+    pub const DSH_CHATGPT_STATUS: &str = "DshChatgptStatus";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";

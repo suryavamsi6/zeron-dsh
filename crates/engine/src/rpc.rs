@@ -929,6 +929,10 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// DSH's own settings and account service, started on first use.
+    dsh_gateway: std::sync::Arc<
+        std::sync::OnceLock<std::sync::Arc<zeron_harness::deepseek::gateway::Gateway>>,
+    >,
     engine_info: EngineInfo,
 }
 
@@ -990,8 +994,35 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            dsh_gateway: Default::default(),
             engine_info,
         }
+    }
+
+    /// DSH's provider, credential and account surface, asked of the service
+    /// that owns it on this device.
+    async fn provider_gateway(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<RpcReply, RpcError> {
+        let harness = zeron_harness::deepseek::DeepSeekHarness::new();
+        let gateway = self.dsh_gateway.get_or_init(|| {
+            std::sync::Arc::new(zeron_harness::deepseek::gateway::Gateway::new(
+                harness.sdk_root(),
+                harness.home(),
+            ))
+        });
+        let origin = gateway
+            .origin()
+            .await
+            .map_err(|error| RpcError::Failed(error.to_string()))?;
+        let (call, args) = crate::dsh_gateway::translate(method, &params, &origin)?;
+        let value = gateway
+            .call(call, args)
+            .await
+            .map_err(|error| RpcError::Failed(error.to_string()))?;
+        Ok(RpcReply::Value(value))
     }
 
     /// Attach the plugins service (the Plugin* methods).
@@ -2486,6 +2517,17 @@ fn forwardable(method: &str) -> bool {
             | methods::GET_NATIVE_SUBAGENTS
             | methods::SET_NATIVE_SUBAGENTS
             | methods::SET_HARNESS_ENABLED
+            | methods::DSH_PROVIDERS
+            | methods::DSH_SETTINGS
+            | methods::DSH_MUTATE_SETTINGS
+            | methods::DSH_CREDENTIALS
+            | methods::DSH_SET_CREDENTIAL
+            | methods::DSH_UNSET_CREDENTIAL
+            | methods::DSH_ACCOUNT
+            | methods::DSH_SIGN_IN
+            | methods::DSH_CANCEL_SIGN_IN
+            | methods::DSH_SIGN_OUT
+            | methods::DSH_DISCOVER_MODELS
             | methods::LIST_MODELS
             | methods::LIST_SKILLS
             | methods::LIST_COMMANDS
@@ -3205,6 +3247,11 @@ impl RpcService for EngineRpc {
         // account's devices with its own deadline and error words.
         if method == methods::DEVICE_STATS {
             return self.device_stats(params).await;
+        }
+        // DSH's own provider settings and account: answered by the service
+        // that owns them on this device, or forwarded to the device named.
+        if crate::dsh_gateway::handles(method) {
+            return self.provider_gateway(method, params).await;
         }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.

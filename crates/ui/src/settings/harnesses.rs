@@ -37,6 +37,7 @@ use crate::pickers::visible_harnesses;
 use crate::popover::{self, Loadable};
 use crate::settings::accounts::{self, AccountsPage};
 use crate::settings::search::{SearchAnchor, SettingId, Target};
+use crate::settings::provider_cards::ProviderCards;
 use crate::settings::widgets;
 use crate::shell::SettingsSection;
 use crate::state::AppState;
@@ -214,6 +215,9 @@ pub struct HarnessesPage {
     /// The expanded provider's Accounts section — one page, retargeted as
     /// providers expand, so every provider shares the same sign-in flow.
     accounts_page: Option<Entity<AccountsPage>>,
+    /// The DSH gateway's configurable provider routes, as cards under the
+    /// account section.
+    provider_cards: Option<Entity<ProviderCards>>,
     /// Repaints the rows' account counts as the open Accounts section adds
     /// or forgets one.
     _observe_accounts: Option<gpui::Subscription>,
@@ -257,6 +261,7 @@ impl HarnessesPage {
             expanded_harness: Some(HarnessId::DeepSeek),
             pending_sign_in: None,
             accounts_page: Some(cx.new(|cx| AccountsPage::new_embedded(state.clone(), None, HarnessId::DeepSeek, cx))),
+            provider_cards: Some(cx.new(|cx| ProviderCards::new(state.clone(), cx))),
             _observe_accounts: None,
             update_task: None,
             update_action_task: None,
@@ -610,6 +615,11 @@ impl HarnessesPage {
         self.target_device = target;
         if let Some(accounts) = &self.accounts_page {
             accounts.update(cx, |page, cx| {
+                page.set_target_device(self.target_device.clone(), cx)
+            });
+        }
+        if let Some(cards) = &self.provider_cards {
+            cards.update(cx, |page, cx| {
                 page.set_target_device(self.target_device.clone(), cx)
             });
         }
@@ -1503,6 +1513,7 @@ impl Render for HarnessesPage {
         };
         let body = div().flex().flex_col().gap(px(16.0))
             .children(self.accounts_page.clone())
+            .children(self.provider_cards.clone())
             .child(body).into_any_element();
         // A provider's own rows show once it is expanded: until then, a hit
         // on one lands on the list, to pick the provider.

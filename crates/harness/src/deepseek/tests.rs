@@ -10,6 +10,66 @@ fn request(cwd: &Path) -> RunRequest {
 }
 
 #[test]
+fn a_run_reads_the_shared_store_only_when_the_host_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    // A run the host did not stamp keeps the fenced per-run file.
+    let fenced = configuration(&request, dir.path(), "session").unwrap();
+    assert_eq!(fenced["sharedHome"], false);
+    assert_eq!(fenced["provider"], DEFAULT_PROVIDER);
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_SHARED_HOME".into(), "1".into());
+    let shared = configuration(&request, dir.path(), "session").unwrap();
+    assert_eq!(shared["sharedHome"], true);
+    // Only the host's own stamp counts: any other value leaves it fenced.
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_SHARED_HOME".into(), "true".into());
+    assert_eq!(
+        configuration(&request, dir.path(), "session").unwrap()["sharedHome"],
+        false
+    );
+}
+
+#[test]
+fn a_provider_route_other_than_the_official_one_names_its_own_models() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    // The official route keeps its two models and refuses anything else.
+    request.model = Some("deepseek-chat".into());
+    assert!(configuration(&request, dir.path(), "session").is_err());
+    // A configured route's models are the store's to name.
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_PROVIDER".into(), "opencode-go".into());
+    request.model = Some("deepseek-v4.1-flash".into());
+    let config = configuration(&request, dir.path(), "session").unwrap();
+    assert_eq!(config["provider"], "opencode-go");
+    assert_eq!(config["model"], "deepseek-v4.1-flash");
+    // A route is a route, not a path or a sentence.
+    for bad in ["", "OpenCode Go", "../escape", "-leading", "a/b"] {
+        request
+            .env
+            .insert("ZERON_DEEPSEEK_PROVIDER".into(), bad.into());
+        assert!(
+            configuration(&request, dir.path(), "session").is_err(),
+            "{bad:?} was accepted as a provider route"
+        );
+    }
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_PROVIDER".into(), "opencode-go".into());
+    for bad in ["", "has space", "line\nbreak"] {
+        request.model = Some(bad.into());
+        assert!(
+            configuration(&request, dir.path(), "session").is_err(),
+            "{bad:?} was accepted as a model"
+        );
+    }
+}
+
+#[test]
 fn only_verified_official_models_and_efforts_are_accepted() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = request(dir.path());
