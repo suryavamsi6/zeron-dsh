@@ -39,7 +39,7 @@ install -m 755 "$ROOT/target/release/zeron" "$APP/Contents/MacOS/zeron"
 install -m 755 "$ROOT/target/release/zeron-engine" "$APP/Contents/MacOS/Zeron Engine"
 sed "s/__VERSION__/$VERSION/" "$ROOT/dist/macos/Info.plist" >"$APP/Contents/Info.plist"
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
-cp "$ROOT/crates/ui/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
+cp "$ROOT/assets/fonts/licenses/"* "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
 
 mkdir -p "$APP/Contents/Resources/licenses"
