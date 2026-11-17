@@ -37,6 +37,16 @@ pub fn install(host: &ScriptHost) {
             .map_err(|error| error.to_string())?;
         answer(engine::get().call("DshMutateSettings", params).await)
     });
+    // The routes' models, for the Providers page's Models section: the
+    // engine's own list, which already carries each model's route.
+    host.async_action("ListModels", |args| async move {
+        let harness = args
+            .field("harness")
+            .map(text)
+            .filter(|id| !id.is_empty())
+            .unwrap_or_else(|| "deepseek".to_string());
+        answer(engine::get().call("ListModels", json!({ "harness": harness })).await)
+    });
     host.async_action("DshChatgptStart", |_| async {
         answer(engine::get().call("DshChatgptStart", json!({})).await)
     });

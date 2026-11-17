@@ -87,7 +87,22 @@ fn only_verified_official_models_and_efforts_are_accepted() {
     request.model = Some("deepseek-chat".into());
     assert!(configuration(&request, dir.path(), "session").is_err());
     request.model = None;
-    request.reasoning = Some(ReasoningLevel::Minimal);
+    // Every level DSH's `reasoningEffort` names goes through; a model's own
+    // catalog is what narrows it (the picker offers that intersection).
+    for (level, wire) in [
+        (ReasoningLevel::Minimal, "minimal"),
+        (ReasoningLevel::Low, "low"),
+        (ReasoningLevel::Medium, "medium"),
+        (ReasoningLevel::High, "high"),
+        (ReasoningLevel::XHigh, "xhigh"),
+    ] {
+        request.reasoning = Some(level);
+        assert_eq!(
+            configuration(&request, dir.path(), "session").unwrap()["reasoningEffort"],
+            wire
+        );
+    }
+    request.reasoning = Some(ReasoningLevel::Ultra);
     assert!(configuration(&request, dir.path(), "session").is_err());
     request.reasoning = Some(ReasoningLevel::Max);
     assert_eq!(
