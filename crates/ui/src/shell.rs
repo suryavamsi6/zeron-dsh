@@ -49,6 +49,7 @@ use crate::settings::devices::DevicesPage;
 use crate::settings::files::{FilesSettingsEvent, FilesSettingsPage};
 use crate::settings::harnesses::HarnessesPage;
 use crate::settings::notifications::{NotificationsEvent, NotificationsPage};
+use crate::settings::plugins::PluginsPage;
 use crate::settings::shortcuts::{ShortcutsEvent, ShortcutsPage};
 use crate::settings::{
     self, CHAT_PANEL_MIN, ComposerSendBehavior, FILES_PANEL_MIN, JUMP_SLOTS, KeymapConfig,
@@ -636,6 +637,8 @@ pub enum SettingsSection {
     Notifications,
     Voice,
     Shortcuts,
+    /// The plugins the engine reports, each with its own manifest's settings.
+    Plugins,
     /// Composer and conversation behavior plus thread naming.
     #[default]
     General,
@@ -645,13 +648,14 @@ pub enum SettingsSection {
 
 impl SettingsSection {
     /// Sections shown in Settings. `Agents` is a legacy Accounts route alias.
-    pub const ALL: [SettingsSection; 12] = [
+    pub const ALL: [SettingsSection; 13] = [
         SettingsSection::General,
         SettingsSection::Appearance,
         SettingsSection::Notifications,
         SettingsSection::Voice,
         SettingsSection::Shortcuts,
         SettingsSection::Harnesses,
+        SettingsSection::Plugins,
         SettingsSection::Devices,
         SettingsSection::Cloud,
         SettingsSection::Billing,
@@ -710,6 +714,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "notifications",
             SettingsSection::Voice => "voice",
             SettingsSection::Shortcuts => "shortcuts",
+            SettingsSection::Plugins => "plugins",
             SettingsSection::General => "general",
             SettingsSection::Appshots => "appshots",
             SettingsSection::Archived => "archived",
@@ -729,6 +734,7 @@ impl SettingsSection {
             "notifications" => SettingsSection::Notifications,
             "voice" => SettingsSection::Voice,
             "shortcuts" => SettingsSection::Shortcuts,
+            "plugins" => SettingsSection::Plugins,
             "general" | "conversations" => SettingsSection::General,
             "appshots" => SettingsSection::Appshots,
             "archived" => SettingsSection::Archived,
@@ -756,6 +762,7 @@ impl SettingsSection {
             SettingsSection::Notifications => "Notifications",
             SettingsSection::Voice => "Voice",
             SettingsSection::Shortcuts => "Shortcuts",
+            SettingsSection::Plugins => "Plugins",
             SettingsSection::General => "General",
             SettingsSection::Appshots => "Appshots",
             SettingsSection::Archived => "Archived sessions",
@@ -775,6 +782,7 @@ impl SettingsSection {
             SettingsSection::Notifications => icons::BELL,
             SettingsSection::Voice => icons::MICROPHONE,
             SettingsSection::Shortcuts => icons::KEYBOARD,
+            SettingsSection::Plugins => icons::MAGIC_STICK_3,
             SettingsSection::General => icons::SETTINGS,
             SettingsSection::Appshots => icons::MONITOR,
             SettingsSection::Archived => icons::ARCHIVE_MINIMALISTIC,
@@ -2227,6 +2235,7 @@ pub struct Shell {
     billing_page: Option<Entity<BillingPage>>,
     archived_page: Option<Entity<ArchivedPage>>,
     appearance_page: Option<Entity<AppearancePage>>,
+    plugins_page: Option<Entity<PluginsPage>>,
     files_settings_page: Option<Entity<FilesSettingsPage>>,
     notifications_page: Option<Entity<NotificationsPage>>,
     shortcuts_page: Option<Entity<ShortcutsPage>>,
@@ -2794,6 +2803,7 @@ impl Shell {
             billing_page: None,
             archived_page: None,
             appearance_page: None,
+            plugins_page: None,
             files_settings_page: None,
             notifications_page: None,
             shortcuts_page: None,
@@ -5702,6 +5712,12 @@ impl Shell {
         {
             self.cloud_page = None;
         }
+        // Plugins too: a visit reads the engine's list afresh.
+        if section == SettingsSection::Plugins
+            && self.route != Route::Settings(SettingsSection::Plugins)
+        {
+            self.plugins_page = None;
+        }
         // Billing too: a fresh read per visit (it then follows open Stripe
         // pages until they land).
         if section == SettingsSection::Billing
@@ -5764,6 +5780,10 @@ impl Shell {
                 .archived_page
                 .as_ref()
                 .is_some_and(|page| page.read(cx).has_escape_surface()),
+            SettingsSection::Plugins => self
+                .plugins_page
+                .as_ref()
+                .is_some_and(|page| page.read(cx).has_escape_surface()),
             _ => false,
         }
     }
@@ -5802,6 +5822,10 @@ impl Shell {
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             SettingsSection::Archived => self
                 .archived_page
+                .as_ref()
+                .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
+            SettingsSection::Plugins => self
+                .plugins_page
                 .as_ref()
                 .is_some_and(|page| page.update(cx, |page, cx| page.dismiss_on_escape(cx))),
             _ => false,
@@ -6178,6 +6202,17 @@ impl Shell {
                         });
                         page.clone().into_any_element()
                     }
+                    None => Empty.into_any_element(),
+                }
+            }
+            SettingsSection::Plugins => {
+                if self.plugins_page.is_none() {
+                    let state = self.state.clone();
+                    let data_dir = self.data_dir.clone();
+                    self.plugins_page = Some(cx.new(|cx| PluginsPage::new(state, data_dir, cx)));
+                }
+                match &self.plugins_page {
+                    Some(page) => page.clone().into_any_element(),
                     None => Empty.into_any_element(),
                 }
             }

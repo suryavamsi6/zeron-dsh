@@ -28,6 +28,7 @@ pub mod devices;
 pub mod files;
 pub mod harnesses;
 pub mod notifications;
+pub mod plugins;
 pub mod provider_cards;
 pub mod search;
 pub mod shortcuts;
@@ -742,6 +743,16 @@ pub fn remove_new_thread_composer_background(cx: &mut App) -> Result<(), String>
     Ok(())
 }
 
+/// Which plugin draws a new chat's background (`#new-chat-background`), if
+/// any: the app's own choice, beside the wallpaper image.
+pub fn set_plugin_wallpaper(plugin: Option<String>, cx: &mut App) {
+    if update(SavePolicy::Immediate, cx, |settings| {
+        settings.plugin_wallpaper = plugin;
+    }) {
+        cx.refresh_windows();
+    }
+}
+
 pub fn set_new_thread_background_effect(effect: NewThreadBackgroundEffect, cx: &mut App) {
     if update(SavePolicy::Immediate, cx, |settings| {
         settings.new_thread_background_effect = effect;
@@ -1264,6 +1275,11 @@ pub struct UiSettings {
     pub wallpaper_color: Option<zeron_theme::Color>,
     /// Non-destructive treatment composited inside the artwork's fade mask.
     pub new_thread_background_effect: NewThreadBackgroundEffect,
+    /// Which installed plugin draws a new chat's background (it replaces
+    /// `#new-chat-background`), if any. The app's own choice, kept here
+    /// beside the wallpaper image it stands in place of.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_wallpaper: Option<String>,
     /// Snap animations to rest. Defaults to following the OS.
     pub reduce_motion: crate::motion::ReduceMotion,
     /// Also snap animations while the main window is not focused.
@@ -1374,6 +1390,7 @@ impl Default for UiSettings {
             wallpaper_theme_colors: false,
             wallpaper_color: None,
             new_thread_background_effect: NewThreadBackgroundEffect::None,
+            plugin_wallpaper: None,
             reduce_motion: crate::motion::ReduceMotion::System,
             pause_animations_in_background: false,
             smooth_scrolling: true,
@@ -2212,6 +2229,7 @@ impl UiSettings {
             wallpaper_theme_colors,
             wallpaper_color,
             new_thread_background_effect,
+            plugin_wallpaper,
             reduce_motion,
             pause_animations_in_background,
             smooth_scrolling,
@@ -3440,6 +3458,7 @@ mod tests {
             smooth_scrolling: false,
             legacy_accent_color: None,
             onboarding_completed: false,
+            plugin_wallpaper: None,
         };
         settings.save(dir.path()).unwrap();
         let json = std::fs::read_to_string(UiSettings::path(dir.path())).unwrap();

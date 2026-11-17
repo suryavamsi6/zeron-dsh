@@ -367,6 +367,7 @@ fn page_terms(section: SettingsSection) -> &'static str {
         SettingsSection::Notifications => "alerts sounds banners",
         SettingsSection::Voice => "speech dictation microphone codex",
         SettingsSection::Shortcuts => "keyboard keybindings hotkeys keys",
+        SettingsSection::Plugins => "plugins extensions add-ons built-in enable disable settings",
         SettingsSection::Harnesses | SettingsSection::Agents => {
             "harnesses agents cli claude code codex cursor devin grok hermes pi opencode \
              antigravity muse install enable disable update policy accounts sign in login"

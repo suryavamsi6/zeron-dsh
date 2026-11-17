@@ -27,6 +27,7 @@ pub mod package;
 pub mod reviews;
 pub mod scaffold;
 pub mod scan;
+pub mod settings;
 pub mod service;
 pub mod signing;
 pub mod snapshot;
