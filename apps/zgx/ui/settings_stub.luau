@@ -187,6 +187,14 @@ local answers: { [string]: (arg: any) -> any } = {
 			},
 		})
 	end,
+	-- The default model's route, for the "In use" marker.
+	["DshSettings"] = function()
+		return settled({
+			namespaces = {
+				{ ns = "agent-default-model", value = { provider = "opencode-go", model = "gpt-6-luna" } },
+			},
+		})
+	end,
 	-- The routes' models, for the Models section's counts.
 	["ListModels"] = function()
 		return settled({

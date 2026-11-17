@@ -1015,6 +1015,12 @@ test("Providers offers each route's models to switch", function()
 	expect(shows(app, PAGE, "Serves 1 model")).to_be(true)
 end)
 
+-- The route DSH runs by default says so, as the upstream screen marks it.
+test("Providers marks the route in use", function()
+	local app = open("Providers")
+	expect(shows(app, PAGE, "In use")).to_be(true)
+end)
+
 -- A saved key is what a visit is usually about: its row moves to the top,
 -- at once, without a reload.
 test("Providers puts the connected routes first", function()

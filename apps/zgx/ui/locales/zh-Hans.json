@@ -1689,7 +1689,8 @@
           "not_completed": "登录未完成。",
           "try_again": "重试",
           "failed": "登录未能开始：{says}"
-        }
+        },
+        "in_use": "使用中"
       }
     },
     "devices": {

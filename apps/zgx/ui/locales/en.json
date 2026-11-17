@@ -1533,7 +1533,8 @@
           "not_completed": "The sign-in wasn't completed.",
           "try_again": "Try again",
           "failed": "The sign-in didn't start: {says}"
-        }
+        },
+        "in_use": "In use"
       },
       "agent_settings": "Agent settings",
       "agents": {

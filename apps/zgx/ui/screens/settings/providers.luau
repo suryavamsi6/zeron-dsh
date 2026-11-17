@@ -160,8 +160,12 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 		label = item.name,
 		description = ui.t("settings.providers.routes.key.description", { ref = ref }),
 		badge = ui.show(function(): boolean
-			return configured_in(creds:get(), ref)
-		end, ds.Badge { ui.t("settings.providers.routes.key.configured"), tone = "success", size = "sm" }),
+			return item.in_use == true or configured_in(creds:get(), ref)
+		end, ds.Badge {
+			if item.in_use == true then ui.t("settings.providers.routes.in_use") else ui.t("settings.providers.routes.key.configured"),
+			tone = if item.in_use == true then "accent" else "success",
+			size = "sm",
+		}),
 		detail = function(): string?
 			return note:get()
 		end,
@@ -398,6 +402,18 @@ local function load(): any
 	if #refs > 0 then
 		creds = host.call("DshCredentials", { refs = refs }):await()
 	end
+	-- The route DSH runs by default ("In use", as the upstream screen says).
+	local in_use: string? = nil
+	local ok_settings, settings = pcall(function(): any
+		return host.call("DshSettings", {}):await()
+	end)
+	if ok_settings and type(settings) == "table" and type(settings.namespaces) == "table" then
+		for _, entry in settings.namespaces do
+			if type(entry) == "table" and entry.ns == "agent-default-model" and type(entry.value) == "table" then
+				in_use = if type(entry.value.provider) == "string" then entry.value.provider else nil
+			end
+		end
+	end
 	-- What each route serves, for the Models section's counts.
 	local counts: { [string]: number } = {}
 	local listed = host.call("ListModels", { harness = "deepseek" }):await()
@@ -420,11 +436,12 @@ local function load(): any
 	end
 	for i, route in routes do
 		route.order = i
+		route.in_use = route.id == in_use
 		if route.chatgpt then
 			route.authorized = authorized
 		end
 	end
-	return { routes = routes, creds = creds, counts = counts }
+	return { routes = routes, creds = creds, counts = counts, in_use = in_use }
 end
 
 -- A route's models, on or off: what the composer's picker offers.
