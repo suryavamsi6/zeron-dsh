@@ -254,6 +254,8 @@ impl Layouter<'_, '_> {
                     .natural(),
             ),
             NodeKind::Grid { .. }
+            | NodeKind::Frame(_)
+            | NodeKind::Image(_)
             | NodeKind::Table(_)
             | NodeKind::Rule
             | NodeKind::Chart(_)
@@ -281,6 +283,20 @@ impl Layouter<'_, '_> {
         let key = node_key(node, path);
         match &node.kind {
             NodeKind::Stack(stack) => self.stack(stack, &key, path, x, y, width),
+            // (A plugin's box and its pictures are drawn from the plugin's
+            // folder, which nothing on this side has: a box lays its children
+            // out in order and a picture draws nothing.)
+            NodeKind::Frame(frame) => {
+                let mut top = y;
+                for (ix, child) in frame.children.iter().enumerate() {
+                    if ix > 0 {
+                        top += frame.gap;
+                    }
+                    top += self.place(child, &format!("{path}.{ix}"), x, top, width);
+                }
+                (top - y).max(0.0)
+            }
+            NodeKind::Image(_) => 0.0,
             NodeKind::Grid {
                 columns,
                 gap,
