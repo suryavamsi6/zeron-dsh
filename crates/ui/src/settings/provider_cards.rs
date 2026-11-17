@@ -271,8 +271,11 @@ impl ProviderCards {
             card.credentials = Loadable::Loading;
             card.account = Loadable::Loading;
             card.chatgpt = Loadable::Loading;
-            card.models =
-                Loadable::Ready(dsh_providers::models_in_ns(settings, &provider.settings_ns));
+            card.models = Loadable::Ready(dsh_providers::models_for_route(
+                settings,
+                &provider.settings_ns,
+                &provider.id,
+            ));
         }
         let target = self.target_device.clone();
         let credential_ref = provider.credential_ref().map(str::to_string);
@@ -873,9 +876,10 @@ impl ProviderCards {
                         let catalog = page.catalog.ready().cloned().unwrap_or_default();
                         for provider in &catalog {
                             if let Some(card) = page.cards.get_mut(&provider.id) {
-                                card.models = Loadable::Ready(dsh_providers::models_in_ns(
+                                card.models = Loadable::Ready(dsh_providers::models_for_route(
                                     &value,
                                     &provider.settings_ns,
+                                    &provider.id,
                                 ));
                             }
                         }
@@ -1343,19 +1347,24 @@ impl ProviderCards {
                         }),
                 );
             }
+            detail = detail.child(widgets::details_label(theme, "Models")).child(rows);
+        }
+
+        // The refresh control stands outside the model list: an empty or
+        // failed read is exactly when a card needs it to recover.
+        {
             let pid = id.clone();
-            detail = detail
-                .child(widgets::details_label(theme, "Models"))
-                .child(rows)
-                .child(
-                    widgets::ghost_action(theme)
-                        .id(format!("provider-models-refresh-{}", pid.as_str()))
-                        .tooltip(widgets::text_tooltip(TestMode::Live.detail()))
-                        .on_click(cx.listener(move |page, _, _, cx| {
-                            page.refresh_models(&pid, cx);
-                        }))
-                        .child("Refresh models from provider (live — billable)"),
-                );
+            let selector = format!("provider-models-refresh-{pid}");
+            detail = detail.child(
+                widgets::ghost_action(theme)
+                    .id(format!("provider-models-refresh-{}", pid.as_str()))
+                    .debug_selector(move || selector.clone())
+                    .tooltip(widgets::text_tooltip(TestMode::Live.detail()))
+                    .on_click(cx.listener(move |page, _, _, cx| {
+                        page.refresh_models(&pid, cx);
+                    }))
+                    .child("Refresh models from provider (live — billable)"),
+            );
         }
 
         if expanded {
@@ -1383,8 +1392,11 @@ impl ProviderCards {
         for provider in &catalog {
             let card = self.card(&provider.id, cx);
             card.credentials = Loadable::Ready(serde_json::json!({}));
-            card.models =
-                Loadable::Ready(dsh_providers::models_in_ns(&settings, &provider.settings_ns));
+            card.models = Loadable::Ready(dsh_providers::models_for_route(
+                &settings,
+                &provider.settings_ns,
+                &provider.id,
+            ));
         }
         self.usage.update(cx, |panel, cx| panel.seed_fixture(cx));
         cx.notify();
@@ -1570,10 +1582,11 @@ mod layout_tests {
     }
 
     /// A catalog of dozens of routes must not cost dozens of full cards per
-    /// frame: every card starts collapsed and favorites are page state, so a
-    /// draw builds one short row per route. This prints the measured cost and
-    /// fails only on a gross regression (a debug build draws far slower than
-    /// the release app).
+    /// frame: every card starts collapsed, so a draw builds one short row per
+    /// route — the route's identity lays out while none of its detail does.
+    /// Expanding a card is what adds its detail. The assertion is the
+    /// rendered structure itself, never a clock: wall-clock samples cannot
+    /// prove what a draw built.
     #[gpui::test]
     fn a_full_catalog_page_draws_without_building_every_card(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
@@ -1609,15 +1622,31 @@ mod layout_tests {
         });
         cx.simulate_resize(size(px(1100.0), px(760.0)));
         let _ = cx.update(|window, cx| window.draw(cx).clear());
-        let frames = 20;
-        let started = std::time::Instant::now();
-        for _ in 0..frames {
-            let _ = cx.update(|window, cx| window.draw(cx).clear());
+        // Every route's collapsed row lays out — the list is complete — while
+        // no card's detail exists anywhere in the frame.
+        for selector in [
+            "provider-identity-route-0",
+            "provider-identity-route-30",
+            "provider-identity-route-59",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} draws: collapsing hides detail, never a route"
+            );
         }
-        let per_frame = started.elapsed() / frames;
-        // The same page with every route expanded is the old shape of the
-        // render: one full card per route, every frame. Measured here so the
-        // difference is a number, not a claim.
+        for selector in [
+            "provider-models-refresh-route-0",
+            "provider-models-refresh-route-30",
+            "provider-models-refresh-route-59",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_none(),
+                "{selector} is detail: a collapsed card does not build it"
+            );
+        }
+
+        // Expanding every card is what builds the detail — the collapse,
+        // not the clock, is what kept it out of the first frame.
         let cards = page.read_with(cx, |page, _| page.0.clone());
         cards.update(cx, |page, _| {
             for card in page.cards.values_mut() {
@@ -1625,44 +1654,16 @@ mod layout_tests {
             }
         });
         let _ = cx.update(|window, cx| window.draw(cx).clear());
-        let started = std::time::Instant::now();
-        for _ in 0..frames {
-            let _ = cx.update(|window, cx| window.draw(cx).clear());
+        for selector in [
+            "provider-models-refresh-route-0",
+            "provider-models-refresh-route-30",
+            "provider-models-refresh-route-59",
+        ] {
+            assert!(
+                cx.debug_bounds(selector).is_some(),
+                "{selector} lays out once the card is expanded"
+            );
         }
-        let expanded = started.elapsed() / frames;
-        // What the render path used to do per model row, measured on the same
-        // store: reading the composer defaults from disk. One of these ran per
-        // visible model row on every frame before favorites became page state.
-        let dir = tempfile::tempdir().unwrap();
-        let defaults = crate::settings::composer::ComposerDefaults::default();
-        defaults.save(dir.path()).unwrap();
-        let reads = 200;
-        let started = std::time::Instant::now();
-        for _ in 0..reads {
-            let _ = crate::settings::composer::ComposerDefaults::load(dir.path());
-        }
-        let per_read = started.elapsed() / reads;
-        eprintln!(
-            "composer defaults: {:.3} ms per disk read; a page of 60 routes with two models each read {:.1} ms per frame before the cache",
-            per_read.as_secs_f64() * 1000.0,
-            per_read.as_secs_f64() * 1000.0 * 120.0
-        );
-        eprintln!(
-            "providers page, 60 routes: {:.2} ms per draw collapsed, {:.2} ms per draw expanded",
-            per_frame.as_secs_f64() * 1000.0,
-            expanded.as_secs_f64() * 1000.0
-        );
-        assert!(
-            expanded > per_frame,
-            "collapsing is what keeps a large catalog cheap: {per_frame:?} vs {expanded:?}"
-        );
-        assert!(
-            per_frame.as_millis() < 100,
-            "a page of collapsed route rows draws well under a frame budget: {per_frame:?}"
-        );
-        // The identity of the sixtieth route still lays out, so the list is
-        // complete: collapsing hides detail, never a route.
-        assert!(cx.debug_bounds("provider-identity-route-59").is_some());
     }
 
     /// The same card at a wide width keeps its two-column shape.

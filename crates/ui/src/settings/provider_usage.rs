@@ -139,12 +139,12 @@ impl ProviderUsage {
         self.sessions = Loadable::Ready(vec![SessionUsage {
             session_id: "ses_fixture_0001".into(),
             updated_at: Some(1_700_000_000_000),
-            totals: dsh_usage::TokenTotals {
+            totals: Some(dsh_usage::TokenTotals {
                 uncached_input: 412_000,
                 output: 18_400,
                 cache_read: 1_950_000,
                 cache_write: 42_000,
-            },
+            }),
             context: dsh_usage::ContextPressure {
                 pressure_tokens: Some(186_000),
                 projected_tokens: Some(188_500),
@@ -161,11 +161,18 @@ impl ProviderUsage {
         };
         let mut rows = Vec::new();
         let mut total = 0u64;
+        let mut unknown = 0usize;
         for session in sessions {
-            total += session.totals.total();
+            match &session.totals {
+                Some(totals) => total += totals.total(),
+                None => unknown += 1,
+            }
             let short: String = session.session_id.chars().take(14).collect();
-            let detail = dsh_usage::usage_summary(session)
-                .unwrap_or_else(|| "no usage recorded yet (a blank or unrun session)".into());
+            let detail = match &session.totals {
+                Some(_) => dsh_usage::usage_summary(session)
+                    .unwrap_or_else(|| "no usage recorded yet (a blank or unrun session)".into()),
+                None => "usage unknown: the summary carried no metered sample".into(),
+            };
             rows.push(
                 div()
                     .id(format!("usage-row-{}", session.session_id))
@@ -211,7 +218,16 @@ impl ProviderUsage {
                             .flex_1()
                             .text_size(crate::typography::ui_rems(12.0))
                             .text_color(theme.text_muted)
-                            .child(format!("{} tokens", dsh_usage::token_label(total))),
+                            .child(if unknown == 0 {
+                                format!("{} tokens", dsh_usage::token_label(total))
+                            } else {
+                                format!(
+                                    "{} tokens counted, incomplete — {} session{} carried no metered sample",
+                                    dsh_usage::token_label(total),
+                                    unknown,
+                                    if unknown == 1 { "" } else { "s" }
+                                )
+                            }),
                     )
                     .into_any_element(),
             );

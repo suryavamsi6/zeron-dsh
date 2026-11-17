@@ -183,14 +183,21 @@ pub fn settings_namespaces(value: &Value) -> Vec<(&str, &Value)> {
         .collect()
 }
 
-/// The models a settings namespace carries, read offline from the store
-/// (no provider call): the first array of `{id, ...}` objects under any
-/// top-level key of the ns value.
-pub fn models_in_ns(settings: &Value, ns: &str) -> Vec<ModelChoice> {
+/// The models a route offers, read offline from the store (no provider call).
+/// The route's own profile wins: pi-ai keeps each route at
+/// `providers.<route>`, and a hand-declared route's models are its
+/// `models` field — the only place they exist. When the profile has no
+/// `models` (a catalog route that lists its models live instead), the first
+/// array of `{id, ...}` objects under any top-level key of the ns value is
+/// the namespace-wide list DSH's card layout stores there.
+pub fn models_for_route(settings: &Value, ns: &str, route: &str) -> Vec<ModelChoice> {
     let Some((_, value)) = settings_namespaces(settings).into_iter().find(|(name, _)| *name == ns)
     else {
         return Vec::new();
     };
+    if let Some(declared) = value["providers"][route].get("models") {
+        return parse_models(declared);
+    }
     value
         .as_object()
         .into_iter()
@@ -303,10 +310,15 @@ pub const PI_AI_NS: &str = "llm-pi-ai";
 
 /// A route id pi-ai accepts both as a settings key and as the stem of a
 /// credential reference: lower-case segments joined by single dashes, starting
-/// with a letter. DSH's own custom-provider card enforces the same grammar
-/// before it writes, and the credential seam reinforces it: the derived ref is
-/// upper-cased, so a digit-leading id would name a ref the store refuses.
+/// with a letter, within the runtime's 64-byte route limit
+/// (`deepseek::configuration` refuses a longer route before a run). DSH's own
+/// custom-provider card enforces the same grammar before it writes, and the
+/// credential seam reinforces it: the derived ref is upper-cased, so a
+/// digit-leading id would name a ref the store refuses.
 pub fn route_id_valid(id: &str) -> bool {
+    if id.is_empty() || id.len() > 64 {
+        return false;
+    }
     let mut segments = id.split('-');
     let first = segments.next().unwrap_or_default();
     let mut chars = first.chars();
@@ -328,9 +340,13 @@ pub fn key_ref_for(route: &str) -> String {    let stem: String = route
     format!("{stem}_API_KEY")
 }
 
-/// Whether `value` is an absolute http(s) endpoint prefix.
+/// Whether `value` parses as an absolute http(s) endpoint with a host. The
+/// runtime hands `baseURL` to a URL parser, so a bare `https://` or a broken
+/// authority must be refused here rather than persisted.
 pub fn http_url(value: &str) -> bool {
-    value.starts_with("http://") || value.starts_with("https://")
+    reqwest::Url::parse(value)
+        .map(|url| matches!(url.scheme(), "http" | "https") && url.host().is_some())
+        .unwrap_or(false)
 }
 
 /// Read a typed token capacity, the spelling DSH's Models page accepts: a
@@ -363,6 +379,17 @@ pub fn key_ref_valid(value: &str) -> bool {
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `value` is a model id the runtime will run: the grammar
+/// `deepseek::configuration` enforces for a non-default route — ASCII
+/// alphanumerics and `- _ . : /`, at most 128 bytes. A declaration that wrote
+/// a looser id would persist a route every run refuses.
+pub fn model_id_valid(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':' | b'/'))
 }
 
 /// One model of a hand-declared route (`models[]` in pi-ai's config).
@@ -498,13 +525,16 @@ impl DeclarationError {
     pub fn message(&self) -> String {
         match self {
             Self::RouteId(id) => format!(
-                "{id} is not a route id: lower-case segments joined by dashes, starting with a letter (acme-gateway)."
+                "{id} is not a route id: lower-case segments joined by dashes, starting with a letter, at most 64 bytes (acme-gateway)."
             ),
             Self::RouteTaken(id) => format!("{id} is already a route on this device."),
             Self::BaseUrl(url) => format!("{url} is not an http(s) endpoint."),
             Self::Api(api) => format!("{api} is not a protocol this adapter serves."),
             Self::NoModels => "a declared route needs at least one model: it has no catalog to inherit.".into(),
-            Self::ModelId(index) => format!("model {} needs an id.", index + 1),
+            Self::ModelId(index) => format!(
+                "model {} needs an id the runtime accepts: ASCII letters, digits and - _ . : /, at most 128 bytes.",
+                index + 1
+            ),
             Self::DuplicateModel(index) => format!("model {} repeats an id another row already uses.", index + 1),
             Self::Capacity(index, field) => {
                 format!("model {}: {field} must be a whole number of tokens greater than zero.", index + 1)
@@ -557,8 +587,8 @@ pub fn validate(route: &DeclaredRoute, taken: &[String]) -> Result<(), Declarati
     }
     let mut seen: Vec<&str> = Vec::new();
     for (index, model) in route.models.iter().enumerate() {
-        let id = model.id.trim();
-        if id.is_empty() || id != model.id {
+        let id = model.id.as_str();
+        if !model_id_valid(id) {
             return Err(DeclarationError::ModelId(index));
         }
         if seen.contains(&id) {
@@ -765,14 +795,36 @@ mod tests {
     #[test]
     fn settings_namespaces_and_models_within_one_read_offline() {
         let settings = json!({ "namespaces": [
-            { "ns": "llm-pi-ai", "value": { "providers": {}, "models": [{ "id": "gpt-5", "name": "GPT-5" }] } },
+            { "ns": "llm-pi-ai", "value": {
+                "providers": {
+                    "acme-gateway": {
+                        "api": "openai-completions",
+                        "models": [{ "id": "acme-flash", "name": "Acme Flash" }, { "id": "acme-mini" }],
+                    },
+                    "opencode-go": { "api": "openai-completions" },
+                },
+                "models": [{ "id": "gpt-5", "name": "GPT-5" }],
+            } },
             { "ns": "agent-default-model", "value": { "provider": "opencode-go", "model": "gpt-5" } },
         ] });
         let namespaces = settings_namespaces(&settings);
         assert_eq!(namespaces.len(), 2);
-        let models = models_in_ns(&settings, "llm-pi-ai");
-        assert_eq!(models, vec![ModelChoice { id: "gpt-5".into(), label: "GPT-5".into() }]);
-        assert!(models_in_ns(&settings, "missing").is_empty());
+        let declared = models_for_route(&settings, "llm-pi-ai", "acme-gateway");
+        assert_eq!(
+            declared,
+            vec![
+                ModelChoice { id: "acme-flash".into(), label: "Acme Flash".into() },
+                ModelChoice { id: "acme-mini".into(), label: "acme-mini".into() },
+            ],
+            "a declared route's models live at providers.<route>.models"
+        );
+        let catalog = models_for_route(&settings, "llm-pi-ai", "opencode-go");
+        assert_eq!(
+            catalog,
+            vec![ModelChoice { id: "gpt-5".into(), label: "GPT-5".into() }],
+            "a route without its own models reads the namespace-wide list"
+        );
+        assert!(models_for_route(&settings, "missing", "acme-gateway").is_empty());
         assert_eq!(
             default_model_of(&settings).as_ref(),
             Some(&("opencode-go".to_string(), "gpt-5".to_string()))
@@ -855,7 +907,8 @@ mod tests {
         for valid in ["acme-gateway", "a", "route-2", "z9-x"] {
             assert!(route_id_valid(valid), "{valid} is route-shaped");
         }
-        for invalid in ["", "Acme", "acme_gateway", "-acme", "acme-", "acme--gateway", "9acme", "acme gateway"] {
+        let over_limit = format!("{}-x", "a".repeat(64));
+        for invalid in ["", "Acme", "acme_gateway", "-acme", "acme-", "acme--gateway", "9acme", "acme gateway", over_limit.as_str()] {
             assert!(!route_id_valid(invalid), "{invalid} is not route-shaped");
         }
         assert_eq!(key_ref_for("acme-gateway"), "ACME_GATEWAY_API_KEY");
@@ -863,8 +916,21 @@ mod tests {
         assert!(key_ref_valid("ACME_GATEWAY_API_KEY"));
         assert!(!key_ref_valid("llm-pi-ai/opencode-go"), "a record key is not an env ref");
         assert!(!key_ref_valid("9ACME"));
+        for valid in ["gpt-5", "deepseek.v4_flash", "vendor/model:free", "q3_8b.gguf"] {
+            assert!(model_id_valid(valid), "{valid} is a model id the runtime runs");
+        }
+        let too_long = "m".repeat(129);
+        for invalid in ["", "acme flash", " acme-flash", "m1 ", "m²", "a,b", too_long.as_str()] {
+            assert!(!model_id_valid(invalid), "{invalid} is not a model id the runtime runs");
+        }
+        assert!(model_id_valid(&"m".repeat(128)), "128 bytes is the runtime's limit");
         assert!(http_url("http://127.0.0.1:41999/v1") && http_url("https://x.test"));
-        assert!(!http_url("ftp://x.test") && !http_url("gateway.test/v1"));
+        // WHATWG special schemes skip extra slashes before the authority, so
+        // `http:///v1` is `http://v1/` — the parser the runtime uses accepts
+        // it. A bare scheme and a broken authority are what cannot parse.
+        for invalid in ["https://", "https://[invalid", "ftp://x.test", "gateway.test/v1"] {
+            assert!(!http_url(invalid), "{invalid} is not a parsed http(s) endpoint");
+        }
     }
 
     #[test]
@@ -948,6 +1014,20 @@ mod tests {
 
         route.models = vec![DeclaredModel { id: " acme-flash".into(), ..Default::default() }];
         assert_eq!(validate(&route, &[]), Err(DeclarationError::ModelId(0)));
+
+        route.models = vec![DeclaredModel { id: "acme flash".into(), ..Default::default() }];
+        assert_eq!(
+            validate(&route, &[]),
+            Err(DeclarationError::ModelId(0)),
+            "an id with a space passes the form but the runtime refuses it"
+        );
+
+        route.models = vec![DeclaredModel { id: "m".repeat(129), ..Default::default() }];
+        assert_eq!(
+            validate(&route, &[]),
+            Err(DeclarationError::ModelId(0)),
+            "an id past the runtime's 128-byte limit is refused at declaration"
+        );
 
         route.models = vec![
             DeclaredModel { id: "dup".into(), ..Default::default() },

@@ -45,8 +45,10 @@ pub struct SessionUsage {
     pub session_id: String,
     /// When the session last wrote, in milliseconds since the epoch.
     pub updated_at: Option<i64>,
-    /// The meter's cumulative totals; zero when no provider reported usage.
-    pub totals: TokenTotals,
+    /// The meter's cumulative totals: zero when no provider reported usage,
+    /// `None` when the answer carried no `tokenUsage` projection at all — a
+    /// persisted session need not have one, and that means unknown, not zero.
+    pub totals: Option<TokenTotals>,
     pub context: ContextPressure,
     /// Whether the value came from the list summary rather than an exact
     /// projection read, so the surface can say how fresh it is.
@@ -59,13 +61,16 @@ pub fn session_list_params() -> Value {
     json!({ "_request": {} })
 }
 
-/// The `session/projections` params for one session.
+/// The `session/projections` params for one session: a top-level `sessionId`,
+/// which the gateway translates into the `request` argument the Remote
+/// declares.
 pub fn projections_params(session_id: &str) -> Value {
-    json!({ "request": { "sessionId": session_id } })
+    json!({ "sessionId": session_id })
 }
 
 /// Parse `session/list`: the sessions DSH knows, with whatever usage the list
-/// summary carries.
+/// summary carries. A session without a `tokenUsage` projection keeps `None`
+/// totals — its usage is unknown, and an aggregate over it stays incomplete.
 pub fn parse_sessions(value: &Value) -> Vec<SessionUsage> {
     let items = value["items"].as_array().or_else(|| value.as_array());
     items
@@ -87,8 +92,9 @@ pub fn parse_sessions(value: &Value) -> Vec<SessionUsage> {
 
 /// Parse `session/projections`: the exact values at the session's current log
 /// cut. A missing session answers `null`; a deferred migration answers cache
-/// hints, which are still that session's own recorded values.
-pub fn parse_projections(value: &Value) -> Option<(TokenTotals, ContextPressure, bool)> {
+/// hints, which are still that session's own recorded values. `None` totals
+/// mean the projection held no `tokenUsage` — unknown, not zero.
+pub fn parse_projections(value: &Value) -> Option<(Option<TokenTotals>, ContextPressure, bool)> {
     let values = &value["values"];
     if !values.is_object() {
         return None;
@@ -98,15 +104,20 @@ pub fn parse_projections(value: &Value) -> Option<(TokenTotals, ContextPressure,
 }
 
 /// Read the four buckets out of a `tokenUsage` projection, which is either the
-/// view (the buckets themselves) or the stored state (`{totals, last}`).
-fn totals_of(usage: &Value) -> TokenTotals {
+/// view (the buckets themselves) or the stored state (`{totals, last}`). A
+/// projection that is absent or not an object is `None`: no reading, so no
+/// claim.
+fn totals_of(usage: &Value) -> Option<TokenTotals> {
+    if !usage.is_object() {
+        return None;
+    }
     let buckets = if usage["totals"].is_object() { &usage["totals"] } else { usage };
-    TokenTotals {
+    Some(TokenTotals {
         uncached_input: buckets["uncachedInputTokens"].as_u64().unwrap_or(0),
         output: buckets["outputTokens"].as_u64().unwrap_or(0),
         cache_read: buckets["cacheReadTokens"].as_u64().unwrap_or(0),
         cache_write: buckets["cacheWriteTokens"].as_u64().unwrap_or(0),
-    }
+    })
 }
 
 fn context_of(pressure: &Value) -> ContextPressure {
@@ -127,12 +138,13 @@ pub fn token_label(tokens: u64) -> String {
 }
 
 /// The one-line usage summary a session row shows, or `None` when the meter
-/// never recorded a sample for it (a blank session).
+/// has nothing to report: the session was never metered (a blank session) or
+/// its usage is unknown (`totals` unset).
 pub fn usage_summary(usage: &SessionUsage) -> Option<String> {
-    if usage.totals.is_zero() {
+    let totals = usage.totals?;
+    if totals.is_zero() {
         return None;
     }
-    let totals = usage.totals;
     let mut line = format!(
         "{} in, {} out",
         token_label(totals.uncached_input),
@@ -169,19 +181,29 @@ mod tests {
                 "contextPressure": { "pressureTokens": 18_000, "contextWindow": 1_000_000 },
             } } },
             { "sessionId": "ses_2", "blank": true },
+            { "sessionId": "ses_3", "projections": { "values": { "tokenUsage": {} } } },
             { "updatedAt": 1 },
         ] });
         let sessions = parse_sessions(&list);
-        assert_eq!(sessions.len(), 2, "an item without a session id is skipped: {sessions:?}");
+        assert_eq!(sessions.len(), 3, "an item without a session id is skipped: {sessions:?}");
         assert_eq!(sessions[0].session_id, "ses_1");
-        assert_eq!(sessions[0].totals.uncached_input, 1200);
-        assert_eq!(sessions[0].totals.cache_read, 20_000);
-        assert_eq!(sessions[0].totals.total(), 21_540);
+        let totals = sessions[0].totals.expect("a metered session reads its totals");
+        assert_eq!(totals.uncached_input, 1200);
+        assert_eq!(totals.cache_read, 20_000);
+        assert_eq!(totals.total(), 21_540);
         assert_eq!(sessions[0].context.pressure_tokens, Some(18_000));
         assert_eq!(sessions[0].context.context_window, Some(1_000_000));
         assert!(sessions[0].from_summary);
-        assert_eq!(sessions[1].totals, TokenTotals::default(), "a session with no sample reads as zero");
+        assert_eq!(
+            sessions[1].totals, None,
+            "a persisted session with no projection cache is unknown, not zero"
+        );
         assert!(usage_summary(&sessions[1]).is_none());
+        assert_eq!(
+            sessions[2].totals,
+            Some(TokenTotals::default()),
+            "an empty tokenUsage object is a real reading of zero"
+        );
         assert!(parse_sessions(&json!({})).is_empty());
     }
 
@@ -192,7 +214,11 @@ mod tests {
             "contextPressure": { "projectedTokens": 900 },
         } });
         let (totals, context, from_summary) = parse_projections(&exact).unwrap();
-        assert_eq!(totals.total(), 14, "the stored state's totals are read, not its `last` sample");
+        assert_eq!(
+            totals.expect("the exact read carries totals").total(),
+            14,
+            "the stored state's totals are read, not its `last` sample"
+        );
         assert_eq!(context.projected_tokens, Some(900));
         assert_eq!(context.pressure_tokens, None);
         assert!(!from_summary);
@@ -201,18 +227,36 @@ mod tests {
             "tokenUsage": { "uncachedInputTokens": 1, "outputTokens": 2, "cacheReadTokens": 3, "cacheWriteTokens": 4 },
         } });
         let (totals, _, from_summary) = parse_projections(&hints).unwrap();
-        assert_eq!(totals.total(), 10);
+        assert_eq!(totals.expect("cache hints carry totals").total(), 10);
         assert!(from_summary, "cache hints are the stored values, and say so");
+
+        let no_usage = json!({ "kind": "sequenced", "values": { "contextPressure": {} } });
+        let (totals, _, _) = parse_projections(&no_usage).unwrap();
+        assert_eq!(totals, None, "a projection without tokenUsage is unknown, not zero");
 
         assert!(parse_projections(&Value::Null).is_none(), "a missing session answers null");
     }
 
     #[test]
-    fn the_params_use_the_argument_names_the_gateway_validates() {
-        assert_eq!(session_list_params(), json!({ "_request": {} }));
+    fn the_params_survive_the_gateways_translation() {
+        let origin = "http://127.0.0.1:49152";
+        let (call, args) =
+            crate::dsh_gateway::translate(zeron_rpc::methods::DSH_SESSIONS, &session_list_params(), origin)
+                .unwrap();
+        assert_eq!(call, "session/list");
+        assert_eq!(args, json!({ "_request": {} }));
+
+        let (call, args) = crate::dsh_gateway::translate(
+            zeron_rpc::methods::DSH_PROJECTIONS,
+            &projections_params("ses_1"),
+            origin,
+        )
+        .unwrap();
+        assert_eq!(call, "session/projections");
         assert_eq!(
-            projections_params("ses_1"),
-            json!({ "request": { "sessionId": "ses_1" } })
+            args,
+            json!({ "request": { "sessionId": "ses_1" } }),
+            "the translator takes a top-level sessionId and wraps it itself"
         );
     }
 
@@ -224,7 +268,7 @@ mod tests {
         let usage = SessionUsage {
             session_id: "ses_1".into(),
             updated_at: Some(0),
-            totals: TokenTotals { uncached_input: 1_200, output: 340, cache_read: 20_000, cache_write: 0 },
+            totals: Some(TokenTotals { uncached_input: 1_200, output: 340, cache_read: 20_000, cache_write: 0 }),
             context: ContextPressure { pressure_tokens: Some(18_000), projected_tokens: None, context_window: Some(1_000_000) },
             from_summary: true,
         };

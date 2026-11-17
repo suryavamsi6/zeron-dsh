@@ -331,7 +331,7 @@ impl ProviderDeclaration {
         if !dsh_providers::route_id_valid(&id) {
             return Some((
                 false,
-                "Lower-case segments joined by dashes, starting with a letter: acme-gateway.".into(),
+                "Lower-case segments joined by dashes, starting with a letter, at most 64 bytes: acme-gateway.".into(),
             ));
         }
         if self.taken.iter().any(|taken| taken == &id) {
