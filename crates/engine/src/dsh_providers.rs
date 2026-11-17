@@ -129,9 +129,10 @@ pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
                 .and_then(|v| v.as_str())
                 .or_else(|| entry["apiKeyEnv"].as_str())
                 .map(str::to_string);
-            let chatgpt = entry["nativeAuth"]["oauth"].as_bool() == Some(true)
-                || entry["auth"].as_str() == Some("chatgpt")
-                || id.contains("chatgpt");
+            // The ChatGPT subscription only — not every route that *can* sign
+            // in through OAuth. A grant on this one must not make the others
+            // look configured.
+            let chatgpt = id == "openai" || id.starts_with("zeron-chatgpt");
             let account = !chatgpt
                 && (entry["account"].as_bool() == Some(true)
                     || entry["auth"].as_str() == Some("account")
