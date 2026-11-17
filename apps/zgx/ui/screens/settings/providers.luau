@@ -170,24 +170,6 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 				end,
 				on_click = save,
 			},
-			ds.Button {
-				ui.t("settings.providers.routes.key.save"),
-				size = "sm",
-				busy = saving,
-				disabled = function(): boolean
-					return remote() or saving:get() or key:get() == ""
-				end,
-				on_click = save,
-			},
-			ds.Button {
-				ui.t("settings.providers.routes.key.save"),
-				size = "sm",
-				busy = saving,
-				disabled = function(): boolean
-					return remote() or saving:get() or key:get() == ""
-				end,
-				on_click = save,
-			},
 		},
 	}
 end
