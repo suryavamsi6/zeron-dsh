@@ -32,13 +32,18 @@ pub fn older_engine(target: &str, method: &str, error: RpcError) -> RpcError {
         methods::DECIDE_PLUGIN => said.contains("only this device's own window can do that"),
         // Older engines didn't know the method, or the install's `upload`.
         methods::STAGE_PLUGIN_PACKAGE => {
-            matches!(error, RpcError::UnknownMethod(_)) || said.to_ascii_lowercase().contains("unknown method")
+            matches!(error, RpcError::UnknownMethod(_))
+                || said.to_ascii_lowercase().contains("unknown method")
         }
         methods::INSTALL_PLUGIN => said.contains("Give a package file (`path`) or a link (`url`)"),
         _ => false,
     };
     if older {
-        tracing::info!(device = target, method, "plugins: device's engine predates remote approvals: {said}");
+        tracing::info!(
+            device = target,
+            method,
+            "plugins: device's engine predates remote approvals: {said}"
+        );
         RpcError::Failed(too_old())
     } else {
         error
@@ -53,19 +58,47 @@ mod tests {
     #[test]
     fn an_older_device_s_refusal_says_which_version_it_needs() {
         for (method, error) in [
-            (methods::REVIEW_PLUGIN, RpcError::Failed("ReviewPlugin is only answered over this device's local IPC".into())),
-            (methods::DECIDE_PLUGIN, RpcError::Failed("DecidePlugin: only this device's own window can do that".into())),
-            (methods::STAGE_PLUGIN_PACKAGE, RpcError::UnknownMethod("StagePluginPackage".into())),
-            (methods::STAGE_PLUGIN_PACKAGE, RpcError::Failed("unknown method: StagePluginPackage".into())),
-            (methods::INSTALL_PLUGIN, RpcError::Failed("Give a package file (`path`) or a link (`url`)".into())),
+            (
+                methods::REVIEW_PLUGIN,
+                RpcError::Failed(
+                    "ReviewPlugin is only answered over this device's local IPC".into(),
+                ),
+            ),
+            (
+                methods::DECIDE_PLUGIN,
+                RpcError::Failed("DecidePlugin: only this device's own window can do that".into()),
+            ),
+            (
+                methods::STAGE_PLUGIN_PACKAGE,
+                RpcError::UnknownMethod("StagePluginPackage".into()),
+            ),
+            (
+                methods::STAGE_PLUGIN_PACKAGE,
+                RpcError::Failed("unknown method: StagePluginPackage".into()),
+            ),
+            (
+                methods::INSTALL_PLUGIN,
+                RpcError::Failed("Give a package file (`path`) or a link (`url`)".into()),
+            ),
         ] {
             let said = older_engine("laptop", method, error).to_string();
-            assert!(said.contains(REMOTE_APPROVALS_SINCE) && said.contains("Update Zeron there"), "{method}: {said}");
+            assert!(
+                said.contains(REMOTE_APPROVALS_SINCE) && said.contains("Update Zeron there"),
+                "{method}: {said}"
+            );
         }
         // Anything else stays as it was: the device away, a stale review.
-        let away = older_engine("laptop", methods::DECIDE_PLUGIN, RpcError::Failed("transport: peer laptop: unreachable".into()));
+        let away = older_engine(
+            "laptop",
+            methods::DECIDE_PLUGIN,
+            RpcError::Failed("transport: peer laptop: unreachable".into()),
+        );
         assert_eq!(away.to_string(), "transport: peer laptop: unreachable");
-        let stale = older_engine("laptop", methods::DECIDE_PLUGIN, crate::plugins::reviews::needed("Allowing a plugin"));
+        let stale = older_engine(
+            "laptop",
+            methods::DECIDE_PLUGIN,
+            crate::plugins::reviews::needed("Allowing a plugin"),
+        );
         assert!(stale.to_string().starts_with("review:"), "{stale}");
     }
 }

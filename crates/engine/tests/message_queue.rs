@@ -1868,16 +1868,16 @@ async fn pending_update_does_not_stall_another_chats_queue_flush() {
     const OTHER: &str = "chat-queue-other";
     let tmp = tempfile::tempdir().unwrap();
     let (updating, updating_prompts) =
-        HeldHarness::build_as(HarnessId::ClaudeCode, SteeringMode::TurnBoundary, false);
+        HeldHarness::build_as(HarnessId::DeepSeek, SteeringMode::TurnBoundary, false);
     let (other, other_prompts) =
-        HeldHarness::build_as(HarnessId::Codex, SteeringMode::TurnBoundary, false);
+        HeldHarness::build_as(HarnessId::Mock, SteeringMode::TurnBoundary, false);
     let registry = Arc::new(HarnessRegistry::new());
     registry.register(updating.clone());
     registry.register(other.clone());
     let core = EngineCore::assemble(
         &tmp.path().join("data"),
         registry.clone(),
-        HarnessId::ClaudeCode,
+        HarnessId::DeepSeek,
         None,
     )
     .expect("engine core assembles");
@@ -1890,7 +1890,7 @@ async fn pending_update_does_not_stall_another_chats_queue_flush() {
                 "op": "createChat",
                 "chatId": OTHER,
                 "deviceId": core.device_id,
-                "config": { "harness": "codex", "model": null, "reasoning": null, "sandbox": "workspace-write" },
+                "config": { "harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write" },
             }),
         )
         .await
@@ -1913,16 +1913,16 @@ async fn pending_update_does_not_stall_another_chats_queue_flush() {
             .expect("queue follow-up");
     }
 
-    // Another Claude run keeps the accepted update waiting for idle.
-    let other_claude_run = registry.execution_lease(HarnessId::ClaudeCode).await;
-    registry.begin_update(HarnessId::ClaudeCode);
+    // Another supported run keeps the accepted update waiting for idle.
+    let other_claude_run = registry.execution_lease(HarnessId::DeepSeek).await;
+    registry.begin_update(HarnessId::DeepSeek);
     let writer = tokio::spawn({
         let registry = registry.clone();
-        async move { registry.update_lease(HarnessId::ClaudeCode).await }
+        async move { registry.update_lease(HarnessId::DeepSeek).await }
     });
 
-    // Claude's turn ends first, so the watcher dispatches its held row before
-    // it reaches the Codex chat.
+    // The updating harness's turn ends first, so the watcher dispatches its held
+    // row before it reaches the other chat.
     let _ = updating.finish.send(());
     wait_for(
         || {
@@ -1943,7 +1943,7 @@ async fn pending_update_does_not_stall_another_chats_queue_flush() {
         "the unrelated chat's held row to flush while the update is pending",
     )
     .await;
-    assert!(registry.update_pending(HarnessId::ClaudeCode));
+    assert!(registry.update_pending(HarnessId::DeepSeek));
     assert!(
         !updating_prompts.lock().unwrap().iter().any(|p| p == "next"),
         "the updating agent must not start a turn before its update"
@@ -1956,10 +1956,10 @@ async fn pending_update_does_not_stall_another_chats_queue_flush() {
             .expect("update acquires its gate once runs are idle")
             .unwrap(),
     );
-    registry.end_update(HarnessId::ClaudeCode);
+    registry.end_update(HarnessId::DeepSeek);
     wait_for(
         || updating_prompts.lock().unwrap().iter().any(|p| p == "next"),
-        "the held Claude turn to start after the update",
+        "the held turn to start after the update",
     )
     .await;
     let _ = updating.finish.send(());

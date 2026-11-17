@@ -1,10 +1,9 @@
--- A model picker on an agent reaching models through two providers (Pi
--- signed in to Codex and OpenCode, listing GPT-5.5 from each), for
--- tests/model_picker_sources.test.luau: namesakes, a model only one
--- provider has, a long name from both, and an agent with no providers.
--- The model chosen is `test_picker_model`; `test_picker_open` bumped opens
--- it. Here, beside app.luau, as a mounted script loads modules from its own
--- directory down.
+-- A model picker on models made up here, for
+-- tests/model_picker_sources.test.luau: one whose name is long, and one
+-- short. The one runtime names no provider, so no row says one. The model
+-- chosen is `test_picker_model`; `test_picker_open` bumped opens it. Here,
+-- beside app.luau, as a mounted script loads modules from its own directory
+-- down.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -17,25 +16,15 @@ local THREE: { EffortSlider.Level } = {
 	{ value = "medium", label = "Medium" },
 	{ value = "high", label = "High" },
 }
-local CODEX = { id = "openai-codex", name = "Codex" }
-local OPENCODE = { id = "opencode", name = "OpenCode" }
-local LONG = "GPT-5.5 Codex Max Preview Extended Context"
+local LONG = "DeepSeek V4 Pro Max Preview Extended Context"
 
 local MODELS: { ModelPicker.Model } = {
-	{ value = "pi/openai-codex/gpt-5.5", label = "GPT-5.5", harness = "pi", provider = CODEX, efforts = THREE },
-	{ value = "pi/opencode/gpt-5.5", label = "GPT-5.5", harness = "pi", provider = OPENCODE, efforts = THREE },
-	{ value = "pi/openai-codex/gpt-5.5-mini", label = "GPT-5.5 mini", harness = "pi", provider = CODEX },
-	{ value = "pi/opencode/big-pickle", label = "Big Pickle", harness = "pi", provider = OPENCODE },
-	{ value = "pi/openai-codex/long", label = LONG, harness = "pi", provider = CODEX },
-	{ value = "pi/opencode/long", label = LONG, harness = "pi", provider = OPENCODE },
-	{ value = "claude/opus", label = "Opus", harness = "claude", efforts = THREE },
-	-- The same name as Pi's, in another agent: its tab tells them apart.
-	{ value = "claude/gpt-5.5", label = "GPT-5.5", harness = "claude" },
+	{ value = "deepseek/deepseek-flash", label = "DeepSeek V4.1 Flash", harness = "deepseek", efforts = THREE },
+	{ value = "deepseek/deepseek-v4-pro-max-preview", label = LONG, harness = "deepseek", efforts = THREE },
 }
 
 local HARNESSES: { ModelPicker.Harness } = {
-	{ id = "pi", label = "Pi", mark = "pi" },
-	{ id = "claude", label = "Claude", mark = "claude" },
+	{ id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" },
 }
 
 return ui.column {
@@ -43,11 +32,11 @@ return ui.column {
 	h_full = true,
 	p = "$space.4",
 	ModelPicker {
-		model = ui.state("test_picker_model", "pi/openai-codex/gpt-5.5" :: string?),
+		model = ui.state("test_picker_model", "deepseek/deepseek-flash" :: string?),
 		effort = ui.state("test_picker_effort", "medium" :: string?),
 		favorites = ui.state("test_picker_favorites", {} :: { [string]: boolean }),
 		open_with = ui.state("test_picker_open", 0),
 		harnesses = HARNESSES,
-		models = ui.state("test_picker_models", MODELS),
+		models = MODELS,
 	},
 }

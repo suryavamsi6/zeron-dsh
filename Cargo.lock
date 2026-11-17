@@ -2468,15 +2468,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "deser-hjson"
-version = "2.2.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0d49a923edd92dc1ca5819822f540ea83f094ab5ac6940e4044e03c1d8e6576"
-dependencies = [
- "serde",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3114,7 +3105,6 @@ checksum = "843fba2746e448b37e26a819579957415c8cef339bf08564fe8b7ddbd959573c"
 dependencies = [
  "crc32fast",
  "miniz_oxide",
- "zlib-rs",
 ]
 
 [[package]]
@@ -9528,19 +9518,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "serde_yaml_ng"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
-dependencies = [
- "indexmap",
- "itoa",
- "ryu",
- "serde",
- "unsafe-libyaml",
-]
-
-[[package]]
 name = "serial"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10337,17 +10314,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tar"
-version = "0.4.46"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f6221d9a6003c78398e3b239969f352578258df48c8eb051caadae0015bc840"
-dependencies = [
- "filetime",
- "libc",
- "xattr",
-]
-
-[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10675,7 +10641,6 @@ dependencies = [
  "futures-core",
  "futures-sink",
  "futures-util",
- "libc",
  "pin-project-lite",
  "tokio",
 ]
@@ -11258,12 +11223,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8464ec13c3691491391d9fce00f6416c9a48e46972f72d7865688be2080192c9"
 
 [[package]]
-name = "typed-path"
-version = "0.12.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
-
-[[package]]
 name = "typeid"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11515,12 +11474,6 @@ dependencies = [
  "crypto-common",
  "subtle",
 ]
-
-[[package]]
-name = "unsafe-libyaml"
-version = "0.2.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
 
 [[package]]
 name = "untrusted"
@@ -13204,16 +13157,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "xattr"
-version = "1.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32e45ad4206f6d2479085147f02bc2ef834ac85886624a23575ae137c8aa8156"
-dependencies = [
- "libc",
- "rustix 1.1.4",
-]
-
-[[package]]
 name = "xcb"
 version = "1.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13708,7 +13651,6 @@ dependencies = [
  "core-foundation 0.10.1",
  "dunce",
  "fff-search",
- "flate2",
  "futures",
  "gethostname",
  "ignore",
@@ -13727,13 +13669,11 @@ dependencies = [
  "serde_json",
  "sha2",
  "sysinfo",
- "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
- "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -13752,30 +13692,19 @@ dependencies = [
  "zeron-theme",
  "zeron-update",
  "zeron-visual",
- "zip",
 ]
 
 [[package]]
 name = "zeron-harness"
 version = "0.3.7"
 dependencies = [
- "anyhow",
  "async-trait",
- "base64 0.22.1",
- "bzip2",
  "chrono",
- "deser-hjson",
- "filetime",
- "flate2",
  "futures",
  "libc",
- "reqwest",
- "semver",
  "serde",
  "serde_json",
- "serde_yaml_ng",
  "sha2",
- "tar",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -13783,10 +13712,7 @@ dependencies = [
  "tracing",
  "uuid",
  "windows-sys 0.61.2",
- "zeron-doc",
  "zeron-proto",
- "zeron-voice-media",
- "zip",
 ]
 
 [[package]]
@@ -14144,7 +14070,6 @@ dependencies = [
  "zeron-visual",
  "zeron-visual-gpu",
  "zeron-voice",
- "zeron-voice-media",
  "zeron-voice-session",
 ]
 
@@ -14212,21 +14137,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeron-voice-media"
-version = "0.3.7"
-dependencies = [
- "async-trait",
- "semver",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "tokio-util",
- "zeron-proto",
- "zeron-voice-session",
-]
-
-[[package]]
 name = "zeron-voice-session"
 version = "0.3.7"
 dependencies = [
@@ -14276,25 +14186,6 @@ dependencies = [
  "quote",
  "syn 3.0.3",
 ]
-
-[[package]]
-name = "zip"
-version = "7.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c42e33efc22a0650c311c2ef19115ce232583abbe80850bc8b66509ebef02de0"
-dependencies = [
- "crc32fast",
- "flate2",
- "indexmap",
- "memchr",
- "typed-path",
-]
-
-[[package]]
-name = "zlib-rs"
-version = "0.6.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b268e58e7c693d7c271f93ffc4ba3b380412554231c85bf61ca7af91042a4112"
 
 [[package]]
 name = "zmij"

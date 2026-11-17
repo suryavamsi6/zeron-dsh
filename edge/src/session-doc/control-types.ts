@@ -88,7 +88,7 @@ export type MessagePart =
       readonly call: ToolCall;
       /** Undefined while running; false on success; true on failure. */
       readonly isError?: boolean;
-      /** Capped tool output text (ACP harnesses; absent on claude/codex). */
+      /** Capped tool output text (absent when the runtime reports none). */
       readonly output?: string;
       /** Capped inline file diff for edit-shaped tools (ACP harnesses). */
       readonly diff?: ToolPartDiff;

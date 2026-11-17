@@ -1,4 +1,4 @@
-//! Real Codex adapter + engine persistence + ChatClient over a loopback relay.
+//! Scripted harness + engine persistence + ChatClient over a loopback relay.
 //! Faults are injected only in temporary profiles and the test relay.
 use futures::{SinkExt, StreamExt, future::BoxFuture};
 use loro::{ExportMode, LoroDoc};
@@ -14,8 +14,10 @@ use zeron_doc::{MessageRole, MessageStatus, SessionDoc};
 use zeron_engine::{
     EdgeConfig, EngineCore, EngineProfile, HarnessRegistry, chat2_host::EngineChatSink,
 };
-use zeron_harness::CodexHarness;
-use zeron_proto::{HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SessionStatus};
+use zeron_harness::mock::MockHarness;
+use zeron_proto::{
+    AgentEvent, DoneStatus, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, SessionStatus,
+};
 use zeron_sync::chat_frames::{decode, encode, frame_type};
 use zeron_sync::{
     ChatClient, ChatDocSink, CheckpointFetcher, DocsStore, SyncError, chat_client::RowImportOutcome,
@@ -206,17 +208,27 @@ async fn wait(mut f: impl FnMut() -> bool) {
     .await
     .expect("condition converges");
 }
-fn assemble(profile: &EngineProfile, live: bool) -> EngineCore {
-    let harness = if live {
-        CodexHarness::new().with_executable(
-            std::env::var_os("SESSION_SYNC_CODEX")
-                .expect("set SESSION_SYNC_CODEX to installed codex"),
-        )
-    } else {
-        CodexHarness::new().with_executable(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../harness/tests/fixtures/fake-codex.sh"),
-        )
+fn assemble(profile: &EngineProfile) -> EngineCore {
+    let harness = MockHarness {
+        script: vec![
+            AgentEvent::SessionStarted {
+                harness: HarnessId::Mock,
+                model: "publication-fixture".into(),
+                tools: vec![],
+                cwd: profile.store_root().display().to_string(),
+                session_id: "publication-session".into(),
+                assistant_message_id: "publication-assistant".into(),
+            },
+            AgentEvent::TextDelta {
+                text: "Publication reply".into(),
+            },
+            AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: Some("publication-session".into()),
+            },
+        ],
     };
     let registry = Arc::new(HarnessRegistry::new());
     registry.register(Arc::new(harness));
@@ -224,33 +236,26 @@ fn assemble(profile: &EngineProfile, live: bool) -> EngineCore {
     EngineCore::assemble_with_profile(
         profile.clone(),
         registry,
-        HarnessId::Codex,
+        HarnessId::Mock,
         Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
     )
     .unwrap()
 }
-async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool) {
-    let prompt = if live {
-        if second {
-            "Continue. Reply exactly PUBLICATION-SECOND. Do not use tools or modify files."
-        } else {
-            "Reply exactly PUBLICATION-FIRST. Do not use tools or modify files."
-        }
-    } else if second {
-        "scenario:publication"
+async fn turn(core: &EngineCore, cwd: &std::path::Path, second: bool) {
+    let prompt = if second {
+        "Publication second"
     } else {
-        "scenario:publication"
+        "Publication first"
     };
     core.sessions
         .dispatch(
             CHAT,
-            HarnessId::Codex,
+            HarnessId::Mock,
             RunRequest {
                 mcp: None,
                 prompt: prompt.into(),
                 harness: None,
-                model: live
-                    .then(|| std::env::var("SESSION_SYNC_MODEL").unwrap_or("gpt-6-astra".into())),
+                model: None,
                 reasoning: Some(ReasoningLevel::Medium),
                 model_options: Default::default(),
                 cwd: cwd.display().to_string(),
@@ -288,11 +293,11 @@ async fn turn(core: &EngineCore, cwd: &std::path::Path, live: bool, second: bool
     })
     .await;
 }
-async fn regression(live: bool) {
+async fn regression() {
     let temp = tempfile::tempdir().unwrap();
     let profile = EngineProfile::development(temp.path(), "test-org", "test-user");
-    let core = assemble(&profile, live);
-    turn(&core, temp.path(), live, false).await;
+    let core = assemble(&profile);
+    turn(&core, temp.path(), false).await;
     println!("first turn complete");
     core.shutdown().await;
     drop(core);
@@ -315,25 +320,10 @@ async fn regression(live: bool) {
     store
         .save_snapshot_with_cursor(CHAT, &orphan_snapshot, 42, 2)
         .unwrap();
-    let core = assemble(&profile, live);
-    turn(&core, temp.path(), live, true).await;
+    let core = assemble(&profile);
+    turn(&core, temp.path(), true).await;
     println!("resumed turn complete");
     let handle = core.doc_host.open(CHAT).unwrap();
-    if live {
-        let (events, _) = core.sessions.subscribe(CHAT, 0).unwrap();
-        let native_sessions: Vec<_> = events
-            .iter()
-            .filter_map(|e| match &e.event {
-                zeron_proto::AgentEvent::SessionStarted { session_id, .. } => Some(session_id),
-                _ => None,
-            })
-            .collect();
-        assert!(native_sessions.len() >= 2);
-        assert!(
-            native_sessions.iter().all(|id| *id == native_sessions[0]),
-            "real Continue resumes the same native session"
-        );
-    }
     let expected = handle.doc().read_entries().unwrap();
     let new_rows = handle
         .doc()
@@ -357,7 +347,7 @@ async fn regression(live: bool) {
             .any(|e| e.id == "second-user"),
         "old publication behavior hides the successful resumed turn"
     );
-    println!("reproduced: successful resumed Codex turn is invisible without cleanup predecessors");
+    println!("reproduced: successful resumed turn is invisible without cleanup predecessors");
     drop(handle);
     core.shutdown().await;
     drop(core);
@@ -421,15 +411,9 @@ async fn regression(live: bool) {
     server.abort();
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn codex_adapter_restart_publication() {
-    regression(false).await;
+async fn mock_adapter_restart_publication() {
+    regression().await;
 }
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires installed authenticated Codex; uses only isolated test sessions"]
-async fn real_codex_restart_publication() {
-    regression(true).await;
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn disconnected_cleanup_is_durable_before_snapshot_debounce() {
     use zeron_engine::{DocHost, DocHostConfig};
@@ -437,7 +421,7 @@ async fn disconnected_cleanup_is_durable_before_snapshot_debounce() {
     let store = Arc::new(DocsStore::open(dir.path()).unwrap());
     let config = || DocHostConfig {
         device_id: "writer".into(),
-        default_harness: HarnessId::Codex,
+        default_harness: HarnessId::Mock,
         edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
     };
     let host = DocHost::new(store.clone(), config());
@@ -485,7 +469,7 @@ async fn supplied_incident_snapshots_reconcile_via_durable_bootstrap() {
         store.clone(),
         DocHostConfig {
             device_id: "test".into(),
-            default_harness: HarnessId::Codex,
+            default_harness: HarnessId::Mock,
             edge: Some(EdgeConfig::with_static_token("http://127.0.0.1:1", "test")),
         },
     );
@@ -573,7 +557,7 @@ async fn rejected_update_retries_failed_checkpoint_and_retires_only_after_succes
         store.clone(),
         DocHostConfig {
             device_id: "writer".into(),
-            default_harness: HarnessId::Codex,
+            default_harness: HarnessId::Mock,
             edge: Some(EdgeConfig::with_static_token(
                 url.replacen("ws", "http", 1),
                 "test",

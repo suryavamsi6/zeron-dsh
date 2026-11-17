@@ -56,9 +56,7 @@ final class RemoteVoiceController {
     var hosts: [DeviceView] { app?.client?.devices().filter { $0.online && Self.compatible($0) } ?? [] }
 
     /// Voice controls appear once any registered host can run them.
-    var available: Bool {
-        Self.forced || (app?.client?.devices().contains(where: Self.compatible) ?? false)
-    }
+    var available: Bool { false }
 
     private var preferenceKey: String {
         "remoteVoice.\(app?.client?.userId() ?? "none").\(app?.client?.orgId() ?? "none")"

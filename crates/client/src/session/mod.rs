@@ -1403,6 +1403,12 @@ impl SessionHandle {
             .workspace
             .chat(&self.core.chat_id)
             .ok_or_else(|| ClientError::NotFound(self.core.chat_id.clone()))?;
+        // A chat with no config yet (a restored workspace, a row synced before
+        // configs were stamped) sends under the default harness; only a config
+        // that NAMES a removed provider is refused, as a new chat's is.
+        if chat.config.as_ref().is_some_and(|c| !c.harness.is_supported()) {
+            return Err(ClientError::Unsupported("This chat was configured for a removed provider. Choose a DeepSeek model explicitly before sending; its transcript is preserved.".into()));
+        }
         if request.text.trim().is_empty() && request.attachments.is_empty() {
             return Err(ClientError::InvalidArgument("empty message".into()));
         }

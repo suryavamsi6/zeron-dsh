@@ -336,7 +336,7 @@ async fn sends_with_images_or_respelled_options_join_the_live_runtime() {
 }
 
 /// Switching models mid-chat on a driver that adopts configuration in place
-/// (Claude's `set_model`/`apply_flag_settings`, Codex's per-turn params)
+/// (a runtime's in-place model/flag adoption)
 /// keeps the process — and every background subagent and shell it holds.
 #[tokio::test]
 async fn a_model_switch_is_adopted_by_the_live_runtime() {

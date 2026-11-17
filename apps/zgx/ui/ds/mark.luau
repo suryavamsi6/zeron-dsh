@@ -75,7 +75,7 @@ end
 
 -- The file of a mark (an SVG unless it names its own kind).
 local function file(name: Name): string
-	local f = FILES[name]
+	local f = FILES[name] or FILES["provider-deepseek"]
 	return if string.find(f, "%.%a+$") then `assets/icons/{f}` else `assets/icons/{f}.svg`
 end
 

@@ -59,8 +59,8 @@ ui.effect(function()
 	}
 end)
 
-local HARNESSES: { ds.Harness } = { { id = "claude", label = "Claude", mark = "claude" } }
-local MODELS: { ds.Model } = { { value = "opus", label = "Opus 5.5", harness = "claude" } }
+local HARNESSES: { ds.Harness } = { { id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" } }
+local MODELS: { ds.Model } = { { value = "deepseek-v4-pro", label = "V4 Pro", harness = "deepseek" } }
 local PROJECTS: { Composer.Project } = {
 	{ value = "zeron", label = "zeron", hue = "violet" },
 	{ value = "atlas", label = "Atlas Platform Monorepo", hue = "teal" },
@@ -166,7 +166,7 @@ return ui.column {
 			menus_below = true,
 			access = ui.state("test_place_access", "full" :: string?),
 			plan = ui.state("test_place_plan", false),
-			model = ui.state("test_place_model", "opus" :: string?),
+			model = ui.state("test_place_model", "deepseek-v4-pro" :: string?),
 			effort = ui.state("test_place_effort", "high" :: string?),
 			harnesses = HARNESSES,
 			models = MODELS,

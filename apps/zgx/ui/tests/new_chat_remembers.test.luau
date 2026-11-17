@@ -4,7 +4,7 @@
 -- after a chat is opened or made, and after a relaunch, with the page's
 -- draft and what it carries. (Except where: New chat after a chat was open
 -- starts in that chat's project, on its device.) (A chat's own composer keeps its own.) On the
--- chat fixture: s1 runs Opus/high/full access, s2 Sonnet/medium/edits.
+-- chat fixture: s1 runs the Flash/high/full access, s2 the V4 Pro/medium/edits.
 
 local function settle(app: any)
 	app:frames(30)
@@ -33,10 +33,10 @@ local function open(): any
 	return app
 end
 
--- The new page's settings, as a person picks them: Sonnet on low, edits
--- only, plan on, in Notes, in its folder.
+-- The new page's settings, as a person picks them: the V4 Pro on low,
+-- edits only, plan on, in Notes, in its folder.
 local function pick(app: any)
-	app:set_state("chat_model", "sonnet")
+	app:set_state("chat_model", "deepseek-v4-pro")
 	app:set_state("chat_effort", "low")
 	app:set_state("chat_access", "edits")
 	app:set_state("chat_plan", true)
@@ -53,7 +53,7 @@ test("the new page's settings come back after visiting a chat", function()
 	pick(app)
 	local mine = shown(app)
 	go(app, "go_s1")
-	expect(app:state("chat_model")).to_be("opus")
+	expect(app:state("chat_model")).to_be("deepseek-flash")
 	go(app, "go_new")
 	-- (All but where: that's the chat last open's, Long chat in Atlas.)
 	expect(shown(app)).to_be((mine:gsub("|notes|local|%-$", "|atlas|local|main")))
@@ -61,10 +61,10 @@ end)
 
 test("a model never picked on the new page doesn't become the last chat's", function()
 	local app = open()
-	-- Nothing picked here: the catalog's first (Opus), as a reload shows.
+	-- Nothing picked here: the catalog's first (the Flash), as a reload shows.
 	local mine = shown(app)
-	expect(app:state("chat_model")).to_be("opus")
-	-- The last chat seen runs Sonnet: not taken.
+	expect(app:state("chat_model")).to_be("deepseek-flash")
+	-- The last chat seen runs the V4 Pro: not taken.
 	go(app, "go_s1")
 	go(app, "go_s2")
 	go(app, "go_new")
@@ -76,7 +76,7 @@ test("a model's options picked in a chat stay that chat's", function()
 	pick(app)
 	local mine = shown(app)
 	go(app, "go_s2")
-	app:set_state("chat_model", "fusion")
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	app:set_state("chat_options", { lead = "sol" })
 	settle(app)
 	go(app, "go_new")
@@ -93,7 +93,7 @@ test("a chat made from the new page leaves the new page's settings as they were"
 	settle(app)
 	expect(app:state("calls")).to_contain("send:new1:Start something")
 	-- The chat made: picked differently in it, and another chat seen.
-	app:set_state("chat_model", "opus")
+	app:set_state("chat_model", "deepseek-flash")
 	app:set_state("chat_access", "full")
 	settle(app)
 	go(app, "go_s1")

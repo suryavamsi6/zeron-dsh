@@ -132,9 +132,9 @@ final class FixtureSessionSource: SessionSource {
     init(title: String, subtitle: String) {
         chrome.title = title
         chrome.subtitle = subtitle
-        chrome.placeholder = "Message Claude"
+        chrome.placeholder = "Message DeepSeek"
         chrome.chips = [
-            ComposerChip(id: "model", title: "Opus 4.5", symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)),
+            ComposerChip(id: "model", title: "DeepSeek V4.1 Flash", symbol: nil, icon: BrandMarks.image(for: "deepseek", side: 13)),
             ComposerChip(id: "effort", title: "High", symbol: "gauge.with.dots.needle.67percent"),
             ComposerChip(id: "branch", title: "ios-rewrite", symbol: nil, icon: BranchIcon.sized()),
         ]
@@ -238,10 +238,10 @@ final class FixtureSessionSource: SessionSource {
     func chipMenu(_ id: String) -> UIMenu? {
         switch id {
         case "model":
-            return UIMenu(title: "Model", children: ["Opus 4.5", "Sonnet 4.5", "Haiku 4.5"].map { m in
+            return UIMenu(title: "Model", children: ["DeepSeek V4.1 Flash", "Sonnet 4.5", "Haiku 4.5"].map { m in
                 UIAction(title: m, state: chrome.chips.first { $0.id == "model" }?.title == m ? .on : .off) { [weak self] _ in
                     self?.update { c in
-                        if let i = c.chips.firstIndex(where: { $0.id == "model" }) { c.chips[i] = ComposerChip(id: "model", title: m, symbol: nil, icon: BrandMarks.image(for: "claude-code", side: 13)) }
+                        if let i = c.chips.firstIndex(where: { $0.id == "model" }) { c.chips[i] = ComposerChip(id: "model", title: m, symbol: nil, icon: BrandMarks.image(for: "deepseek", side: 13)) }
                     }
                 }
             })

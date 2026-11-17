@@ -4,7 +4,7 @@ import type { GrantRequest, VaultCaller, VaultProviderId, VaultResult } from "..
 import { GITHUB_DEVICE_CODE_URL, GITHUB_TOKEN_URL, GITHUB_USER_URL } from "../../src/providers/github";
 import type { Env } from "../../src/env";
 import { Vault } from "../../src/vault";
-import { fakeJwt, makeDevice, type TestDevice } from "../support";
+import { makeDevice, type TestDevice } from "../support";
 
 export const DAY = 24 * 60 * 60_000;
 export const sec = (ms: number) => Math.floor(ms / 1000);
@@ -57,25 +57,6 @@ export const enroll = async (caller: VaultCaller, kind: "laptop" | "cloud" = "la
   value(await vault().enrollDevice(caller, { deviceId: device.deviceId, kind, publicKey: device.publicKey }));
   return device;
 };
-
-export interface CodexTokens {
-  readonly id_token: string;
-  readonly access_token: string;
-  readonly refresh_token: string;
-  readonly account_id: string;
-}
-
-/** A `codex login` auth.json whose access token expires at `accessExpMs`. */
-export const codexTokens = (accessExpMs: number): CodexTokens => ({
-  id_token: fakeJwt({ email: "ada@example.com", nonce: crypto.randomUUID() }),
-  access_token: fakeJwt({ exp: sec(accessExpMs), jti: crypto.randomUUID() }),
-  refresh_token: `rt-${crypto.randomUUID()}`,
-  account_id: "acct-ada"
-});
-
-export const codexMaterial = (tokens: CodexTokens) => ({
-  authJson: { OPENAI_API_KEY: null, tokens, last_refresh: new Date().toISOString() }
-});
 
 export const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });

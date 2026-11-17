@@ -21,26 +21,14 @@ local EFFORT = {
 	{ value = "medium", label = "Medium" },
 	{ value = "high", label = "High" },
 }
+-- The one runtime this build runs, as the host lists it.
+local HARNESS = { id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" }
 store.catalog:set {
 	state = "ready",
-	harnesses = { { id = "claude-code", label = "Claude", mark = "claude" } },
+	harnesses = { HARNESS },
 	models = {
-		{ value = "opus", label = "Opus", harness = "claude-code", efforts = EFFORT, effort = "high" },
-		{ value = "sonnet", label = "Sonnet", harness = "claude-code", efforts = EFFORT, effort = "medium" },
-		-- A model configured in place (Devin Fusion's shape): its lead and
-		-- sidekick are options.
-		{
-			value = "fusion",
-			label = "Fusion",
-			harness = "claude-code",
-			efforts = EFFORT,
-			effort = "high",
-			fast = true,
-			options = {
-				{ id = "lead", label = "Lead", default = "fable", choices = { { id = "fable", label = "Fable 5.1" }, { id = "sol", label = "GPT-6 Sol" } } },
-				{ id = "sidekick", label = "Sidekick", default = "swe-medium", choices = { { id = "swe-medium", label = "SWE-2 Medium" }, { id = "swe-high", label = "SWE-2 High" } } },
-			},
-		},
+		{ value = "deepseek-flash", label = "DeepSeek V4.1 Flash", harness = "deepseek", efforts = EFFORT, effort = "high" },
+		{ value = "deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek", efforts = EFFORT, effort = "medium" },
 	},
 }
 
@@ -67,8 +55,8 @@ local TRANSCRIPTS: { [string]: { any } } = {
 	s2 = { { id = "x1", role = "user", text = "Hello there" }, { id = "x2", role = "assistant", text = "Hi! What shall we work on?", model = "Opus" } },
 }
 local META: { [string]: any } = {
-	s1 = { title = "Long chat", project = "atlas", model = "opus", effort = "high", access = "full", plan = false },
-	s2 = { title = "Short chat", project = "atlas", model = "sonnet", effort = "medium", access = "edits", plan = false },
+	s1 = { title = "Long chat", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false },
+	s2 = { title = "Short chat", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "edits", plan = false },
 }
 
 -- What the page asked of the host, in order (`calls`).
@@ -1204,7 +1192,7 @@ do
 		table.insert(long_chat, { id = `l{n}`, role = "user", text = table.concat(lines, "\n") })
 		table.insert(long_chat, { id = `r{n}`, role = "assistant", text = `Reply {n}.`, model = "Opus" })
 	end
-	META.s4 = { title = "Long messages", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+	META.s4 = { title = "Long messages", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false }
 	TRANSCRIPTS.s4 = long_chat
 	seed()
 end
@@ -1236,7 +1224,7 @@ local GROUPED = {
 		},
 	},
 }
-META.s5 = { title = "Grouped tools", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+META.s5 = { title = "Grouped tools", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false }
 TRANSCRIPTS.s5 = GROUPED
 -- Settled replies and a move to another agent, as the shipping app's
 -- reply-footer fixture has them: each message's time and Copy under it on
@@ -1273,7 +1261,7 @@ TRANSCRIPTS.s6 = {
 	line("f4", "user", 4, "Thanks, ship it."),
 	line("f5", "assistant", 5, "Done. The table is in the release notes."),
 }
-META.s6 = { title = "Switched agents", project = "atlas", model = "sonnet", effort = "medium", access = "full", plan = false }
+META.s6 = { title = "Switched agents", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "full", plan = false }
 seed()
 ui.command {
 	id = "group_grows",
@@ -1306,7 +1294,7 @@ do
 			blocks = { { id = "t", kind = "text", text = text } },
 		})
 	end
-	META.s7 = { title = "Tall replies", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+	META.s7 = { title = "Tall replies", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false }
 	TRANSCRIPTS.s7 = tall
 	seed()
 	-- `reply_away`: another turn of s7's, a tall reply, lands (in the chat
@@ -1521,7 +1509,7 @@ do
 		{ id = "cu1", role = "user", text = "Thanks, ship it.", at = "Sep 8, 1:42 PM", copy = "Thanks, ship it." },
 		{ id = "ca1", role = "assistant", text = "Done. The release workflow is running.", model = "Opus", at = "Sep 8, 1:43 PM", copy = "Done. The release workflow is running.", blocks = { { id = "t", kind = "text", text = "Done. The release workflow is running." } } },
 	}
-	META.s8 = { title = "Fix the failing test", project = "atlas", model = "opus", effort = "high", access = "full", plan = false }
+	META.s8 = { title = "Fix the failing test", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false }
 	-- An agent from the ACP registry: a chat moved to it, named by its
 	-- harness alone everywhere (its mark found by that: `agent_icons`).
 	TRANSCRIPTS.s9 = {
@@ -2113,31 +2101,41 @@ ui.command {
 	end,
 }
 
--- The catalog changing: an agent arriving with its models, and none at all
--- (signed out of every agent, or still looking).
+-- The catalog changing: another model arriving (one configured in place: its
+-- lead and sidekick are options), and none at all (signed out, or still
+-- looking).
 ui.command {
 	id = "catalog_grows",
-	title = "Another agent arrives",
+	title = "Another model arrives",
+	run = function()
+		local c = store.catalog:peek()
+		local models: { any } = table.clone(c.models)
+		table.insert(models, {
+			value = "deepseek-v4-pro-max",
+			label = "DeepSeek V4 Pro Max",
+			harness = "deepseek",
+			efforts = EFFORT,
+			effort = "high",
+			fast = true,
+			options = {
+				{ id = "lead", label = "Lead", default = "fable", choices = { { id = "fable", label = "Fable 5.1" }, { id = "sol", label = "GPT-6 Sol" } } },
+				{ id = "sidekick", label = "Sidekick", default = "swe-medium", choices = { { id = "swe-medium", label = "SWE-2 Medium" }, { id = "swe-high", label = "SWE-2 High" } } },
+			},
+		})
+		store.catalog:set { state = "ready", harnesses = { HARNESS }, models = models }
+	end,
+}
+-- A retired provider's models in the catalog: the picker offers none of them,
+-- whatever the catalog says.
+ui.command {
+	id = "catalog_retired",
+	title = "A retired provider's models arrive",
 	run = function()
 		local c = store.catalog:peek()
 		local harnesses: { any } = table.clone(c.harnesses)
 		local models: { any } = table.clone(c.models)
 		table.insert(harnesses, { id = "codex", label = "Codex", mark = "openai" })
 		table.insert(models, { value = "gpt", label = "GPT-5.5", harness = "codex", efforts = EFFORT, effort = "medium" })
-		store.catalog:set { state = "ready", harnesses = harnesses, models = models }
-	end,
-}
--- An agent from the ACP registry in the catalog, as the host lists it: its
--- mark its harness (no icon carried: found by that).
-ui.command {
-	id = "catalog_registry",
-	title = "Factory Droid arrives",
-	run = function()
-		local c = store.catalog:peek()
-		local harnesses: { any } = table.clone(c.harnesses)
-		local models: { any } = table.clone(c.models)
-		table.insert(harnesses, { id = "acp.factory-droid", label = "Factory Droid", mark = "acp.factory-droid" })
-		table.insert(models, { value = "droid", label = "Droid Auto", harness = "acp.factory-droid", efforts = EFFORT, effort = "medium" })
 		store.catalog:set { state = "ready", harnesses = harnesses, models = models }
 	end,
 }
@@ -2186,7 +2184,7 @@ ui.command {
 			local next = table.clone(META[s.id] or {}) :: any
 			next.id = s.id
 			next.state = "ready"
-			next.harness = "claude-code"
+			next.harness = "deepseek"
 			next.model = nil
 			next.effort = nil
 			next.model_label = "Its own model"
@@ -2195,56 +2193,57 @@ ui.command {
 		end
 	end,
 }
--- Every agent here has said, and none offers Opus.
+-- Every agent here has said, and none offers the Flash.
 ui.command {
-	id = "catalog_complete_without_opus",
-	title = "The catalog is complete, without Opus",
+	id = "catalog_complete_without_flash",
+	title = "The catalog is complete, without the Flash",
 	run = function()
 		local c = store.catalog:peek()
 		local models: { any } = {}
 		for _, m in c.models do
-			if m.value ~= "opus" then
+			if m.value ~= "deepseek-flash" then
 				table.insert(models, m)
 			end
 		end
 		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
 	end,
 }
--- The agent marks a default that isn't its first row (Claude lists
--- best-first and marks the CLI's own default).
+-- The agent marks a default that isn't its first row (the harness lists
+-- best-first and marks its own default).
 ui.command {
-	id = "catalog_marks_fusion_default",
-	title = "The catalog marks Fusion its agent's default",
+	id = "catalog_marks_pro_default",
+	title = "The catalog marks the V4 Pro its agent's default",
 	run = function()
 		local c = store.catalog:peek()
 		local models: { any } = {}
 		for _, m in c.models do
 			local row = table.clone(m) :: any
-			row.default = if m.value == "fusion" then true else nil
+			row.default = if m.value == "deepseek-v4-pro" then true else nil
 			table.insert(models, row)
 		end
 		store.catalog:set({ state = "ready", complete = (c :: any).complete, harnesses = c.harnesses, models = models } :: any)
 	end,
 }
--- The same, complete and without Opus: a new chat on Opus gives way.
+-- The same, complete and without the Flash: a new chat on it gives way.
 ui.command {
-	id = "catalog_complete_without_opus_marks_fusion",
-	title = "The catalog is complete, without Opus, Fusion its default",
+	id = "catalog_complete_without_flash_marks_pro",
+	title = "The catalog is complete, without the Flash, the V4 Pro its default",
 	run = function()
 		local c = store.catalog:peek()
 		local models: { any } = {}
 		for _, m in c.models do
-			if m.value ~= "opus" then
+			if m.value ~= "deepseek-flash" then
 				local row = table.clone(m) :: any
-				row.default = if m.value == "fusion" then true else nil
+				row.default = if m.value == "deepseek-v4-pro" then true else nil
 				table.insert(models, row)
 			end
 		end
 		store.catalog:set({ state = "ready", complete = true, harnesses = c.harnesses, models = models } :: any)
 	end,
 }
--- The open session runs a model no catalog shown lists (Pi's, on a device
--- not looked at yet), named by the host.
+-- The open session runs a model no catalog shown lists: a chat kept from a
+-- retired provider, named by the host (its history is preserved, never
+-- resumed as DeepSeek).
 ui.command {
 	id = "session_model_elsewhere",
 	title = "The open session runs a model the catalog doesn't list",

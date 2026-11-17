@@ -866,7 +866,7 @@ final class AppModel {
     private var unsentCloudChat: (key: String, chatId: String)?
 
     /// The agents Cloud runs.
-    static let cloudHarnesses = ["claude-code", "codex"]
+    static let cloudHarnesses = ["deepseek"]
 
     /// Cloud's models, as the edge lists them (no computer or Cloud machine
     /// is asked).

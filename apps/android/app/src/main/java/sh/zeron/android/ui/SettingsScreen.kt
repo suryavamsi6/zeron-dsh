@@ -114,7 +114,7 @@ fun SettingsScreen(
             val offered = model.cloudOffered
             val count = if (offered) 3 else 1
             Column(Modifier.padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(ListItemDefaults.SegmentedGap)) {
-                CloudRow(0, count, "Providers", "Agents and their accounts on each device", leading = { IconTile(ZIcons.Bot) }, onClick = onOpenProviders)
+                CloudRow(0, count, "DeepSeek", "SDK setup and API key on each device", leading = { IconTile(ZIcons.Bot) }, onClick = onOpenProviders)
                 if (offered) {
                     CloudRow(1, count, "Cloud", cloud.problem?.title ?: cloud.githubAccount?.let { "GitHub @$it" } ?: "Connect GitHub", leading = { IconTile(ZIcons.Cloud) }, onClick = onOpenCloud)
                     val credits = cloud.credits?.let { "${sh.zeron.android.core.CloudStore.credits(it)} credits" }

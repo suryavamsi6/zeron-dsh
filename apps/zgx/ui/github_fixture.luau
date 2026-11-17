@@ -1,7 +1,7 @@
 -- Connect GitHub, mounted on its own with GitHub made up here (no engine in
--- a test host): the step tests/providers_stability.test.luau drives. The
--- host's calls (account/github) are stubbed; `ui.command`s change what the
--- engine would report (the repositories GitHub lets Cloud see, the account).
+-- a test host): the onboarding step on its own. The host's calls
+-- (account/github) are stubbed; `ui.command`s change what the engine would
+-- report (the repositories GitHub lets Cloud see, the account).
 
 ui.theme.strict("warn")
 local ds = require("@ds")

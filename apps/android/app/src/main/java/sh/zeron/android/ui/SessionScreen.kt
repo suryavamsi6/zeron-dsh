@@ -557,7 +557,7 @@ private fun EmptyTranscriptNotice(notice: EmptyNotice) {
 /** Whose logins an error card's "Log in" opens: Cloud's for a Cloud chat, else the host's. */
 fun signInTarget(model: AppModel, chatId: String): AccountsTarget? {
     val row = model.row(chatId) ?: return null
-    val harness = row.harness ?: "claude-code"
+    val harness = row.harness ?: "unsupported"
     if (row.isCloud) return sh.zeron.android.core.CloudStore.agents.firstOrNull { it.harness == harness }?.let { AccountsTarget.Cloud(it) }
     val label = row.harnessLabel ?: uniffi.zeron_core.agentLoginRules(harness).name.ifEmpty { harness }
     return AccountsTarget.Device(row.deviceId, model.deviceName(row.deviceId), harness, label)

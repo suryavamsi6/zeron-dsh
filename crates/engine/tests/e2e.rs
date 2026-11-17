@@ -13,7 +13,7 @@ use zeron_doc::{
     MessagePart, MessageRole, MessageStatus, SegmentWriter, SessionCommandEntry,
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
 };
-use zeron_engine::{EngineCore, EngineRpc, HarnessRegistry, RunJournal};
+use zeron_engine::{EngineCore, HarnessRegistry, RunJournal};
 use zeron_harness::mock::MockHarness;
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
@@ -411,34 +411,30 @@ async fn pending_update_does_not_block_dispatch_or_other_harnesses() {
     let dir = tempfile::tempdir().unwrap();
     let started = Arc::new(std::sync::Mutex::new(Vec::new()));
     let registry = Arc::new(HarnessRegistry::new());
-    for id in [HarnessId::ClaudeCode, HarnessId::Codex] {
+    for id in [HarnessId::DeepSeek, HarnessId::Mock] {
         registry.register(Arc::new(RecordingHarness(id, started.clone())));
     }
     let core =
-        EngineCore::assemble(dir.path(), registry.clone(), HarnessId::ClaudeCode, None).unwrap();
-    let active_turn = registry.execution_lease(HarnessId::ClaudeCode).await;
-    registry.begin_update(HarnessId::ClaudeCode);
+        EngineCore::assemble(dir.path(), registry.clone(), HarnessId::DeepSeek, None).unwrap();
+    let active_turn = registry.execution_lease(HarnessId::DeepSeek).await;
+    registry.begin_update(HarnessId::DeepSeek);
     // These awaits model the shared queue watcher's serial dispatch calls.
     // Neither a waiting writer nor an active installation may block dispatch.
     tokio::time::timeout(
         Duration::from_secs(1),
-        core.sessions.dispatch(
-            "waiting",
-            HarnessId::ClaudeCode,
-            run_request("waiting"),
-            None,
-        ),
+        core.sessions
+            .dispatch("waiting", HarnessId::DeepSeek, run_request("waiting"), None),
     )
     .await
     .expect("dispatch must not wait for the update")
     .unwrap();
     drop(active_turn);
-    let installing = registry.update_lease(HarnessId::ClaudeCode).await;
+    let installing = registry.update_lease(HarnessId::DeepSeek).await;
     tokio::time::timeout(
         Duration::from_secs(1),
         core.sessions.dispatch(
             "cancelled",
-            HarnessId::ClaudeCode,
+            HarnessId::DeepSeek,
             run_request("cancelled"),
             None,
         ),
@@ -447,7 +443,7 @@ async fn pending_update_does_not_block_dispatch_or_other_harnesses() {
     .expect("dispatch must not wait for installation")
     .unwrap();
     core.sessions
-        .dispatch("other", HarnessId::Codex, run_request("other"), None)
+        .dispatch("other", HarnessId::Mock, run_request("other"), None)
         .await
         .unwrap();
     wait_for(
@@ -461,7 +457,7 @@ async fn pending_update_does_not_block_dispatch_or_other_harnesses() {
         .unwrap();
     assert_eq!(*started.lock().unwrap(), ["other"]);
     drop(installing);
-    registry.end_update(HarnessId::ClaudeCode);
+    registry.end_update(HarnessId::DeepSeek);
     wait_for(
         || started.lock().unwrap().contains(&"waiting".to_string()),
         "deferred run starts after update",
@@ -776,16 +772,17 @@ async fn interrupt_stamps_streaming_entry_aborted() {
         core.sessions
             .session_status(CHAT)
             .unwrap()
-            .last_turn_outcome.map(|o| o.status),
+            .last_turn_outcome
+            .map(|o| o.status),
         Some(DoneStatus::Interrupted)
     );
     wait_for(
         || {
-            core.sessions
-                .watch_sessions()
-                .borrow()
-                .iter()
-                .any(|s| s.chat_id == CHAT && s.last_turn_outcome.is_some_and(|o| o.status == DoneStatus::Interrupted))
+            core.sessions.watch_sessions().borrow().iter().any(|s| {
+                s.chat_id == CHAT
+                    && s.last_turn_outcome
+                        .is_some_and(|o| o.status == DoneStatus::Interrupted)
+            })
         },
         "interrupted activity projection",
     )
@@ -1027,7 +1024,7 @@ impl Harness for UnsteerableHarness {
 }
 
 /// Steering must never kill the turn it steers (a mobile steer used to reach
-/// an interrupting dispatch — a Codex app-server takes its subagents down
+/// an interrupting dispatch — an app-server runtime takes its subagents down
 /// with it). A live turn with no mailbox holds the steer for the boundary.
 #[tokio::test]
 async fn steer_into_unsteerable_live_turn_holds_instead_of_interrupting() {
@@ -2236,7 +2233,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
 }
 
 /// Regression (the "nothing happened after I answered" bug): a harness that
-/// emits its OWN `InputRequested` (keyed by its internal id — Claude's
+/// emits its OWN `InputRequested` (keyed by its internal id — a provider's
 /// control-request id) *and* asks through `RunControls::request_input` used to
 /// fold TWO input parts into the doc. The UI answers the LAST unresolved part;
 /// the harness-emitted twin's id was unknown to `respond_input`'s pending map,
@@ -2282,7 +2279,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     multiline: false,
                     multi_select: false,
                 };
-                // The pre-fix Claude/Codex shape: surface the question under
+                // The pre-fix provider shape: surface the question under
                 // the harness's own id BEFORE asking through the bridge.
                 let _ = tx
                     .send(Ok(AgentEvent::InputRequested {
@@ -2572,136 +2569,6 @@ async fn attachment_upload_then_run_threads_refs_and_paths() {
     assert_eq!(chunk["name"], "e2e-att-red.png");
 }
 
-/// Real-CLI proof of the image pipeline: upload a tiny solid-red PNG through
-/// the chunked RPC path, run claude (haiku) with the staged path on
-/// `attachments` + the refs in the prompt, and check the reply names the
-/// color — it can only know it by SEEING the inline image block (the sandbox
-/// prompt forbids opening the file). Ignored by default: needs an installed,
-/// authenticated `claude` CLI and spends real tokens.
-/// Run with: `cargo test -p zeron-engine --test e2e -- --ignored`
-#[tokio::test(flavor = "multi_thread")]
-#[ignore = "requires installed+authenticated claude CLI; spends tokens"]
-async fn real_claude_sees_uploaded_image_inline() {
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD;
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("data");
-    let cwd = tmp.path().join("project");
-    std::fs::create_dir_all(&cwd).unwrap();
-
-    let core = EngineCore::assemble(
-        &dir,
-        Arc::new(zeron_engine::default_registry()),
-        HarnessId::ClaudeCode,
-        None,
-    )
-    .expect("engine core assembles");
-    // Pre-title the chat so the auto-titler doesn't spend a second model call.
-    core.workspace
-        .create_chat(CHAT, None, Some(&core.device_id), None, Some("/tmp".into()))
-        .expect("create chat row");
-    core.workspace
-        .rename_chat(CHAT, "Pre-titled")
-        .expect("rename chat");
-
-    // 8×8 solid-red PNG, uploaded exactly as the composer does.
-    const RED_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAEklEQVR4nGP4z8CAB+GTG2wAAJP0GeGuMDBnAAAAAElFTkSuQmCC";
-    let client = zeron_rpc::memory_client(core.rpc_service());
-    client
-        .call(
-            zeron_rpc::methods::UPLOAD_CHUNK,
-            serde_json::json!({ "uploadId": "real-img", "seq": 0, "data": RED_PNG_B64 }),
-        )
-        .await
-        .expect("UploadChunk");
-    let committed = client
-        .call(
-            zeron_rpc::methods::UPLOAD_COMMIT,
-            serde_json::json!({ "uploadId": "real-img", "fileName": "swatch.png" }),
-        )
-        .await
-        .expect("UploadCommit");
-    let path = committed["path"].as_str().expect("path").to_string();
-    assert_eq!(
-        std::fs::read(&path).expect("committed file"),
-        b64.decode(RED_PNG_B64).unwrap()
-    );
-
-    let prompt = format!(
-        "Without running any tools or opening any files, answer from the attached image alone: \
-         what solid color is this image? Reply with exactly one lowercase word.\n\n\
-         Attached images (local files — open them to view):\n- {path}"
-    );
-    let request = RunRequest {
-        mcp: None,
-        prompt,
-        harness: None,
-        model: Some("haiku".into()),
-        reasoning: None,
-        model_options: Default::default(),
-        cwd: cwd.to_string_lossy().to_string(),
-        sandbox: SandboxLevel::WorkspaceWrite,
-        auto_approve: false,
-        access: Default::default(),
-        plan: false,
-        attachments: vec![path],
-        resume: None,
-        worktree: None,
-        env: Default::default(),
-        extra_mcp: Vec::new(),
-    };
-    core.doc_host
-        .queue_command(
-            CHAT,
-            SessionCommandPayload::Run {
-                request,
-                message_id: "msg-img-1".into(),
-            },
-        )
-        .expect("queue real image run");
-    wait_for_within_secs(
-        || {
-            entries_now(&core).iter().any(|e| {
-                e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete)
-            })
-        },
-        "real claude image turn",
-        120,
-    )
-    .await;
-
-    let reply: String = entries(&core)
-        .iter()
-        .filter(|e| e.role == MessageRole::Assistant)
-        .flat_map(|e| e.parts.iter())
-        .filter_map(|p| match p {
-            MessagePart::Text { text, .. } => Some(text.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    assert!(
-        reply.contains("red"),
-        "claude should name the image's color; got: {reply:?}"
-    );
-    core.shutdown().await;
-}
-
-async fn wait_for_within_secs<F>(mut predicate: F, what: &str, secs: u64)
-where
-    F: FnMut() -> bool,
-{
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while !predicate() {
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "timed out waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Liveness heartbeats: empty reasoning deltas keep the session fresh but
 // never reach the journal (redacted thinking + tool-input-generation noise).
@@ -2822,7 +2689,11 @@ async fn parked_session_ignores_trailing_frames_and_stays_idle() {
             "trailing frames must not re-arm Working"
         );
         assert_eq!(
-            core.sessions.session_status(CHAT).unwrap().last_turn_outcome.map(|o| o.status),
+            core.sessions
+                .session_status(CHAT)
+                .unwrap()
+                .last_turn_outcome
+                .map(|o| o.status),
             Some(DoneStatus::Completed),
             "parked teardown must preserve the real turn outcome"
         );
@@ -3259,7 +3130,7 @@ async fn pending_steer_handoff_does_not_publish_a_completion() {
     }
 }
 
-/// Real drive_run + journal + Loro, with an isolated Codex source root.
+/// Real drive_run + journal + Loro, with an isolated source root.
 #[tokio::test]
 async fn generated_image_is_materialized_before_publication_and_survives_reopen() {
     use zeron_engine::{DocHost, DocHostConfig, SessionsEngine, Uploads};
@@ -3357,7 +3228,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
         SessionDoc::from_doc(imported).read_entries().unwrap(),
         entries
     );
-    // Resume echoes the successful completed item after Codex removed its source.
+    // Resume echoes the successful completed item after the provider removed its source.
     sessions
         .dispatch(CHAT, HarnessId::Mock, run_request("resume"), None)
         .await
@@ -3394,61 +3265,7 @@ async fn generated_image_is_materialized_before_publication_and_survives_reopen(
     sessions.shutdown().await;
 }
 
-/// Real provider + engine smoke, opt-in because it consumes image quota.
-#[tokio::test]
-#[ignore = "requires authenticated Codex with image generation; consumes quota"]
-async fn real_image_generation_profile_smoke() {
-    let dir = tempfile::tempdir().unwrap();
-    let core = EngineCore::assemble(
-        dir.path(),
-        registry_with(Arc::new(zeron_harness::CodexHarness::new())),
-        HarnessId::Codex,
-        None,
-    )
-    .unwrap();
-    core.sessions
-        .dispatch(
-            CHAT,
-            HarnessId::Codex,
-            run_request("Generate an image of a small green goblin using image generation."),
-            None,
-        )
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(300), async {
-        while !entries_now(&core)
-            .iter()
-            .any(|e| e.role == MessageRole::Assistant && e.status == Some(MessageStatus::Complete))
-        {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    })
-    .await
-    .unwrap();
-    let all = entries(&core);
-    let image = all
-        .iter()
-        .flat_map(|e| &e.parts)
-        .find_map(|p| {
-            if let MessagePart::Image { path, .. } = p {
-                Some(path)
-            } else {
-                None
-            }
-        })
-        .expect("generated image reaches document");
-    assert!(std::path::Path::new(image).starts_with(core.uploads.dir()));
-    assert!(std::path::Path::new(image).is_file());
-    assert!(
-        !serde_json::to_string(&all)
-            .unwrap()
-            .contains("generated_images/")
-    );
-    core.sessions.shutdown().await;
-}
-
-/// A harness that fails before streaming (an OpenCode server that never
-/// booted) must leave its reason in the transcript, not only a bare
+/// A harness that fails before streaming must leave its reason in the transcript, not only a bare
 /// "Run failed" status.
 #[tokio::test(flavor = "multi_thread")]
 async fn start_failure_lands_in_the_transcript() {

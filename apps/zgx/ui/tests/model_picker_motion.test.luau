@@ -93,7 +93,7 @@ test("Escape folds the opened-out picker back from the slider and the tabs", fun
 	local app = mount("picker_fixture.luau")
 	opened(app)
 	local folded_h = height(app)
-	for _, target in { 'role:group "REASONING"', 'role:tab "Codex"' } do
+	for _, target in { 'role:group "REASONING"', 'role:tab "Starred"' } do
 		app:click(".folded")
 		settle(app)
 		app:click(target)
@@ -101,7 +101,7 @@ test("Escape folds the opened-out picker back from the slider and the tabs", fun
 		app:key("Escape")
 		settle(app)
 		expect(`{target}: open {listed(app)}`).to_be(`{target}: open true`)
-		-- Folded on the chosen model, in its agent's tab.
+		-- Folded on the chosen model.
 		expect(`{target}: {height(app)}`).to_be(`{target}: {folded_h}`)
 	end
 	-- Folded, Escape closes it.

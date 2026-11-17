@@ -1,6 +1,6 @@
 # Zeron
 
-コーディングエージェント（Claude Code、Codex、Cursor、Devin、Grok、Hermes、Pi、Antigravity）をデフォルトではローカルで管理し、必要に応じて複数デバイス間で同期することもできます。
+公式 DeepSeek Harness SDK による DeepSeek のコーディングセッションを、デフォルトではローカルで実行し、必要に応じてデバイス間で同期できます。
 
 *[English](README.md) | [简体中文](README.zh-CN.md) | [한국어](README.ko.md) | 日本語 | [Español](README.es.md)*
 

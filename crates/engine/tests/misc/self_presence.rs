@@ -111,16 +111,25 @@ async fn a_client_that_stopped_beating_stays_quiet_after_a_rejoin() {
         rejoin_beat_window: Duration::from_millis(300),
         ..RegistryTuning::default()
     };
-    let phone = RegistryClient::connect_via_tuned(url.clone(), doc("dev-phone"), "dev-phone", short)
-        .await
-        .expect("phone connects");
-    let laptop = RegistryClient::connect_via_tuned(url, doc("dev-laptop"), "dev-laptop", RegistryTuning::default())
-        .await
-        .expect("laptop connects");
+    let phone =
+        RegistryClient::connect_via_tuned(url.clone(), doc("dev-phone"), "dev-phone", short)
+            .await
+            .expect("phone connects");
+    let laptop = RegistryClient::connect_via_tuned(
+        url,
+        doc("dev-laptop"),
+        "dev-laptop",
+        RegistryTuning::default(),
+    )
+    .await
+    .expect("laptop connects");
     phone.set_presence(1_000);
     laptop.set_presence(2_000);
     wait_for(
-        || server.presence_of("dev-phone") == Some(1_000) && server.presence_of("dev-laptop") == Some(2_000),
+        || {
+            server.presence_of("dev-phone") == Some(1_000)
+                && server.presence_of("dev-laptop") == Some(2_000)
+        },
         "both first beats",
     )
     .await;
@@ -133,13 +142,21 @@ async fn a_client_that_stopped_beating_stays_quiet_after_a_rejoin() {
     rejoined(&mut phone_events).await;
     rejoined(&mut laptop_events).await;
     wait_for(
-        || server.presence_of("dev-laptop").is_some_and(|at| at >= before),
+        || {
+            server
+                .presence_of("dev-laptop")
+                .is_some_and(|at| at >= before)
+        },
         "the laptop's rejoin beat",
     )
     .await;
     // Time for a rejoin beat from the phone, were one coming.
     tokio::time::sleep(Duration::from_millis(500)).await;
-    assert_eq!(server.presence_of("dev-phone"), Some(1_000), "the backgrounded phone stays quiet");
+    assert_eq!(
+        server.presence_of("dev-phone"),
+        Some(1_000),
+        "the backgrounded phone stays quiet"
+    );
     assert_eq!(phone.own_presence(), Some(1_000));
     phone.shutdown().await;
     laptop.shutdown().await;

@@ -359,7 +359,7 @@ impl zeron_engine::registry::RunEnvironment for Logins {
     }
 }
 
-/// Seen on a real machine: boot recovery beat the broker to it, and Codex came
+/// Seen on a real machine: boot recovery beat the broker to it, and the agent came
 /// up with no login and no way to find its earlier conversation.
 #[tokio::test]
 async fn a_revived_turn_waits_for_the_machines_logins() {

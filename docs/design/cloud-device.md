@@ -11,12 +11,11 @@ is on, for any project whose GitHub repository (the folder's `origin`) the Zeron
 reaches. Picked, the composer drops the checkout menu (the machine clones the picked branch
 fresh), and the model menu offers only the agents Cloud has an active account for. A session started there runs in its own sandbox — which clones the repository, sleeps
 when the session is idle and wakes when the chat is sent to — instead of on the computer the
-project lives on, which may then be offline. Cloud has its own providers: a provider works there
-only once an account has been connected *for Cloud* (Settings → Providers, with Cloud picked in
-the device switcher). Cloud is listed there as one entry, never its session machines; no other
+project lives on, which may then be offline. Cloud runs DeepSeek: a DeepSeek API key works there once it has been saved *for Cloud*
+(Settings → DeepSeek, with Cloud picked in the device switcher). Cloud is listed there as one entry, never its session machines; no other
 device list shows it.
 
-- v1 providers on Cloud: **Codex** and **Claude Code** only.
+- v1 provider on Cloud: **DeepSeek** only, through the official DeepSeek Harness SDK.
 - v1 repositories on Cloud: **GitHub repositories** the user installed the Zeron GitHub App on.
   Each session sandbox clones its project's repository from the branch picked in the composer;
   agents get a one-hour GitHub App installation token for `git push` and `gh pr create`, so
@@ -60,7 +59,7 @@ offer Cloud without asking that computer. A Cloud session's chat row is `{spaceI
 project>, deviceId: <session device>, cwd: /home/user/{repo}}`. Device lists hide session
 devices. Catalog requests aimed at a Cloud device (`ListHarnesses`, `ListModels`; the picker
 aims at the logical device while Cloud is picked) are answered by the asking engine from its own
-catalog restricted to Codex + Claude Code, so opening a composer never wakes a sandbox.
+catalog restricted to DeepSeek, so opening a composer never wakes a sandbox.
 
 ### Session lifecycle
 
@@ -169,7 +168,7 @@ its own, on its own machine, recorded with `parentChatId` = the parent's chat.
   runner bearer → `CloudAccount.createChildSession`): `parentChatId` must be the chat the
   runner's device runs (`byDevice`), and that chat must not itself be a delegate (403
   `too_deep`). The delegate takes the parent's project and repository — a machine never names
-  another repository — and `config.harness` must be Codex or Claude Code. The usual limits
+  another repository — and `config.harness` must be DeepSeek. The usual limits
   hold: credits, and `CLOUD_MAX_AWAKE` machines at once. A runner request without
   `parentChatId` is refused (a machine never acts as the user).
 - **Its chat row** is written by the edge, as the user (`chats/{chatId}`: the new machine as
@@ -321,18 +320,15 @@ that doesn't say. A refused resume's `neededGiB` also raises the mark, since it'
 figure.
 
 **Pre-sleep cleanup** (`crates/engine/src/cloud_disk.rs`), once quiesce has accepted the sleep,
-budgeted 25 s of the 60 the edge gives it. It deletes from an allow-list: always
-Codex's own downloads in the managed `CODEX_HOME` (`cache/`, about 60 MB of plugin catalog, and
-`plugins/cache/`, about 30 MB of the account's plugin bundles), which every wake would otherwise copy
-back in while the engine starts, and which Codex fetches again itself, in the background, once it
-runs (never its `auth.json`, sessions, databases or settings); always `target/*/incremental`; then, only while the disk is still over the warning level and asking again
-before each, `target/*/deps` and named package-manager download caches in the home directory. A
-`target` counts only if Cargo marked it as its own (`.rustc_info.json` and a `CACHEDIR.TAG` with
-Cargo's signature) and git tracks nothing in it, which also rules out anything outside a repository.
+budgeted 25 s of the 60 the edge gives it. It deletes only rebuildable caches from an allow-list:
+always `target/*/incremental`; then, only while the disk is still over the warning level and
+asking again before each, `target/*/deps` and named package-manager download caches in the home
+directory. The DeepSeek SDK's isolated Harness home (`${ZERON_DEEPSEEK_HOME|data_dir/deepseek}`)
+holds credentials and session state, so it is not a deletion target.
+
 Symlinks are never followed. A cache is renamed before it is deleted, so running out of time leaves
-nothing half-emptied for a build to trust, and the next sleep finishes it. It touches no login
-(`~/.claude`, where a parked Claude child may hold `.oauth_refresh.lock`), and kills no process. A
-failure is logged, and the sleep goes on. Right after a wake the disk reads low, so only the
+nothing half-emptied for a build to trust, and the next sleep finishes it. It touches no login, credential file, or session state, and kills
+no process. A failure is logged, and the sleep goes on. Right after a wake the disk reads low, so only the
 always-safe first tier runs.
 
 ### Data expiry
@@ -547,25 +543,20 @@ binding from the main Worker, which passes the **verified** identity. It has its
 
 ### Multiple accounts
 
-A provider holds several accounts. Agent logins and API keys work this way (GitHub's are all in
-use at once: see "GitHub"): grants always come from the active one, and every Cloud
-machine uses it from its next turn (the engine re-checks a cached grant older than 30 s before
-a run). Uploading the same login again replaces its own account instead of adding one —
-identity is never secret material: Claude's profile `email|organization` (sent beside the
-blob), Codex's `id_token` email + `account_id`, an API key's key id (a hash), GitHub's login. A
-new upload becomes active. Forgetting the active account leaves none active (grants answer
-`no {provider} account is active`); the generation counter is per provider, so AADs stay
-unique across accounts. The daily canary refreshes every account. A pre-accounts single
-`record` row migrates into one active account with the same generation and envelope.
+A provider holds several accounts (GitHub's are all in use at once: see "GitHub"): grants always
+come from the active one, and every Cloud machine uses it from its next turn (the engine
+re-checks a cached grant older than 30 s before a run). Uploading the same DeepSeek key again
+replaces its own account instead of adding one: identity is never secret material, just a key id
+(a hash) and GitHub's login. A new upload becomes active. Forgetting the active account leaves
+none active (grants answer `no {provider} account is active`); the generation counter is per
+provider, so AADs stay unique across accounts. A pre-accounts single `record` row migrates into
+one active account with the same generation and envelope.
 
-Settings → Providers shows Cloud's Claude Code and Codex cards like any device's: each card's
-accounts are its subscription logins plus its API keys (`anthropic-key` / `openai-key`), one of
-them active. The engine answers account calls aimed at `targetDeviceId: "cloud"` from the vault
-(`cloud_accounts`); activating a key clears the active subscription login, since machines
-prefer a subscription. Usage meters come from the vault, which alone holds the tokens: it calls
-the provider's usage endpoint (Claude `api.anthropic.com/api/oauth/usage`, Codex
-`chatgpt.com/backend-api/wham/usage`) and returns the body for the engine to parse; a 401/403
-there never marks the account.
+Settings → DeepSeek shows Cloud's one integration like any device's: the DeepSeek API key saved
+for Cloud, one active. The engine answers account calls aimed at `targetDeviceId: "cloud"` from
+the vault (`cloud_accounts`). No usage meters are reported: the SDK contract exposes no usage
+endpoint Zeron relies on. Historical provider accounts remain stored and readable but every
+mutation for them is refused.
 
 ### Encryption
 
@@ -587,37 +578,29 @@ secret later without touching records' format.
 
 | Provider id | Material | Refresh |
 | --- | --- | --- |
-| `codex` | ChatGPT OAuth token set from `codex login` (`id_token`, `access_token`, `refresh_token`, `account_id`) | `POST https://auth.openai.com/oauth/token` (`grant_type=refresh_token`, Codex public client id) |
-| `claude` | Claude Code credential blob from a sign-in through Claude's own OAuth flow (`claudeAiOauth`), or a long-lived `claude setup-token` token | `POST https://platform.claude.com/v1/oauth/token` (`grant_type=refresh_token`, Claude Code client id); setup tokens never refresh |
+| `deepseek-key` | The user's DeepSeek API key | none (static) |
 | `github` | GitHub App user token + refresh token (never granted; see "GitHub") | `POST https://github.com/login/oauth/access_token` with `GITHUB_APP_CLIENT_ID/SECRET` (vault secrets) |
-| `anthropic-key` | User's own Anthropic API key | none (static) |
-| `openai-key` | User's own OpenAI API key | none (static) |
 
-**Claude subscriptions.** Anthropic's published Claude Code terms restrict third parties from
-storing or intermediating Claude.ai credentials "unless we've mutually agreed otherwise".
-Zeron holds Claude logins in the vault under its arrangement with Anthropic for running
-Claude Code on users' Cloud devices (confirmed by Wing, 2026-10-01; keep the written
-confirmation on file next to this doc). Scope it to that purpose: Claude grants are delivered
-only to the unmodified Claude Code CLI on the user's own devices, never to another harness or
-SDK, and sign-in always completes through Claude's own OAuth flow. Alternatives that need no
-vault: the CLI's own `claude auth login` inside the Cloud device, or the user's own Anthropic
-API key (`anthropic-key`).
+**DeepSeek key.** Static: no OAuth refresh and no subscription terms to reconcile. The key is
+stored encrypted, granted only to the session machine's engine, and injected by the SDK driver as
+`DEEPSEEK_API_KEY` for that run; it never enters a session doc, journal, or log. API keys from
+earlier providers stay in the vault untouched but are no longer delivered.
 
-### Sign-in stays on the device
+### Credential stays on the device
 
-- **Codex**: the laptop runs `codex login` into a throwaway `CODEX_HOME` (the existing account
-  flow), reads `auth.json`, uploads it, and deletes the temp home. The laptop's own login is
-  untouched, so there is exactly one refresher (the vault) for the uploaded grant.
-- **Claude**: the laptop runs the existing Claude sign-in (Claude's own OAuth flow) in a
-  capture-only mode that never activates the result locally, and uploads the credential blob.
-  Again one refresher.
+- **DeepSeek**: Settings → DeepSeek saves the key to the run device's isolated Harness home
+  (`${ZERON_DEEPSEEK_HOME|data_dir/deepseek}/api-key`, `0600`). For Cloud the same key is saved to
+  the vault and granted to the session machine; a saved key takes precedence over a process
+  environment's `DEEPSEEK_API_KEY`. No browser sign-in or subscription login exists.
+- **Historical providers**: their stored grants remain in the vault but no Cloud machine requests
+  them; every sign-in and account call for them returns unsupported.
 - **GitHub**: device flow. The laptop asks the edge to start it; the user approves on
   github.com; the *vault* polls GitHub and stores the result, so the token never transits a
   device. Separately, the user installs the App on the accounts / repositories Cloud may reach
   (`githubInstallUrl` in the vault status → `github.com/apps/{slug}/installations/new`).
-- **API keys**: pasted on the laptop, uploaded once.
+- **DeepSeek API key**: pasted on the laptop, uploaded once; it replaces any earlier key for the same account.
 
-The vault only refreshes. It owns each refresh token from upload on.
+DeepSeek keys never refresh; GitHub refreshes are the vault alone.
 
 ### Grants
 
@@ -625,9 +608,8 @@ The vault only refreshes. It owns each refresh token from upload on.
 as runner tokens with prefix `zeron-vault-grant`) → `{provider, accessToken, expiresAt,
 accountId?, generation}`. A grant requires: the device is enrolled and not revoked, the device
 is in the credential's `authorizedDevices`, the user is not disabled, and the global kill switch
-(`VAULT_DISABLED=1`) is off. Grants are the provider's own access token, refreshed by the vault
-when within 10 minutes of expiry (Codex: when `last_refresh` is older than 7 days or the JWT has
-<1 h left). The consumer caches a grant until expiry (offline fallback) and never sees a
+(`VAULT_DISABLED=1`) is off. A DeepSeek grant is the key itself and never expires; a GitHub grant is refreshed by the vault
+before expiry. The consumer caches a grant until expiry (offline fallback) and never sees a
 refresh token.
 
 Failure semantics: a refresh that returns `invalid_grant` marks the account `needs_reconnect`
@@ -757,7 +739,7 @@ refresh contract changes is caught within a day, before users' grants start fail
 - **Runner mode** (`ZERON_RUNNER_ENROLL` or an existing `{data_dir}/runner.json`): `Auth`
   gains a runner token source (enroll once, then signed `/runner/token`); scope is `Synced`
   for the runner's `{orgId, userId}`. Platform comes from `ZERON_DEVICE_PLATFORM` (`cloud`).
-  The runner posts heartbeats and restricts its harness catalog to Codex + Claude Code.
+  The runner posts heartbeats and restricts its harness catalog to DeepSeek.
 - **Session machines** (`ZERON_CLOUD_*`, persisted to `cloud-session.json`): the device row
   carries `cloud-session`; at boot the engine clones the project into `ZERON_CLOUD_PATH` (with
   the GitHub grant's credential store; retried with backoff) and checks out
@@ -780,21 +762,18 @@ refresh contract changes is caught within a day, before users' grants start fail
 - **No keychain on Cloud**: a Cloud device never calls macOS `security` (Providers-page
   account code), and git's helper list for github.com starts with an empty entry, so no system
   helper (Apple git's `osxkeychain`, libsecret) also stores the App token.
-- **No login, no run**: a Cloud run of Codex or Claude Code with no credential at all (no
-  vault grant, no API key, no login of the sandbox's own) fails at once with where to sign in,
-  instead of the CLI retrying unauthenticated.
-- **Credential broker** (runner only): before a harness spawn, the host resolves credentials:
-  Codex from a vault grant (managed `CODEX_HOME` with the access token, empty refresh token;
-  re-granted before expiry), Claude from a vault grant (Claude Code's credential file with the
-  access token and an empty refresh token, rewritten before expiry), else the native sandbox
-  login, else `anthropic-key`. GitHub grants (App installation tokens for the session
-  repository, requested with `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
-  wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git`
-  keeps working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a
-  `#[serde(skip)]` field on `RunRequest`, so they are never persisted in the session doc, the
-  journal or logs. On platform `cloud` only Codex and Claude Code are registered: nothing else
-  is probed, update-checked or installable (some providers' images install a harness the first
-  time its binary is invoked).
+- **No key, no run**: a Cloud run of DeepSeek with no credential at all (no vault grant, no saved
+  key, no `DEEPSEEK_API_KEY` in the environment) fails at once with where to configure one,
+  instead of the SDK retrying unauthenticated.
+- **Credential broker** (runner only): before a DeepSeek run, the host resolves the key from a
+  vault grant (Cloud) or the machine's saved key, else `DEEPSEEK_API_KEY` in the launching
+  environment. GitHub grants (App installation tokens for the session repository, requested with
+  `repo`) are kept fresh in a git credential store file (`{data_dir}/cloud/git-credentials`, 0600,
+  wired as git's `credential.https://github.com.helper`) and `gh`'s `hosts.yml`, so `git` keeps
+  working in sessions that outlive the spawn-time `GH_TOKEN`. Secrets ride a `#[serde(skip)]`
+  field on `RunRequest`, so they are never persisted in the session doc, the journal or logs. On
+  platform `cloud` only DeepSeek is registered: nothing else is probed, update-checked or
+  installable.
 - **Projects' GitHub repositories**: SpacesSync stamps `githubRepo` (the `origin` remote's
   `owner/name`) on the spaces this device owns, with `gitDetected`. `ListGithubRepos` lists the
   repositories Cloud reaches through the edge (the vault calls GitHub with the user token:
@@ -812,11 +791,11 @@ refresh contract changes is caught within a day, before users' grants start fail
   404ing. `ListCloudBranches {repo, defaultBranch?}` lists the branches a session can start from
   (GitHub's, default first; `GET /vault/{org}/github/branches?repo=`). A side chat
   (`parentChatId`) whose parent runs on a session machine is hosted on that same machine. `ListHarnesses` / `ListModels` aimed at any Cloud
-  device are answered by the asking engine (Codex + Claude Code), and anything else aimed at the
+  device are answered by the asking engine (DeepSeek), and anything else aimed at the
   logical device fails fast — it has no engine.
 - **Laptop side**: `CloudStatus` / `CloudEnable` / `CloudDelete` / `CloudUsage`,
   `CloudSessions` / `CloudSessionWake` / `CloudSessionSleep` / `CloudSessionDelete`,
-  `ListCloudBranches`, `VaultStatus`, `VaultConnectCodex` / `VaultConnectClaude`, `VaultPutApiKey`,
+  `ListCloudBranches`, `VaultStatus`, `VaultPutApiKey` (the DeepSeek key),
   `VaultAuthorize`, `VaultDisconnect`, `VaultRevokeDevice`, `GithubConnectStart` /
   `GithubConnectPoll` — RPCs that call the edge with the user's bearer and are never routed by
   `targetDeviceId`. The two sign-ins reply `AgentLoginStart` immediately and are driven with
@@ -891,13 +870,9 @@ provider for orphan sandboxes (logged as `{"event":"cloud.orphan", provider, san
 1. **Localhost IPC (P1, local-process vector).** The engine's IPC port accepted any local
    process. It now requires a per-install bearer (`{data_dir}/ipc-token`, 0600, rotated on each
    engine start) on the WebSocket handshake. Viewports, the CLI and `zeron mcp` read it at
-   dial time; the engine passes the file's path (`ZERON_IPC_TOKEN_FILE`, never the token —
-   Claude gets MCP env on its argv) to the MCP servers it injects. See `docs/mcp.md`.
-2. **Claude injected-token expiry probe.** The Cloud engine writes vault-granted Claude access
-   tokens (never refresh tokens) into Claude Code's credential file and rewrites it before
-   expiry. Confirm with `scripts/probe-claude-injected-token.sh` that a long-running Claude
-   Code session picks up the rewritten file after its injected token expires (and the
-   `CLAUDE_CODE_OAUTH_TOKEN` variant), before any real user's login is stored.
+   dial time; the engine passes the file's path (`ZERON_IPC_TOKEN_FILE`, never the token) to the MCP servers it injects; the DeepSeek SDK receives each server's description in a private env variable, not argv. See `docs/mcp.md`.
+2. **DeepSeek key rotation.** Confirm a replaced key reaches the next run (the SDK reads it at
+   start) and that a running session is unaffected until its next turn.
 3. Vault infrastructure secrets set (`VAULT_KEK`, GitHub App), canary
    credentials stored, and the vault deploy job approved.
 

@@ -70,7 +70,7 @@ class PlanTests(unittest.TestCase):
 
     def test_lockfile_runs_every_rust_suite(self):
         suites = plan.plan(files("Cargo.lock"), "fast")
-        self.assertEqual(selected(suites), {"core", "ui", "cursor", "windows", "macos", "ios", "android", "zgx"})
+        self.assertEqual(selected(suites), {"core", "ui", "deepseek", "windows", "macos", "ios", "android", "zgx"})
 
     def test_mobile_core_selects_ios_and_android(self):
         suites = plan.plan(files("crates/sync/src/lib.rs", patch="+let x = 1;"), "fast")
@@ -153,12 +153,12 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core + ui + cursor + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
+        # result + core + ui + deepseek + voice + ios-core + apk + zgx-linux; voice runtime + windows x2;
         # native + ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 8, "windows": 3, "macos": 3})
+        self.assertEqual(counts, {"linux": 8, "windows": 2, "macos": 3})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
         self.assertEqual(main["linux"], 9)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=3 macos=3")
+        self.assertEqual(plan.format_reservation(counts), "linux=8 windows=2 macos=3")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
         self.assertEqual(daytime, {"linux": 8, "windows": 2, "macos": 3})  # no voice
@@ -174,10 +174,10 @@ class WorkflowConsistencyTests(unittest.TestCase):
     SUITES = {
         "core": ("ui-tests.yml", ["core-tests"]),
         "ui": ("ui-tests.yml", ["ui-tests"]),
-        "cursor": ("cursor-compatibility.yml", ["cursor-compatibility"]),
+        "deepseek": ("deepseek-compatibility.yml", ["deepseek-compatibility"]),
         "edge": ("preview-tests.yml", ["edge"]),
         "installer": ("linux-installer.yml", ["desktop-entry"]),
-        "voice": ("voice-tests.yml", ["offline-linux", "windows-runtime"]),
+        "voice": ("voice-tests.yml", ["offline-linux"]),
         "windows": ("windows.yml", ["tests", "app"]),
         "macos": ("macos.yml", ["macos-native"]),
         "frame_source": ("macos.yml", ["macos-frame-source"]),

@@ -1,10 +1,9 @@
 -- A model picker on models made up here, for
--- tests/model_picker_in_place.test.luau: two with reasoning (one with Fast
--- mode), one without, and one configured in place (Devin Fusion's shape:
--- its lead and sidekick are options, so it has a card). The model chosen
--- is `test_picker_model`, its options' picks `test_picker_options`. Here,
--- beside app.luau, as a mounted script loads modules from its own
--- directory down.
+-- tests/model_picker_in_place.test.luau and tests/model_picker_motion.test.luau:
+-- two with reasoning at the same levels, one with five, one with none, and
+-- one configured in place (its lead and sidekick are options). The model
+-- chosen is `test_picker_model`. Here, beside app.luau, as a mounted script
+-- loads modules from its own directory down.
 
 ui.theme.strict("warn")
 local ds = require("@ds")
@@ -26,15 +25,14 @@ local FIVE: { EffortSlider.Level } = {
 }
 
 local MODELS: { ModelPicker.Model } = {
-	{ value = "sonnet", label = "Sonnet", harness = "claude", efforts = THREE, effort = "medium" },
-	{ value = "opus", label = "Opus", harness = "claude", efforts = THREE, effort = "high", fast = true },
-	{ value = "gpt", label = "GPT", harness = "codex", efforts = FIVE, effort = "medium" },
-	{ value = "mini", label = "Mini", harness = "codex" },
-	{ value = "adaptive", label = "Adaptive", harness = "devin" },
+	{ value = "deepseek/deepseek-flash", label = "DeepSeek V4.1 Flash", harness = "deepseek", efforts = THREE, effort = "high" },
+	{ value = "deepseek/deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek", efforts = THREE, effort = "high" },
+	{ value = "deepseek/deepseek-v4-pro-max", label = "DeepSeek V4 Pro Max", harness = "deepseek", efforts = FIVE, effort = "medium" },
+	{ value = "deepseek/deepseek-lite", label = "DeepSeek Lite", harness = "deepseek" },
 	{
-		value = "fusion",
-		label = "Fusion",
-		harness = "devin",
+		value = "deepseek/deepseek-v4-pro-tuned",
+		label = "DeepSeek V4 Pro Tuned",
+		harness = "deepseek",
 		efforts = THREE,
 		effort = "high",
 		fast = true,
@@ -85,15 +83,13 @@ return ui.column {
 		end,
 	},
 	ModelPicker {
-		model = ui.state("test_picker_model", "sonnet" :: string?),
+		model = ui.state("test_picker_model", "deepseek/deepseek-flash" :: string?),
 		effort = ui.state("test_picker_effort", "medium" :: string?),
 		fast = ui.state("test_picker_fast", false),
 		options = ui.state("test_picker_options", {} :: { [string]: string }),
 		favorites = ui.state("test_picker_favorites", {} :: { [string]: boolean }),
 		harnesses = {
-			{ id = "claude", label = "Claude", mark = "claude" },
-			{ id = "codex", label = "Codex", mark = "openai" },
-			{ id = "devin", label = "Devin", mark = "devin" },
+			{ id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" },
 		},
 		models = MODELS,
 	},

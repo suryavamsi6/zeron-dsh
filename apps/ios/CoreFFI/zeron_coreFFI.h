@@ -913,6 +913,11 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_fork_side_chat(uint64_t ptr, R
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_device_activate_account(uint64_t ptr, RustBuffer device_id, RustBuffer harness, RustBuffer account_id
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_DEVICE_ADD_API_KEY
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_DEVICE_ADD_API_KEY
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_device_add_api_key(uint64_t ptr, RustBuffer device_id, RustBuffer key
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_DEVICE_AGENT_ACCOUNTS
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_DEVICE_AGENT_ACCOUNTS
 uint64_t uniffi_zeron_mobile_fn_method_coreclient_device_agent_accounts(uint64_t ptr, RustBuffer device_id
@@ -950,7 +955,7 @@ uint64_t uniffi_zeron_mobile_fn_method_coreclient_set_harness_enabled(uint64_t p
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_VOICE
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_START_VOICE
-uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_voice(uint64_t ptr, RustBuffer host_device_id, RustBuffer voice, uint64_t media, uint64_t listener, RustCallStatus *_Nonnull out_status
+uint64_t uniffi_zeron_mobile_fn_method_coreclient_start_voice(uint64_t ptr, RustBuffer _host_device_id, RustBuffer _voice, uint64_t media, uint64_t listener, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_FN_METHOD_CORECLIENT_ATTACH_TERMINAL
@@ -2770,6 +2775,12 @@ uint16_t uniffi_zeron_mobile_checksum_method_coreclient_fork_side_chat(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_DEVICE_ACTIVATE_ACCOUNT
 #define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_DEVICE_ACTIVATE_ACCOUNT
 uint16_t uniffi_zeron_mobile_checksum_method_coreclient_device_activate_account(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_DEVICE_ADD_API_KEY
+#define UNIFFI_FFIDEF_UNIFFI_ZERON_MOBILE_CHECKSUM_METHOD_CORECLIENT_DEVICE_ADD_API_KEY
+uint16_t uniffi_zeron_mobile_checksum_method_coreclient_device_add_api_key(void
     
 );
 #endif

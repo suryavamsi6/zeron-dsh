@@ -1,12 +1,10 @@
 /**
- * Daily canary (cron `0 6 * * *`): force one refresh of `CANARY_USER_ID`'s
- * credential for every refreshable provider (codex, claude, github), through
- * the same per-account gate real grants use. A provider that changes its
- * refresh contract (new client id, new error shape, endpoint move) fails here
- * a day before users' grants start failing. A non-refreshable credential with
- * an end date (Claude setup token) is instead checked for >30 days of life.
- * The GitHub App's own credentials are checked too (`GET /app` with an App
- * JWT): every Cloud session's GitHub access is minted with them.
+ * Daily canary (cron `0 6 * * *`): reports `CANARY_USER_ID`'s GitHub login
+ * state (and refreshes it when due) through the same per-account gate real
+ * grants use, then checks the GitHub App's own credentials (`GET /app` with an
+ * App JWT): every Cloud session's GitHub access is minted with them.
+ * DeepSeek API keys need no canary: they are static credentials with no
+ * refresh contract and no vault-side HTTP probe.
  * Each result is recorded in the account DO's `canary` table and logged as one
  * `vault.canary` line — alert on `ok=false` in Workers observability.
  */

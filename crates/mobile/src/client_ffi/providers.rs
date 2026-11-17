@@ -191,6 +191,11 @@ impl CoreClient {
             .map(accounts)
     }
 
+    pub async fn device_add_api_key(&self, device_id: String, key: String) -> CoreResult<Vec<DeviceAccountInfo>> {
+        let client = self.client.clone();
+        on_runtime(async move { client.device_add_api_key(&device_id, &key).await }).await.map(accounts)
+    }
+
     /// Run `harness` on `account_id` from now on.
     pub async fn device_activate_account(
         &self,

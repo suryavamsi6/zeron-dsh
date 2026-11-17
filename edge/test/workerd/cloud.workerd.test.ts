@@ -94,8 +94,10 @@ describe("models", () => {
     const u = newUser();
     const res = await call("GET", "/cloud/org1/models", userBearer(u));
     expect(res.status).toBe(200);
-    const { models } = (await res.json()) as { models: Record<string, { id: string; label: string }[]> };
-    expect(Object.keys(models).sort()).toEqual(["claude-code", "codex"]);
+    const { models } = (await res.json()) as { models: Record<string, { id: string; label: string; reasoningLevels: string[] }[]> };
+    expect(Object.keys(models)).toEqual(["deepseek"]);
+    expect(models.deepseek.map((m) => m.id)).toEqual(["deepseek-flash", "deepseek-v4-pro"]);
+    for (const model of models.deepseek) expect(model.reasoningLevels).toEqual(["low", "high", "max"]);
     for (const list of Object.values(models)) {
       expect(list.length).toBeGreaterThan(0);
       expect(new Set(list.map((m) => m.id)).size).toBe(list.length);
@@ -522,9 +524,9 @@ describe("runner tokens", () => {
     expect((await call("GET", "/vault/org1", bearer)).status).toBe(403);
     expect((await call("GET", "/vault/org1/github/repos", bearer)).status).toBe(403);
     expect((await call("GET", "/vault/org1/github/branches?repo=acme/app", bearer)).status).toBe(403);
-    expect((await call("PUT", "/vault/org1/credentials/codex", bearer, { material: { key: "x" }, authorizedDevices: [] })).status).toBe(403);
+    expect((await call("PUT", "/vault/org1/credentials/deepseek-key", bearer, { material: { key: "x" }, authorizedDevices: [] })).status).toBe(403);
 
-    const grant = { provider: "codex", deviceId, ts: Date.now(), sig: "c2ln" };
+    const grant = { provider: "deepseek-key", deviceId, ts: Date.now(), sig: "c2ln" };
     expect((await call("POST", "/vault/org1/grant", bearer, grant)).status).toBe(200);
     expect((await call("POST", "/vault/org1/grant", bearer, { ...grant, deviceId: "laptop-1" })).status).toBe(403);
     expect((await vaultCalls("grant")).at(-1)!.args[0]).toEqual({ userId: u.userId, orgId: "org1", kind: "runner", deviceId });
@@ -914,9 +916,8 @@ describe("delete", () => {
     const { accountDeviceId: first } = await enableCloud(u);
     // Connected for this Cloud (GitHub and a Claude login) and for a laptop.
     const user = { userId: u.userId, orgId: u.orgId, kind: "user" };
-    await env.VAULT.authorize(user, "github", [first]);
-    await env.VAULT.authorize(user, "claude", [first, "laptop-1"]);
-    await env.VAULT.authorize(user, "codex", ["laptop-1"]);
+    await env.VAULT.authorize(user, "github", [first, "laptop-1"]);
+    await env.VAULT.authorize(user, "deepseek-key", ["laptop-1"]);
     expect((await call("DELETE", "/cloud/org1", userBearer(u))).status).toBe(200);
     await waitForState(u, "off");
     const { accountDeviceId: second } = await enableCloud(u);
@@ -924,9 +925,8 @@ describe("delete", () => {
     const status = (await env.VAULT.status(user)) as { value: { connections: { provider: string; authorizedDevices: string[] }[] } };
     const devices = (provider: string) =>
       status.value.connections.find((c) => c.provider === provider)?.authorizedDevices;
-    expect(devices("github")).toEqual([second]);
-    expect(devices("claude")).toEqual([second, "laptop-1"]);
-    expect(devices("codex")).toEqual(["laptop-1"]); // never Cloud's: untouched
+    expect(devices("github")).toEqual([second, "laptop-1"]);
+    expect(devices("deepseek-key")).toEqual(["laptop-1"]); // never Cloud's: untouched
   });
 
   it("turning Cloud off deletes every session and revokes the account", async () => {

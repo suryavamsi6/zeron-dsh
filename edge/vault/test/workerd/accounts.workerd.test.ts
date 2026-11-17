@@ -1,110 +1,34 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { VaultProviderId } from "../../src/api";
 import { accountStub } from "../../src/names";
-import { CLAUDE_USAGE_URL, CODEX_USAGE_URL } from "../../src/providers/usage";
-import { fakeJwt } from "../support";
-import { DAY, codexMaterial, json, mockUpstream, runnerCaller, sec, setup, signedGrant, value, vault } from "./helpers";
+import { runnerCaller, setup, signedGrant, value, vault } from "./helpers";
 
 afterEach(() => vi.restoreAllMocks());
 
-/** A `codex login` for `email`, valid for days. */
-const codexLogin = (email: string) => ({
-  id_token: fakeJwt({ email, nonce: crypto.randomUUID() }),
-  access_token: fakeJwt({ exp: sec(Date.now() + 5 * DAY), jti: crypto.randomUUID() }),
-  refresh_token: `rt-${crypto.randomUUID()}`,
-  account_id: `acct-${email}`
-});
+const PROVIDER = "deepseek-key";
+const put = async (ctx: Awaited<ReturnType<typeof setup>>, key: string) =>
+  value(await vault().putCredential(ctx.caller, PROVIDER, {
+    material: { key }, authorizedDevices: [ctx.device.deviceId]
+  }));
 
-const putCodex = async (ctx: Awaited<ReturnType<typeof setup>>, tokens: ReturnType<typeof codexLogin>) =>
-  value(
-    await vault().putCredential(ctx.caller, "codex", {
-      material: codexMaterial(tokens),
-      authorizedDevices: [ctx.device.deviceId]
-    })
-  );
-
-const grantedToken = async (ctx: Awaited<ReturnType<typeof setup>>) =>
-  vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, "codex"));
-
-describe("multiple accounts per provider", () => {
-  it("keeps each login as its own account; a new sign-in becomes active", async () => {
+describe("multiple DeepSeek key accounts", () => {
+  it("keeps each key as its own account; a new key becomes active", async () => {
     const ctx = await setup();
-    const ada = codexLogin("ada@example.com");
-    const bob = codexLogin("bob@example.com");
-    await putCodex(ctx, ada);
-    await putCodex(ctx, bob);
-
-    const accounts = value(await vault().accounts(ctx.caller, "codex"));
-    expect(accounts.map((a) => [a.account, a.active, a.kind])).toEqual([
-      ["ada@example.com", false, "oauth"],
-      ["bob@example.com", true, "oauth"]
-    ]);
-    expect(value(await grantedToken(ctx)).accessToken).toBe(bob.access_token);
-
-    // The connection summary counts them and reads from the active one.
-    const status = value(await vault().status(ctx.caller));
-    expect(status.connections.find((c) => c.provider === "codex")).toMatchObject({
-      account: "bob@example.com",
-      accounts: 2,
-      hasActive: true
-    });
-  });
-
-  it("the same login signed in again replaces its own account, not a new one", async () => {
-    const ctx = await setup();
-    await putCodex(ctx, codexLogin("ada@example.com"));
-    await putCodex(ctx, codexLogin("bob@example.com"));
-    const again = codexLogin("ada@example.com");
-    await putCodex(ctx, again);
-
-    const accounts = value(await vault().accounts(ctx.caller, "codex"));
-    expect(accounts).toHaveLength(2);
-    expect(accounts.find((a) => a.active)?.account).toBe("ada@example.com");
-    const grant = value(await grantedToken(ctx));
-    expect(grant.accessToken).toBe(again.access_token);
-    // Generations stay unique across accounts.
-    expect(grant.generation).toBe(3);
-  });
-
-  it("switching picks the account grants come from; none active issues none", async () => {
-    const ctx = await setup();
-    const ada = codexLogin("ada@example.com");
-    await putCodex(ctx, ada);
-    await putCodex(ctx, codexLogin("bob@example.com"));
-    const adaSlot = value(await vault().accounts(ctx.caller, "codex")).find((a) => a.account === "ada@example.com")!.slot;
-
-    const switched = value(await vault().activateAccount(ctx.caller, "codex", adaSlot));
-    expect(switched.find((a) => a.active)?.slot).toBe(adaSlot);
-    expect(value(await grantedToken(ctx)).accessToken).toBe(ada.access_token);
-
-    value(await vault().activateAccount(ctx.caller, "codex", null));
-    const none = await grantedToken(ctx);
-    expect(!none.ok && none.message).toBe("no codex account is active");
-
-    const missing = await vault().activateAccount(ctx.caller, "codex", "a000000000");
-    expect(!missing.ok && missing.error).toBe("not_found");
-  });
-
-  it("forgetting the active account leaves none active; the others stay", async () => {
-    const ctx = await setup();
-    await putCodex(ctx, codexLogin("ada@example.com"));
-    await putCodex(ctx, codexLogin("bob@example.com"));
-    const bobSlot = value(await vault().accounts(ctx.caller, "codex")).find((a) => a.active)!.slot;
-
-    const left = value(await vault().forgetAccount(ctx.caller, "codex", bobSlot));
-    expect(left.map((a) => [a.account, a.active])).toEqual([["ada@example.com", false]]);
-    // Idempotent.
-    expect(value(await vault().forgetAccount(ctx.caller, "codex", bobSlot))).toHaveLength(1);
-    const none = await grantedToken(ctx);
-    expect(!none.ok && none.error).toBe("not_found");
+    await put(ctx, "sk-deepseek-first-0001");
+    await put(ctx, "sk-deepseek-second-0002");
+    const accounts = value(await vault().accounts(ctx.caller, PROVIDER));
+    expect(accounts.map((a) => [a.account, a.active])).toEqual([["…0001", false], ["…0002", true]]);
+    const grant = value(await vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, PROVIDER)));
+    expect(grant.accessToken).toBe("sk-deepseek-second-0002");
   });
 
   it("API keys dedupe by key, never by anything secret in the listing", async () => {
     const ctx = await setup();
     const put = async (key: string) =>
       value(
-        await vault().putCredential(ctx.caller, "anthropic-key", {
+        await vault().putCredential(ctx.caller, "deepseek-key", {
           material: { key },
           authorizedDevices: [ctx.device.deviceId]
         })
@@ -112,83 +36,111 @@ describe("multiple accounts per provider", () => {
     await put("sk-ant-api03-first-0123456789");
     await put("sk-ant-api03-second-0123456789");
     await put("sk-ant-api03-first-0123456789");
-    const accounts = value(await vault().accounts(ctx.caller, "anthropic-key"));
+    const accounts = value(await vault().accounts(ctx.caller, "deepseek-key"));
     expect(accounts).toHaveLength(2);
     expect(accounts.every((a) => a.kind === "api-key")).toBe(true);
     expect(JSON.stringify(accounts)).not.toContain("sk-ant-api03");
   });
 
-  it("usage is read by the vault for one login; a rejection never marks it", async () => {
+
+  it("switching picks the key grants come from; none active issues none", async () => {
     const ctx = await setup();
-    const ada = codexLogin("ada@example.com");
-    await putCodex(ctx, ada);
-    const slot = value(await vault().accounts(ctx.caller, "codex"))[0]!.slot;
+    await put(ctx, "sk-deepseek-first-0001");
+    await put(ctx, "sk-deepseek-second-0002");
+    const first = value(await vault().accounts(ctx.caller, PROVIDER))[0]!;
+    value(await vault().activateAccount(ctx.caller, PROVIDER, first.slot));
+    expect(value(await vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, PROVIDER))).accessToken)
+      .toBe("sk-deepseek-first-0001");
+    value(await vault().activateAccount(ctx.caller, PROVIDER, null));
+    expect(await vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, PROVIDER)))
+      .toMatchObject({ ok: false, error: "not_found" });
+  });
 
-    // Built per call: a Response made outside the account object can't be read in it.
-    let answer = () => json({ plan_type: "pro", rate_limit: { primary_window: { used_percent: 12 } } });
-    const upstream = mockUpstream({ [CODEX_USAGE_URL]: () => answer() });
-    const usage = value(await vault().accountUsage(ctx.caller, "codex", slot));
-    expect(usage.body).toMatchObject({ plan_type: "pro" });
-    const call = upstream.calls[0]!;
-    expect(new Headers(call.init?.headers).get("authorization")).toBe(`Bearer ${ada.access_token}`);
-    expect(new Headers(call.init?.headers).get("chatgpt-account-id")).toBe("acct-ada@example.com");
+  it("forgetting the active key leaves none active; other keys stay", async () => {
+    const ctx = await setup();
+    await put(ctx, "sk-deepseek-first-0001");
+    await put(ctx, "sk-deepseek-second-0002");
+    const active = value(await vault().accounts(ctx.caller, PROVIDER)).find((a) => a.active)!;
+    const remaining = value(await vault().forgetAccount(ctx.caller, PROVIDER, active.slot));
+    expect(remaining.map((a) => [a.account, a.active])).toEqual([["…0001", false]]);
+    expect(await vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, PROVIDER)))
+      .toMatchObject({ ok: false, error: "not_found" });
+  });
 
-    answer = () => json({ error: "nope" }, 403);
-    const refused = await vault().accountUsage(ctx.caller, "codex", slot);
-    expect(!refused.ok && refused.error).toBe("upstream");
-    expect(value(await vault().accounts(ctx.caller, "codex"))[0]!.status).toBe("connected");
-
-    const keyless = await vault().accountUsage(ctx.caller, "anthropic-key", slot);
-    expect(!keyless.ok && keyless.error).toBe("not_found");
-    expect(CLAUDE_USAGE_URL).toBe("https://api.anthropic.com/api/oauth/usage");
+  it("has no direct LLM usage probe and does not change the account", async () => {
+    const ctx = await setup();
+    await put(ctx, "sk-deepseek-first-0001");
+    const before = value(await vault().accounts(ctx.caller, PROVIDER));
+    const fetch = vi.spyOn(globalThis, "fetch");
+    expect(await vault().accountUsage(ctx.caller, PROVIDER, before[0]!.slot))
+      .toMatchObject({ ok: false, error: "not_found" });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(value(await vault().accounts(ctx.caller, PROVIDER))).toEqual(before);
   });
 
   it("only users manage accounts", async () => {
     const ctx = await setup();
     const runner = runnerCaller(ctx.userId, ctx.device.deviceId);
     for (const result of [
-      await vault().accounts(runner, "codex"),
-      await vault().activateAccount(runner, "codex", null),
-      await vault().forgetAccount(runner, "codex", "a000000000"),
-      await vault().accountUsage(runner, "codex", "a000000000")
-    ]) {
-      expect(!result.ok && result.error).toBe("forbidden");
-    }
+      await vault().accounts(runner, PROVIDER),
+      await vault().activateAccount(runner, PROVIDER, null),
+      await vault().forgetAccount(runner, PROVIDER, "a000000000"),
+      await vault().accountUsage(runner, PROVIDER, "a000000000")
+    ]) expect(result).toMatchObject({ ok: false, error: "forbidden" });
   });
 
-  it("the single-record layout migrates into one active account that still opens", async () => {
+  it("the single-record layout migrates into one active key that still opens", async () => {
     const ctx = await setup();
-    const ada = codexLogin("ada@example.com");
-    await putCodex(ctx, ada);
-    // Rewind the object to the old layout: one `record` row, no accounts.
-    await runInDurableObject(accountStub(env, ctx.userId, "codex"), (instance, state) => {
+    const key = "deepseek-migration-fixture";
+    await put(ctx, key);
+    await runInDurableObject(accountStub(env, ctx.userId, PROVIDER), (instance, state) => {
       const sql = state.storage.sql;
       const row = sql.exec<Record<string, SqlStorageValue>>("SELECT * FROM accounts").toArray()[0]!;
       sql.exec(
         `CREATE TABLE record (id INTEGER PRIMARY KEY CHECK (id = 1), generation INTEGER NOT NULL, status TEXT NOT NULL,
-           account TEXT, authorized_devices TEXT NOT NULL, envelope TEXT NOT NULL, updated_at INTEGER NOT NULL,
-           hard_expires_at INTEGER, last_refresh_at INTEGER, last_attempt_at INTEGER, last_error TEXT,
-           failures INTEGER NOT NULL DEFAULT 0)`
+          account TEXT, authorized_devices TEXT NOT NULL, envelope TEXT NOT NULL, updated_at INTEGER NOT NULL,
+          hard_expires_at INTEGER, last_refresh_at INTEGER, last_attempt_at INTEGER, last_error TEXT,
+          failures INTEGER NOT NULL DEFAULT 0)`
       );
       sql.exec(
         "INSERT INTO record (id, generation, status, account, authorized_devices, envelope, updated_at) VALUES (1, ?, ?, ?, ?, ?, ?)",
-        row.generation,
-        row.status,
-        row.account,
-        row.authorized_devices,
-        row.envelope,
-        row.updated_at
+        row.generation, row.status, row.account, row.authorized_devices, row.envelope, row.updated_at
       );
       sql.exec("DELETE FROM accounts");
       sql.exec("DELETE FROM meta WHERE key = 'active'");
       (instance as unknown as { migrateSingleRecord(): void }).migrateSingleRecord();
       expect(sql.exec("SELECT name FROM sqlite_master WHERE name = 'record'").toArray()).toHaveLength(0);
     });
+    expect(value(await vault().accounts(ctx.caller, PROVIDER)).map((a) => [a.account, a.active]))
+      .toEqual([["…ture", true]]);
+    expect(value(await vault().grant(ctx.caller, await signedGrant(ctx.device, ctx.userId, PROVIDER))))
+      .toMatchObject({ accessToken: key, generation: 1 });
+  });
 
-    const accounts = value(await vault().accounts(ctx.caller, "codex"));
-    expect(accounts.map((a) => [a.account, a.active])).toEqual([["ada@example.com", true]]);
-    // Same generation and envelope, so the same AAD: it still opens.
-    const grant = value(await grantedToken(ctx));
-    expect(grant).toMatchObject({ accessToken: ada.access_token, generation: 1 });
+  it("rejects legacy operations without opening or rewriting legacy storage", async () => {
+    const ctx = await setup();
+    const legacy = "codex" as VaultProviderId;
+    const stub = accountStub(env, ctx.userId, legacy);
+    await runInDurableObject(stub, (_instance, state) => {
+      const sql = state.storage.sql;
+      sql.exec("INSERT OR REPLACE INTO meta (key, value) VALUES ('owner', ?), ('provider', 'codex')", ctx.userId);
+      sql.exec("CREATE TABLE IF NOT EXISTS historical (payload TEXT)");
+      sql.exec("INSERT INTO historical (payload) VALUES ('keep credentials')");
+    });
+    const before = await runInDurableObject(stub, (_instance, state) =>
+      JSON.stringify(state.storage.sql.exec("SELECT * FROM historical").toArray()));
+    const bad = { ok: false, error: "bad_request" };
+    expect(await vault().putCredential(ctx.caller, legacy, {
+      material: { key: "never-echo-this-key" }, authorizedDevices: []
+    })).toMatchObject(bad);
+    expect(await vault().authorize(ctx.caller, legacy, [])).toMatchObject(bad);
+    expect(await vault().disconnect(ctx.caller, legacy)).toMatchObject(bad);
+    expect(await vault().accounts(ctx.caller, legacy)).toMatchObject(bad);
+    const valid = await signedGrant(ctx.device, ctx.userId, PROVIDER);
+    expect(await vault().grant(ctx.caller, { ...valid, provider: legacy })).toMatchObject(bad);
+    expect(await stub.accounts(ctx.userId, legacy)).toMatchObject(bad);
+    const after = await runInDurableObject(stub, (_instance, state) =>
+      JSON.stringify(state.storage.sql.exec("SELECT * FROM historical").toArray()));
+    expect(after).toBe(before);
   });
 });

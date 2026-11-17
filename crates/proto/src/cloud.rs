@@ -29,7 +29,7 @@ pub const CLOUD_ACCOUNT_CAPABILITY: &str = "cloud-account";
 pub const CLOUD_SESSION_CAPABILITY: &str = "cloud-session";
 
 /// Harnesses a Cloud device offers in v1 (wire `HarnessId` names).
-pub const CLOUD_HARNESSES: &[&str] = &["codex", "claude-code"];
+pub const CLOUD_HARNESSES: &[&str] = &["deepseek"];
 
 /// A Cloud session machine's own setup steps — started or woke, cloned the
 /// project, checked out the session branch — shown as tool chips that open
@@ -375,6 +375,7 @@ pub struct BillingLink {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum VaultProvider {
+    DeepseekKey,
     /// ChatGPT sign-in for Codex (uploaded from a laptop's `codex login`).
     Codex,
     /// Claude subscription sign-in for Claude Code (uploaded from a laptop's
@@ -393,16 +394,14 @@ impl VaultProvider {
         Self::ALL.into_iter().find(|p| p.as_str() == value)
     }
 
-    pub const ALL: [VaultProvider; 5] = [
-        VaultProvider::Codex,
-        VaultProvider::Claude,
+    pub const ALL: [VaultProvider; 2] = [
+        VaultProvider::DeepseekKey,
         VaultProvider::Github,
-        VaultProvider::AnthropicKey,
-        VaultProvider::OpenaiKey,
     ];
 
     pub fn as_str(self) -> &'static str {
         match self {
+            VaultProvider::DeepseekKey => "deepseek-key",
             VaultProvider::Codex => "codex",
             VaultProvider::Claude => "claude",
             VaultProvider::Github => "github",

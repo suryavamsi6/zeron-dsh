@@ -730,16 +730,6 @@ impl std::fmt::Debug for Client {
 }
 
 impl Client {
-    /// Dedicated ephemeral call handle; never uses durable commands or RPC retries.
-    pub async fn voice_transport(
-        &self,
-        device_id: &str,
-    ) -> Result<Arc<zeron_voice_session::RpcTransport>> {
-        let live = self.inner.live().ok_or_else(|| {
-            ClientError::Unsupported("remote voice requires a connected account".into())
-        })?;
-        live.relay.voice_transport(device_id).await
-    }
     /// Sign-out/shutdown closes every call created by this client.
     pub fn voice_cancellation(&self) -> CancellationToken {
         self.inner.cancel.child_token()
@@ -916,7 +906,13 @@ impl Client {
 
     /// Mint a chat row (born on chat2: `roomGen: 2`). The row is written
     /// before any session doc opens, so the host never reads it as legacy.
-    pub fn create_session(&self, new: NewSession) -> Result<String> {
+    pub fn create_session(&self, mut new: NewSession) -> Result<String> {
+        if new.config.as_ref().is_some_and(|c| !c.harness.is_supported()) {
+            return Err(ClientError::Unsupported("Only DeepSeek can start sessions. Choose a DeepSeek model explicitly.".into()));
+        }
+        if new.config.is_none() {
+            new.config = Some(ChatConfig { harness: zeron_proto::HarnessId::DeepSeek, model: None, reasoning: None, model_options: Default::default(), sandbox: zeron_proto::SandboxLevel::WorkspaceWrite, access: Default::default(), plan: false });
+        }
         let (state, _) = self.inner.workspace.state();
         let id = crate::new_id();
         let now = Utc::now();
@@ -1117,6 +1113,9 @@ impl Client {
     }
 
     pub fn set_session_config(&self, chat_id: &str, config: &ChatConfig) -> Result<()> {
+        if !config.harness.is_supported() {
+            return Err(ClientError::Unsupported("Historical providers are read-only. Choose DeepSeek explicitly before sending.".into()));
+        }
         // A provider change needs a host that switches: an older one would
         // resume the chat's stored session under the new provider.
         if let Some(chat) = self.inner.workspace.chat(chat_id)
@@ -1529,8 +1528,8 @@ impl Client {
     /// the last cached list, else the static fallback. Cached in memory for
     /// capability gating (mid-turn steering).
     pub async fn list_harnesses(&self, device_id: &str) -> Vec<HarnessInfo> {
-        // A Cloud machine runs Claude Code and Codex, every one of them: said
-        // here, so a chat on one that's asleep never waits on dialling it.
+        // A Cloud machine runs DeepSeek: said here, so a chat on one that's
+        // asleep never waits on dialling it.
         if let Some(list) = catalog::harnesses_without_asking(device_id) {
             return list;
         }
@@ -1555,7 +1554,7 @@ impl Client {
                 match reply {
                     Ok(list) => {
                         let list: Vec<HarnessInfo> =
-                            list.into_iter().filter(|h| h.id != "mock").collect();
+                            list.into_iter().filter(|h| h.id == "deepseek").collect();
                         cache.put_harnesses(device_id, &list);
                         list
                     }
@@ -1568,6 +1567,7 @@ impl Client {
                 }
             }
         };
+        let list: Vec<HarnessInfo> = list.into_iter().filter(|h| h.id == "deepseek").collect();
         lock(&self.inner.harness_catalogs).insert(device_id.to_owned(), list.clone());
         self.inner.recompute_workspace();
         for core in self.inner.cores() {
@@ -1579,6 +1579,7 @@ impl Client {
     /// Model catalog for `harness` on `device_id` (normalized live reply,
     /// else the cached one, else the curated static list).
     pub async fn list_models(&self, device_id: &str, harness: &str) -> Vec<ModelInfo> {
+        if harness != "deepseek" { return Vec::new(); }
         match self.inner.backend() {
             Backend::Demo(demo) => demo.list_models(harness).await,
             Backend::Live(_) if zeron_proto::is_cloud_device(device_id, "") => {

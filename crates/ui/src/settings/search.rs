@@ -422,15 +422,19 @@ pub(crate) fn unindexed(section: SettingsSection, drawn: &[gpui::SharedString]) 
         return Vec::new();
     }
     // An entry may say more than its row ("Dictation shortcut" for Voice's
-    // "Shortcut"), never less.
+    // "Shortcut"), never less, and a row's own words may sit in its terms:
+    // Appshots names the binding "Preferred shortcut" where the desktop owns
+    // it, and the entry keeps "preferred" among its words. Every word of the
+    // title must be found, as every query word must match some field.
     drawn
         .iter()
         .map(|title| title.to_ascii_lowercase())
         .filter(|title| {
-            !INDEX
-                .iter()
-                .filter(rows)
-                .any(|indexed| indexed.title.contains(title.as_str()))
+            !INDEX.iter().filter(rows).any(|indexed| {
+                title
+                    .split_whitespace()
+                    .all(|word| indexed.title.contains(word) || indexed.terms.contains(word))
+            })
         })
         .collect()
 }

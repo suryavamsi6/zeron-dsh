@@ -30,57 +30,6 @@ pub(super) fn stage_reveal(open: bool, elapsed_ms: f32, reduced: bool) -> f32 {
 }
 
 impl Shell {
-    /// The footer microphone: a new orchestrator in a projectless Codex chat
-    /// on this device. The chat's model follows the composer when it already
-    /// targets Codex; otherwise Codex's own default model runs the delegations.
-    pub(super) fn start_voice(&mut self, cx: &mut Context<Self>) {
-        let state = self.state.read(cx);
-        let (Some(engine), Some(device)) = (state.engine().cloned(), state.local_device_id.clone())
-        else {
-            return;
-        };
-        let config = self
-            .composer
-            .read(cx)
-            .pickers()
-            .read(cx)
-            .resolved(cx)
-            .chat_config()
-            .filter(|config| config.harness == HarnessId::Codex)
-            .unwrap_or_else(|| ChatConfig {
-                harness: HarnessId::Codex,
-                model: None,
-                reasoning: None,
-                model_options: Default::default(),
-                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
-                access: Default::default(),
-                plan: false,
-            });
-        let saved = settings::current(cx);
-        let device = saved.codex_voice_device.unwrap_or(device);
-        let voice = saved.codex_voice;
-        let host_name = state
-            .device_name(&device)
-            .unwrap_or("This device")
-            .to_owned();
-        self.voice.update(cx, |controller, cx| {
-            controller.start(engine, device, config, voice, cx);
-            controller.host_name = Some(host_name);
-            controller.set_stage_open(true, cx);
-        });
-    }
-
-    /// Read whether this device's Codex can take a call; `force` re-reads it
-    /// after Settings → Agents changes or on coming back to a window that
-    /// hides voice (Codex may have been installed meanwhile).
-    pub(super) fn check_voice_codex(&mut self, force: bool, cx: &mut Context<Self>) {
-        let Some(engine) = self.state.read(cx).engine().cloned() else {
-            return;
-        };
-        self.voice
-            .update(cx, |voice, cx| voice.check_codex(&engine, force, cx));
-    }
-
     pub(super) fn end_voice(&mut self, cx: &mut Context<Self>) {
         self.voice.update(cx, |voice, cx| voice.cancel(cx));
     }
@@ -123,162 +72,16 @@ impl Shell {
         }
     }
 
+    /// Remote voice is not offered: DeepSeek Harness has no realtime voice
+    /// contract. Local dictation lives in the composer, not here.
     pub(super) fn render_voice_trigger(
         &mut self,
-        theme: &Theme,
-        cx: &mut Context<Self>,
+        _theme: &Theme,
+        _cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        self.check_voice_codex(false, cx);
-        let voice = self.voice.read(cx);
-        // Without Codex on this device a call could only fail.
-        if !voice.offered() {
-            return None;
-        }
-        let live = voice.is_live();
-        let stage_open = voice.stage_open;
-        let failure = (voice.phase == VoicePhase::Failed)
-            .then(|| voice.reason_text())
-            .filter(|text| !text.is_empty());
-        let (orb_state, microphone, speaker) = (
-            voice.orb_state(),
-            voice.microphone_level(),
-            voice.speaker_level(),
-        );
-        let reduced = self.reduced_motion;
-        self.voice_footer_orb.update(cx, |orb, cx| {
-            orb.set_visible(live, cx);
-            orb.set_state(orb_state, cx);
-            orb.set_audio_levels(microphone, speaker, cx);
-            orb.set_reduced_motion(reduced, cx);
-        });
-
-        let button = div()
-            .id("voice-trigger")
-            .debug_selector(|| "voice-trigger".into())
-            .role(gpui::Role::Button)
-            .tab_index(0)
-            .relative()
-            .size(px(SIDEBAR_FOOTER_BUTTON_SIZE))
-            .flex_none()
-            .rounded(px(8.0))
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .bg(motion::hover_blend(
-                FOOTER_HOVER,
-                theme.glass_hover().opacity(0.0),
-                theme.glass_hover(),
-            ))
-            .on_hover(motion::hover_listener(FOOTER_HOVER))
-            .focus_visible(|s| s.border_2().border_color(theme.accent));
-
-        if live {
-            return button
-                .aria_label(if stage_open {
-                    "Hide voice"
-                } else {
-                    "Open voice"
-                })
-                .tooltip(stage_tooltip(if stage_open {
-                    "Hide voice · Esc"
-                } else {
-                    "Voice is live · open"
-                }))
-                .on_click(
-                    cx.listener(move |this, _, _, cx| this.set_voice_stage_open(!stage_open, cx)),
-                )
-                .child(self.voice_footer_orb.clone())
-                .into_any_element()
-                .into();
-        }
-
-        let tooltip: SharedString = failure
-            .map(SharedString::from)
-            .unwrap_or_else(|| "Start voice · Codex orchestrator".into());
-        let button = button
-            .aria_label("Start voice")
-            .tooltip(move |_, cx| {
-                let text = tooltip.clone();
-                cx.new(|_| SurfaceTabTooltip { text }).into()
-            })
-            .on_click(cx.listener(|this, _, _, cx| this.start_voice(cx)))
-            .child(
-                icon(icons::MICROPHONE)
-                    .size(px(15.0))
-                    .text_color(motion::hover_blend(
-                        FOOTER_HOVER,
-                        theme.text_muted,
-                        theme.text,
-                    )),
-            );
-        let Some(failure) = failure else {
-            return Some(button.into_any_element());
-        };
-        // A failed start explains itself once, anchored to the microphone;
-        // the next press retries.
-        let popup_theme = theme.for_popup();
-        let card = popover::popover_card(&popup_theme)
-            .w(px(232.0))
-            .flex()
-            .flex_row()
-            .items_start()
-            .gap(px(8.0))
-            .child(
-                icon(icons::DANGER_TRIANGLE)
-                    .mt(px(1.0))
-                    .size(px(14.0))
-                    .text_color(popup_theme.warning),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .text_size(crate::typography::ui_rems(12.0))
-                    .text_color(popup_theme.text_muted)
-                    .child(SharedString::from(failure)),
-            )
-            .child(
-                div()
-                    .id("voice-failure-dismiss")
-                    .flex_none()
-                    .cursor_pointer()
-                    .rounded(px(4.0))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        cx.stop_propagation();
-                        this.voice.update(cx, |voice, cx| voice.dismiss_reason(cx));
-                    }))
-                    .role(gpui::Role::Button)
-                    .aria_label("Dismiss")
-                    .tooltip(stage_tooltip("Dismiss"))
-                    .child(
-                        icon(icons::CLOSE)
-                            .size(px(14.0))
-                            .text_color(popup_theme.text_faint),
-                    ),
-            )
-            .into_any_element();
-        button
-            .child(
-                div()
-                    .absolute()
-                    .top(px(4.0))
-                    .right(px(4.0))
-                    .size(px(5.0))
-                    .rounded_full()
-                    .bg(theme.warning),
-            )
-            .child(popover::anchored_menu_above_end(
-                "voice-failure",
-                card,
-                None,
-            ))
-            .into_any_element()
-            .into()
+        None
     }
 
-    /// The live orb above the orchestrator chat's composer. Every other chat
-    /// keeps its plain composer; pressing the orb returns to the stage.
     pub(super) fn render_voice_composer_orb(
         &mut self,
         composer_width: f32,

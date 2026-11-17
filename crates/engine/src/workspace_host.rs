@@ -407,7 +407,7 @@ impl WorkspaceHost {
             // Every boot restamps the running binary's version (fleet staleness
             // on the Devices page; workspace version — same for every crate).
             version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            cursor_sdk_version: Some(zeron_harness::CursorHarness::sdk_version().into()),
+            cursor_sdk_version: None,
             capabilities: device_capabilities(),
         })?;
 
@@ -1154,6 +1154,9 @@ impl WorkspaceHost {
         if self.read(|doc| doc.chat(chat_id))?.is_some() {
             return Ok(()); // idempotent: optimistic client retries never duplicate
         }
+        if let Some(config) = &config {
+            crate::sessions::ensure_run_harness(config.harness)?;
+        }
         let space = match space_id {
             Some(space_id) => match self.read(|doc| doc.space(space_id))? {
                 Some(space) => Some(space),
@@ -1496,6 +1499,7 @@ impl WorkspaceHost {
     /// composer's mid-session model/reasoning/options changes). Returns false
     /// when the chat doesn't exist.
     pub fn set_chat_config(&self, chat_id: &str, config: &ChatConfig) -> Result<bool, EngineError> {
+        crate::sessions::ensure_run_harness(config.harness)?;
         Ok(self.mutate(|doc| doc.set_chat_config(chat_id, config))?)
     }
 
@@ -2291,6 +2295,45 @@ impl zeron_sync::RegistryTransport for WsDerivedRegistryTransport {
 #[cfg(test)]
 mod tests {
     use super::{device_name_on_boot, linked_worktree_root};
+
+    #[tokio::test]
+    async fn legacy_provider_configuration_is_readable_but_rejected_without_mutation() {
+        use super::*;
+        let dir = tempfile::tempdir().unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(DocsStore::open(dir.path()).unwrap()),
+            WorkspaceHostConfig {
+                device_id: "test-device".into(),
+                device_name: "Test device".into(),
+                platform: "linux".into(),
+                org_id: "test-org".into(),
+                user_id: "test-user".into(),
+                edge: None,
+                local_only: true,
+            },
+        ).unwrap();
+        let legacy: ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "codex", "model": "old-model", "sandbox": "workspace-write"
+        })).unwrap();
+        let deepseek: ChatConfig = serde_json::from_value(serde_json::json!({
+            "harness": "deepseek", "model": "deepseek-flash", "sandbox": "workspace-write"
+        })).unwrap();
+        host.create_chat("existing", None, Some("test-device"), Some(deepseek.clone()), None).unwrap();
+        host.mutate(|doc| doc.set_chat_config("existing", &legacy)).unwrap();
+        host.rename_chat("existing", "Historical conversation").unwrap();
+        let before = serde_json::to_value(host.chat("existing").unwrap()).unwrap();
+
+        assert!(host.set_chat_config("existing", &legacy).is_err());
+        assert!(host.create_chat("rejected", None, Some("test-device"), Some(legacy), None).is_err());
+        assert!(host.chat("rejected").unwrap().is_none());
+        assert_eq!(serde_json::to_value(host.chat("existing").unwrap()).unwrap(), before);
+
+        host.set_chat_config("existing", &deepseek).unwrap();
+        let migrated = host.chat("existing").unwrap().unwrap();
+        assert_eq!(migrated.config.unwrap().harness, HarnessId::DeepSeek);
+        assert_eq!(migrated.title.as_deref(), Some("Historical conversation"));
+        host.flush();
+    }
 
     #[tokio::test]
     async fn registry_http_sync_retains_dns_cause() {

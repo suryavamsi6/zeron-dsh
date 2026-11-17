@@ -441,7 +441,7 @@ async fn a_steer_with_no_command_running_stops_nothing() {
     rig.core.sessions.shutdown().await;
 }
 
-/// Claude Code tells the agent the person rejected the call and to stop and
+/// A runtime may tell the agent the person rejected the call and to stop and
 /// wait whenever a turn is interrupted, so a message from another chat that
 /// stopped the command would read as an order to stop. It waits for the
 /// command instead, as `send_message` promises.

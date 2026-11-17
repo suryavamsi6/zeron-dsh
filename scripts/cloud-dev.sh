@@ -23,7 +23,7 @@
 # edge/vault/README.md, "The GitHub App").
 #
 # In the window: Settings → Cloud → turn Cloud on and connect GitHub; sign in
-# to Codex / Claude in Settings → Providers with Cloud picked; then add a
+# to DeepSeek in Settings → Providers with Cloud picked; then add a
 # project whose GitHub repository the Zeron GitHub App is installed on, pick
 # Cloud in the device menu of a new chat there, and send.
 #
@@ -44,7 +44,7 @@ SESSION_PORT_BASE="${SESSION_PORT_BASE:-27900}"
 RUN="$(date +%s)"
 ORG_ID="org_clouddev"
 if [[ "$MODE" == boat ]]; then
-  # One account and window across runs: GitHub, Claude/Codex and the
+  # One account and window across runs: GitHub, DeepSeek and the
   # projects you added stay (the edge and vault keep their state in
   # edge/.wrangler); only session machines are deleted on exit.
   STATE="${STATE:-/tmp/zeron-cloud-dev/boat}"

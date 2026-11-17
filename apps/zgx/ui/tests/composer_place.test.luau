@@ -262,7 +262,7 @@ test("composer footer: short of room the effort goes first, the model's name las
 	end
 	expect(effort_gone ~= nil and access_folded ~= nil).to_be(true)
 	expect((effort_gone :: number) > (access_folded :: number)).to_be(true)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(chip_text(app, "Model")).to_contain("DeepSeek V4.1 Flash")
 	-- Wide again, all of it.
 	app:resize(800, 500)
 	app:frames(60)
@@ -275,12 +275,12 @@ test("composer footer: the model's name goes only after everything else has fold
 	local app = mounted()
 	app:set_state("test_place_w", 800)
 	rested(app)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(chip_text(app, "Model")).to_contain("V4 Pro")
 	app:set_state("test_place_w", 260)
 	rested(app)
 	expect(chip_text(app, "Access")).to_be("")
 	expect(chip_text(app, "Branch")).to_be("")
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(chip_text(app, "Model")).to_contain("V4 Pro")
 	app:set_state("test_place_w", 180)
 	rested(app)
 	expect(chip_text(app, "Model")).to_be("")
@@ -288,7 +288,7 @@ test("composer footer: the model's name goes only after everything else has fold
 	-- Back with room, its name again.
 	app:set_state("test_place_w", 800)
 	rested(app)
-	expect(chip_text(app, "Model")).to_contain("Opus")
+	expect(chip_text(app, "Model")).to_contain("V4 Pro")
 	expect(app:error()).to_be_nil()
 end)
 

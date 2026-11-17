@@ -69,7 +69,6 @@ import { randomId, utf8 } from "./encoding";
 import type { Env } from "./env";
 import { devicesStub } from "./names";
 import { adapterFor } from "./providers";
-import { codexEmail } from "./providers/codex";
 import { fetchGithubLogin, parseGithubToken, pollDeviceFlow, startDeviceFlow } from "./providers/github";
 import {
   accountId,
@@ -92,7 +91,7 @@ import {
   type ListedRepo
 } from "./providers/github-repos";
 import type { FetchFn, GrantMaterial, ProviderAdapter } from "./providers/types";
-import { fetchUsage, hasUsage } from "./providers/usage";
+import { isProvider } from "./validate";
 import { fail, ok, type VaultFailure } from "./result";
 
 /** A refresh attempted this recently is not retried while the current token
@@ -292,11 +291,9 @@ const hardExpired = (row: AccountRow, now: number): boolean =>
 const statusOf = (row: AccountRow, now: number): "connected" | "needsReconnect" =>
   row.status === "connected" && !hardExpired(row, now) ? "connected" : "needsReconnect";
 
-const kindOf = (provider: VaultProviderId, secret: unknown): AccountKind => {
+const kindOf = (provider: VaultProviderId, _secret: unknown): AccountKind => {
   if (provider === "github") return "github";
-  if (provider === "anthropic-key" || provider === "openai-key") return "api-key";
-  if (provider === "claude" && (secret as { kind?: string } | null)?.kind === "setup-token") return "setup-token";
-  return "oauth";
+  return "api-key";
 };
 
 /** Canary statuses, worst first: the provider reports its worst account. */
@@ -307,7 +304,7 @@ export class VaultAccount extends DurableObject<Env> {
   /** Resolved at call time so tests can stub the global `fetch`. */
   private readonly fetchFn: FetchFn = (input, init) => fetch(input, init);
   private userId = "";
-  private provider: VaultProviderId = "codex";
+  private provider: VaultProviderId = "deepseek-key";
   /** One refresh in flight per account (by slot). */
   private readonly refreshing = new Map<string, Promise<RefreshDone>>();
   private readonly polls = new Map<string, Promise<VaultResult<GithubDevicePoll>>>();
@@ -316,6 +313,8 @@ export class VaultAccount extends DurableObject<Env> {
     super(ctx, env);
     this.sql = ctx.storage.sql;
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    const storedProvider = this.getMeta("provider");
+    if (storedProvider !== undefined && !isProvider(storedProvider)) return;
     this.sql.exec(
       `CREATE TABLE IF NOT EXISTS accounts (
         slot TEXT PRIMARY KEY,
@@ -443,8 +442,8 @@ export class VaultAccount extends DurableObject<Env> {
     if (row) {
       const slot = newSlot();
       const provider = this.getMeta("provider");
-      const kind: AccountKind =
-        provider === "github" ? "github" : provider === "anthropic-key" || provider === "openai-key" ? "api-key" : "oauth";
+      if (!isProvider(provider)) return;
+      const kind: AccountKind = provider === "github" ? "github" : "api-key";
       this.sql.exec(
         `INSERT INTO accounts (slot, generation, status, kind, identity, account, profile, authorized_devices, envelope,
            created_at, updated_at, hard_expires_at, last_refresh_at, last_attempt_at, last_error, failures)
@@ -587,6 +586,7 @@ export class VaultAccount extends DurableObject<Env> {
 
   /** The alarm: revocations GitHub didn't answer before, tried again. */
   async alarm(): Promise<void> {
+    if (this.getMeta("provider") !== "github") return;
     // (No call claimed the object this time: who it belongs to is stored.)
     this.userId = this.getMeta("owner") ?? "";
     this.provider = (this.getMeta("provider") as VaultProviderId | undefined) ?? this.provider;
@@ -631,25 +631,10 @@ export class VaultAccount extends DurableObject<Env> {
     });
   }
 
-  /** Plan usage of one Claude or Codex account, read here; the token never
-   * leaves. Refreshes the token first when due (same path as grants). */
-  usage(userId: string, provider: VaultProviderId, slot: string): Promise<VaultResult<VaultUsageView>> {
+  usage(userId: string, provider: VaultProviderId, _slot: string): Promise<VaultResult<VaultUsageView>> {
     const owner = this.claim(userId, provider);
     if (owner) return Promise.resolve(owner);
-    if (!hasUsage(provider)) return Promise.resolve(fail("not_found", `${provider} has no usage view`));
-    return this.guard(async () => {
-      const usable = await this.usableMaterial(slot, () => undefined);
-      if (!usable.ok) return usable;
-      const outcome = await fetchUsage(provider, usable.value.material, this.fetchFn);
-      switch (outcome.kind) {
-        case "ok":
-          return ok({ body: outcome.body, fetchedAt: Date.now() });
-        case "unsupported":
-          return fail("not_found", `${provider} has no usage view`);
-        case "failed":
-          return fail("upstream", outcome.reason, 502);
-      }
-    });
+    return Promise.resolve(fail("not_found", `${provider} has no usage view`));
   }
 
   /** Repositories the user's GitHub logins can reach (users only — the caller
@@ -1608,22 +1593,13 @@ export class VaultAccount extends DurableObject<Env> {
   }
 
   /** What makes two uploads the same login: never secret material itself. */
-  private async identityOf(secret: unknown, profile: VaultAccountProfile): Promise<string | undefined> {
+  private async identityOf(secret: unknown, _profile: VaultAccountProfile): Promise<string | undefined> {
     const value = (secret ?? {}) as Record<string, unknown>;
     switch (this.provider) {
-      case "anthropic-key":
-      case "openai-key":
+      case "deepseek-key":
         return typeof value.key === "string" ? `key:${await keyId(utf8(value.key))}` : undefined;
       case "github":
         return typeof value.login === "string" ? `login:${value.login.toLowerCase()}` : undefined;
-      case "codex": {
-        const email = typeof value.idToken === "string" ? codexEmail(value.idToken) : undefined;
-        return email ? `chatgpt:${email.toLowerCase()}|${String(value.accountId ?? "")}` : undefined;
-      }
-      case "claude":
-        return profile.email && value.kind === "oauth"
-          ? `claude:${profile.email.toLowerCase()}|${(profile.organization ?? "").toLowerCase()}`
-          : undefined;
     }
   }
 
@@ -1633,11 +1609,7 @@ export class VaultAccount extends DurableObject<Env> {
       accessToken: material.accessToken,
       expiresAt: material.expiresAt,
       generation,
-      ...(material.accountId ? { accountId: material.accountId } : {}),
-      ...(material.idToken ? { idToken: material.idToken } : {}),
-      ...(material.account ? { account: material.account } : {}),
-      ...(material.scopes ? { scopes: [...material.scopes] } : {}),
-      ...(material.subscriptionType ? { subscriptionType: material.subscriptionType } : {})
+      ...(material.account ? { account: material.account } : {})
     };
   }
 
@@ -1735,6 +1707,7 @@ export class VaultAccount extends DurableObject<Env> {
   /** Pin the object to its (user, provider) on first use; a mismatch is a
    * routing bug and is refused rather than mixed. */
   private claim(userId: string, provider: VaultProviderId): VaultFailure | undefined {
+    if (!isProvider(provider)) return fail("bad_request", "unsupported provider");
     const owner = this.getMeta("owner");
     const slot = this.getMeta("provider");
     if (owner === undefined || slot === undefined) {

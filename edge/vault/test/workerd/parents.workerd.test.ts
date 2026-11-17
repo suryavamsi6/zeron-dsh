@@ -16,11 +16,11 @@ const enrollChild = async (caller: VaultCaller, parentId: string) => {
   return child;
 };
 
-/** A user whose anthropic key is connected "for Cloud" (the logical id only). */
+/** A user whose DeepSeek key is connected "for Cloud" (the logical id only). */
 const connectedForCloud = async () => {
   const ctx = await setup();
   const cloudId = `cloud-${crypto.randomUUID()}`;
-  value(await vault().putCredential(ctx.caller, "anthropic-key", { material: { key: KEY }, authorizedDevices: [cloudId] }));
+  value(await vault().putCredential(ctx.caller, "deepseek-key", { material: { key: KEY }, authorizedDevices: [cloudId] }));
   return { ...ctx, cloudId };
 };
 
@@ -29,18 +29,18 @@ describe("parent devices", () => {
     const { userId, caller, device: laptop, cloudId } = await connectedForCloud();
     const child = await enrollChild(caller, cloudId);
 
-    expect(value(await vault().grant(caller, await signedGrant(child, userId, "anthropic-key"))).accessToken).toBe(KEY);
+    expect(value(await vault().grant(caller, await signedGrant(child, userId, "deepseek-key"))).accessToken).toBe(KEY);
     // The sandbox's own runner token works too.
     const runner = runnerCaller(userId, child.deviceId);
-    expect(value(await vault().grant(runner, await signedGrant(child, userId, "anthropic-key"))).accessToken).toBe(KEY);
+    expect(value(await vault().grant(runner, await signedGrant(child, userId, "deepseek-key"))).accessToken).toBe(KEY);
 
     // Not authorized: the laptop, and a session under some other parent.
-    expect(await vault().grant(caller, await signedGrant(laptop, userId, "anthropic-key"))).toMatchObject({
+    expect(await vault().grant(caller, await signedGrant(laptop, userId, "deepseek-key"))).toMatchObject({
       ok: false,
       error: "not_authorized"
     });
     const stray = await enrollChild(caller, "cloud-other");
-    expect(await vault().grant(caller, await signedGrant(stray, userId, "anthropic-key"))).toMatchObject({
+    expect(await vault().grant(caller, await signedGrant(stray, userId, "deepseek-key"))).toMatchObject({
       ok: false,
       error: "not_authorized"
     });
@@ -54,13 +54,13 @@ describe("parent devices", () => {
     const { userId, caller, cloudId } = await connectedForCloud();
     const first = await enrollChild(caller, cloudId);
     const second = await enrollChild(caller, cloudId);
-    value(await vault().grant(caller, await signedGrant(first, userId, "anthropic-key")));
+    value(await vault().grant(caller, await signedGrant(first, userId, "deepseek-key")));
 
     const status = value(await vault().revokeDevice(caller, cloudId));
     expect(status.devices.find((d) => d.deviceId === cloudId)?.revokedAt).toBeTypeOf("number");
     for (const child of [first, second]) {
       expect(status.devices.find((d) => d.deviceId === child.deviceId)?.revokedAt).toBeTypeOf("number");
-      expect(await vault().grant(caller, await signedGrant(child, userId, "anthropic-key"))).toMatchObject({
+      expect(await vault().grant(caller, await signedGrant(child, userId, "deepseek-key"))).toMatchObject({
         ok: false,
         error: "device_revoked"
       });
@@ -76,21 +76,21 @@ describe("parent devices", () => {
     const ctx = await setup();
     const { userId, caller } = ctx;
     const parent = await enroll(caller, "cloud");
-    value(await vault().putCredential(caller, "anthropic-key", { material: { key: KEY }, authorizedDevices: [parent.deviceId] }));
+    value(await vault().putCredential(caller, "deepseek-key", { material: { key: KEY }, authorizedDevices: [parent.deviceId] }));
     const keep = await enrollChild(caller, parent.deviceId);
     const drop = await enrollChild(caller, parent.deviceId);
 
     value(await vault().revokeDevice(caller, drop.deviceId));
-    expect(await vault().grant(caller, await signedGrant(drop, userId, "anthropic-key"))).toMatchObject({
+    expect(await vault().grant(caller, await signedGrant(drop, userId, "deepseek-key"))).toMatchObject({
       ok: false,
       error: "device_revoked"
     });
-    value(await vault().grant(caller, await signedGrant(parent, userId, "anthropic-key")));
-    value(await vault().grant(caller, await signedGrant(keep, userId, "anthropic-key")));
+    value(await vault().grant(caller, await signedGrant(parent, userId, "deepseek-key")));
+    value(await vault().grant(caller, await signedGrant(keep, userId, "deepseek-key")));
 
     value(await vault().revokeDevice(caller, parent.deviceId));
     for (const device of [parent, keep]) {
-      expect(await vault().grant(caller, await signedGrant(device, userId, "anthropic-key"))).toMatchObject({
+      expect(await vault().grant(caller, await signedGrant(device, userId, "deepseek-key"))).toMatchObject({
         ok: false,
         error: "device_revoked"
       });

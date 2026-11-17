@@ -10,7 +10,7 @@ import { setup, signedGrant, value, vault } from "./helpers";
 afterEach(() => vi.restoreAllMocks());
 
 const KEY = "sk-ant-api03-rotation-test-key-7777";
-const PROVIDER: VaultProviderId = "anthropic-key";
+const PROVIDER: VaultProviderId = "deepseek-key";
 
 /** The configured keys, as the DOs see them. */
 const currentOnly = () => loadKeyring({ VAULT_KEK: env.VAULT_KEK });

@@ -55,10 +55,10 @@ from reuse import matches  # noqa: E402
 SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "core": [("core-tests", "linux")],  # ui-tests.yml
     "ui": [("ui-tests", "linux")],  # ui-tests.yml (UI + Linux browser)
-    "cursor": [("cursor-compatibility", "linux")],  # cursor-compatibility.yml
+    "deepseek": [("deepseek-compatibility", "linux")],  # deepseek-compatibility.yml
     "edge": [("edge", "linux")],  # preview-tests.yml
     "installer": [("desktop-entry", "linux")],  # linux-installer.yml
-    "voice": [("offline-linux", "linux"), ("windows-runtime", "windows")],  # voice-tests.yml
+    "voice": [("offline-linux", "linux")],  # voice-tests.yml
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "macos": [("macos-native", "macos")],  # macos.yml
     "frame_source": [("macos-frame-source", "macos")],  # macos.yml
@@ -98,8 +98,7 @@ MOBILE_CORE = [
 # the packaged Windows media runtime. The rest of voice is tested where it is
 # built: protocol and transport in core-tests, mobile voice in ios-core,
 # voice-media in core-tests and the Windows tests.
-VOICE_PATHS = ["crates/audio/**", "crates/voice-media/**", "dist/voice/**", "scripts/package-voice-runtime.py",
-               "scripts/codex-voice-remote-smoke.py", "scripts/tests/*voice*", ".github/workflows/voice-tests.yml"]
+VOICE_PATHS = ["crates/audio/**", ".github/workflows/voice-tests.yml"]
 
 # The zgx suite's own files, and the crates it builds: main() replaces ZGX_CORE
 # with the closure of reuse.SUITE_PACKAGES["zgx"]; this list is the fallback.
@@ -116,8 +115,8 @@ BROAD: dict[str, list[str]] = {
     "ui": CARGO + ["crates/**", "scripts/ci/**", ".github/actions/linux-ci/**",
                    "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py",
                    ".github/workflows/ui-tests.yml"],
-    "cursor": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
-                       "scripts/*cursor-sdk*", ".github/workflows/cursor-*.yml"],
+    "deepseek": CARGO + ["crates/harness/**", "crates/doc/**", "crates/engine/**",
+                       "scripts/*deepseek-sdk*", ".github/workflows/deepseek-*.yml"],
     "edge": ["edge/**", ".github/workflows/preview-tests.yml"],
     "installer": ["edge/src/install.sh", "scripts/package-linux.sh", "scripts/test-linux-desktop-entry.sh",
                   "scripts/ci/apt-install.sh", "dist/zeron.desktop", "dist/zeron.png",

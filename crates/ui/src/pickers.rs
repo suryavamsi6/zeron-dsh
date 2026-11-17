@@ -1180,18 +1180,6 @@ impl Pickers {
                         .unwrap_or_default(),
                     _ => CheckoutKind::default(),
                 };
-                // ...and Cloud runs Codex and Claude Code only: a provider it
-                // can't run would boot (and bill) a machine for a failing run.
-                if this.config.checkout == CheckoutKind::Cloud
-                    && this
-                        .config
-                        .harness
-                        .is_some_and(|h| !matches!(h, HarnessId::Codex | HarnessId::ClaudeCode))
-                {
-                    this.config.harness = None;
-                    this.config.model = None;
-                    this.config.reasoning = None;
-                }
                 this.refs = Loadable::Idle;
                 this.refs_space = None;
             }
@@ -1467,6 +1455,7 @@ impl Pickers {
         // what a send would carry.
         let fresh = self.harnesses.ready().filter(|_| !self.harnesses_stale);
         if let Some(harness) = self.defaults.harness {
+            if !harness.is_supported() { return Some(harness); }
             let offered = match fresh {
                 Some(list) => offered_harnesses(list).iter().any(|d| d.id == harness),
                 None => true, // catalog not loaded yet — trust the memory
@@ -1549,6 +1538,9 @@ impl Pickers {
     }
 
     fn model_name(&self, cx: &App) -> ModelName {
+        if self.effective_harness(cx).is_some_and(|h| !h.is_supported()) {
+            return ModelName::Named("Unsupported · choose DeepSeek".into());
+        }
         if self.no_agents_available() && self.effective_harness(cx).is_none() {
             return ModelName::None { no_agents: true };
         }
@@ -1628,6 +1620,7 @@ impl Pickers {
     /// enabled). False while the catalog is still loading or failed
     /// (nothing to conclude yet; offline sends must not be blocked on it).
     pub fn no_agents_available(&self) -> bool {
+        if self.config.harness.or(self.defaults.harness).is_some_and(|h| !h.is_supported()) { return true; }
         // The previous device's list can't speak for this one.
         self.harnesses
             .ready()
@@ -2066,6 +2059,10 @@ impl Pickers {
     }
 
     fn ensure_models(&mut self, harness: HarnessId, force: bool, cx: &mut Context<Self>) {
+        if harness != HarnessId::DeepSeek && !(harness == HarnessId::Mock && mock_harness_enabled()) {
+            self.models.insert(harness, Loadable::Ready(Vec::new()));
+            return;
+        }
         // Normal prefetches load absent/Idle slots once. Picker-open refreshes
         // also retry Ready/Error slots, while an in-flight load is always
         // reused. Ready rows stay visible until the replacement lands.
@@ -2101,34 +2098,7 @@ impl Pickers {
                     serde_json::Value::String(target.clone()),
                 );
             }
-            // A plugin-heavy OpenCode cold start can fail once while caches,
-            // MCP servers, or plugin runtimes are still warming. Keep this
-            // single Loading slot alive for two retries so recovery requires
-            // no picker close/reopen and cannot launch duplicate probes.
-            let mut attempt = 1_u64;
-            let result = loop {
-                let result = engine
-                    .client()
-                    .call(methods::LIST_MODELS, params.clone())
-                    .await;
-                if result.is_ok() || harness != HarnessId::Opencode || attempt >= 3 {
-                    break result;
-                }
-                if let Err(error) = &result {
-                    tracing::warn!(
-                        %error,
-                        attempt,
-                        "OpenCode model discovery failed; retrying automatically"
-                    );
-                }
-                if this.update(cx, |_, _| {}).is_err() {
-                    return;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_secs(attempt * 2))
-                    .await;
-                attempt += 1;
-            };
+            let result = engine.client().call(methods::LIST_MODELS, params).await;
             if let Some(delay) = slow_catalog_delay() {
                 cx.background_executor().timer(delay).await;
             }
@@ -2434,16 +2404,6 @@ impl Pickers {
         self.config.branch = None;
         self.refs = Loadable::Idle;
         self.refs_space = None;
-        if kind == CheckoutKind::Cloud
-            && self
-                .config
-                .harness
-                .is_some_and(|h| !matches!(h, HarnessId::Codex | HarnessId::ClaudeCode))
-        {
-            self.config.harness = None;
-            self.config.model = None;
-            self.config.reasoning = None;
-        }
         self.target_generation = self.target_generation.wrapping_add(1);
         self.load_task = None;
         self.harnesses = Loadable::Idle;
@@ -2477,7 +2437,7 @@ impl Pickers {
     }
 
     fn pick_harness(&mut self, harness: HarnessId, cx: &mut Context<Self>) {
-        if self.harness_locked(cx) {
+        if self.harness_locked(cx) || (harness != HarnessId::DeepSeek && !(harness == HarnessId::Mock && mock_harness_enabled())) {
             return;
         }
         if self.title.is_none()
@@ -6661,111 +6621,19 @@ fn empty_list_note(theme: &Theme, copy: &str) -> AnyElement {
 /// already-clean lists. The send path recomposes the advertised id from the
 /// base + trait (`pick_model_value`), so a folded pick still runs.
 pub(crate) fn normalize_model_rows(harness: HarnessId, models: Vec<Model>) -> Vec<Model> {
-    fn strip_1m(id: &str) -> Option<&str> {
-        id.strip_suffix("[1m]").or_else(|| id.strip_suffix("-1m"))
+    if harness != HarnessId::DeepSeek && !(harness == HarnessId::Mock && mock_harness_enabled()) {
+        return Vec::new();
     }
-    fn norm(id: &str) -> String {
-        id.chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect::<String>()
-            .to_ascii_lowercase()
-    }
-    let catalog = match harness {
-        HarnessId::ClaudeCode => zeron_harness::claude::catalog::static_models(),
-        _ => Vec::new(),
-    };
-    // Curated label for an id: exact normalized match, else — for bare
-    // alphabetic aliases like `opus` — the first (flagship-ordered) family
-    // row. Versioned foreign ids never fuzzy-match.
-    let curated_label = |id: &str| -> Option<String> {
-        let id_norm = norm(id);
-        if let Some(row) = catalog.iter().find(|m| norm(&m.id) == id_norm) {
-            return Some(row.label.clone());
-        }
-        (!id_norm.is_empty() && id_norm.chars().all(|c| c.is_ascii_alphabetic()))
-            .then(|| catalog.iter().find(|m| norm(&m.id).contains(&id_norm)))
-            .flatten()
-            .map(|m| m.label.clone())
-    };
-    let ids: Vec<String> = models.iter().map(|m| m.id.clone()).collect();
-    let has_real = ids.iter().any(|id| !id.eq_ignore_ascii_case("default"));
-    models
-        .into_iter()
-        .filter_map(|mut model| {
-            if has_real && model.id.eq_ignore_ascii_case("default") {
-                return None;
-            }
-            if let Some(base) = strip_1m(&model.id.clone()) {
-                if ids.iter().any(|other| other == base) {
-                    // The bare base is listed too — the engine already gave
-                    // it the Context Window trait; the variant row is noise.
-                    return None;
-                }
-                model.id = base.to_string();
-                // "Opus (1M context)" → "Opus".
-                if let Some(at) = model.label.rfind(" (")
-                    && model.label.ends_with(')')
-                {
-                    model.label.truncate(at);
-                    while model.label.ends_with(' ') {
-                        model.label.pop();
-                    }
-                }
-                if !model.options.iter().any(|o| o.id == "contextWindow") {
-                    model.options.push(zeron_proto::ModelOption {
-                        id: "contextWindow".into(),
-                        label: "Context Window".into(),
-                        choices: vec![
-                            zeron_proto::ModelOptionChoice {
-                                id: "200k".into(),
-                                label: "200K".into(),
-                            },
-                            zeron_proto::ModelOptionChoice {
-                                id: "1m".into(),
-                                label: "1M".into(),
-                            },
-                        ],
-                        default_choice: "1m".into(),
-                    });
-                }
-            }
-            if let Some(label) = curated_label(&model.id) {
-                model.label = label;
-            }
-            Some(model)
-        })
-        .collect()
+    let has_real = models.iter().any(|m| !m.id.eq_ignore_ascii_case("default"));
+    models.into_iter().filter(|m| !has_real || !m.id.eq_ignore_ascii_case("default")).collect()
 }
 
-pub(crate) fn harness_brand_icon(harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
-    match harness {
-        HarnessId::ClaudeCode | HarnessId::Mock => (
-            crate::icons::CLAUDE_MARK,
-            Some(crate::icons::claude_brand()),
-        ),
-        HarnessId::Codex => (crate::icons::OPENAI_MARK, None),
-        HarnessId::Cursor => (crate::icons::CURSOR_MARK, None),
-        // Cognition's mark (the Devin product icon), monochrome.
-        HarnessId::Devin => (crate::icons::DEVIN_MARK, None),
-        // Monochrome mark, tinted by the surface like OpenAI's.
-        HarnessId::Grok => (crate::icons::GROK_MARK, None),
-        // Nous Research's mark (the Hermes product icon), monochrome.
-        HarnessId::Hermes => (crate::icons::HERMES_MARK, None),
-        HarnessId::Fx => (crate::icons::FX_MARK, None),
-        HarnessId::Pi => (crate::icons::PI_MARK, None),
-        // The pixel-"o" from opencode's wordmark (their favicon), monochrome.
-        HarnessId::Opencode => (crate::icons::OPENCODE_MARK, None),
-        HarnessId::Antigravity => (crate::icons::ANTIGRAVITY_MARK, None),
-        HarnessId::Muse => (crate::icons::MUSE_MARK, Some(crate::icons::muse_brand())),
-        // An agent added from the ACP registry (in another app): no mark of
-        // its own here.
-        HarnessId::Registry(_) => (crate::icons::BOT, None),
-    }
+pub(crate) fn harness_brand_icon(_harness: HarnessId) -> (&'static str, Option<gpui::Hsla>) {
+    (crate::icons::BOT, None)
 }
 
-/// `ZERON_HARNESS=mock` (the e2e/dev rig) opts the mock harness into the UI;
-/// production launches never set it, so the mock never surfaces there.
 fn mock_harness_enabled() -> bool {
+    if !cfg!(debug_assertions) { return false; }
     std::env::var("ZERON_HARNESS")
         .ok()
         .as_deref()
@@ -6773,25 +6641,19 @@ fn mock_harness_enabled() -> bool {
         == Some("mock")
 }
 
-/// Production pickers AND chip resolution hide the mock harness — the
-/// registry always lists it, but it must never surface in real UI (neither in
-/// the picker rail nor as the eager default the chips resolve against).
-/// `ZERON_HARNESS=mock` shows it; otherwise it only remains when it's
-/// literally all there is (a dev build with no real harness registered).
+/// Production pickers AND chip resolution show the one runtime this build
+/// runs — the DeepSeek Harness — and hide the mock harness, which the registry
+/// always lists but which must never surface in real UI (neither in the picker
+/// rail nor as the eager default the chips resolve against).
+/// `ZERON_HARNESS=mock` shows it. A retired provider is never visible, not even
+/// when it is the only row: the rail has no fallback to a driver this build
+/// cannot run.
 pub fn visible_harnesses(list: &[HarnessDescriptor]) -> Vec<HarnessDescriptor> {
     visible_harnesses_impl(list, mock_harness_enabled())
 }
 
 fn visible_harnesses_impl(list: &[HarnessDescriptor], allow_mock: bool) -> Vec<HarnessDescriptor> {
-    if allow_mock {
-        return list.to_vec();
-    }
-    let real: Vec<HarnessDescriptor> = list
-        .iter()
-        .filter(|d| d.id != HarnessId::Mock)
-        .cloned()
-        .collect();
-    if real.is_empty() { list.to_vec() } else { real }
+    list.iter().filter(|d| d.id == HarnessId::DeepSeek || (allow_mock && d.id == HarnessId::Mock)).cloned().collect()
 }
 
 /// What the composer actually offers: [`visible_harnesses`] narrowed to the
@@ -7390,7 +7252,7 @@ mod tests {
             "cwd": "/tmp/main", "branch": "main", "archived": false,
             "createdAt": chrono::Utc::now(),
             "config": {
-                "harness": "claude-code", "model": "parent-model", "reasoning": "high",
+                "harness": "deepseek", "model": "parent-model", "reasoning": "high",
                 "modelOptions": { "context": "1m" }, "sandbox": "read-only"
             }
         }))
@@ -7400,12 +7262,9 @@ mod tests {
         state.update(cx, |state, _| state.devices = vec![host_device(true)]);
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         pickers.update(cx, |pickers, _| {
-            pickers.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::ClaudeCode, "Claude Code"),
-                descriptor(HarnessId::Codex, "Codex"),
-            ]);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             pickers.models.insert(
-                HarnessId::ClaudeCode,
+                HarnessId::DeepSeek,
                 Loadable::Ready(vec![bare_model("parent-model", "Parent model")]),
             );
         });
@@ -7498,7 +7357,7 @@ mod tests {
                         .into_iter()
                         .map(|d| d.id)
                         .collect::<Vec<_>>(),
-                    vec![HarnessId::ClaudeCode]
+                    vec![HarnessId::DeepSeek]
                 );
             });
             state.update(cx, |state, _| state.devices = vec![host_device(true)]);
@@ -7507,7 +7366,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn unsaved_side_chat_can_pick_another_harness_before_catalog_load(
+    fn unsaved_side_chat_offers_only_the_one_runtime_before_catalog_load(
         cx: &mut gpui::TestAppContext,
     ) {
         cx.update(|cx| {
@@ -7515,33 +7374,47 @@ mod tests {
             let (state, pickers) = side_chat_picker(true, cx);
             pickers.update(cx, |pickers, cx| {
                 assert!(!pickers.harness_locked(cx));
-                assert_eq!(pickers.rail_descriptors(cx).len(), 2);
+                assert_eq!(
+                    pickers
+                        .rail_descriptors(cx)
+                        .into_iter()
+                        .map(|d| d.id)
+                        .collect::<Vec<_>>(),
+                    vec![HarnessId::DeepSeek],
+                    "the one runtime is the whole rail"
+                );
+                // A retired provider is not a choice: the pick is refused and
+                // the chat keeps the runtime this build runs.
                 pickers.pick_harness(HarnessId::Codex, cx);
                 let resolved = pickers.resolved(cx);
-                assert_eq!(resolved.harness, Some(HarnessId::Codex));
-                assert_eq!(resolved.model, None);
-                assert_eq!(resolved.reasoning, None);
-                assert!(resolved.model_options.is_empty());
+                assert_eq!(resolved.harness, Some(HarnessId::DeepSeek));
+                assert_eq!(resolved.model.as_deref(), Some("parent-model"));
+                assert_eq!(resolved.reasoning, None, "the fixture model has no ladder");
                 let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
-                assert_eq!(create["config"]["harness"], "codex");
-                assert_eq!(create["config"]["model"], serde_json::Value::Null);
+                assert_eq!(create["config"]["harness"], "deepseek");
+                assert_eq!(create["config"]["model"], "parent-model");
                 assert_eq!(create["config"]["sandbox"], "read-only");
                 assert_eq!(create["parentChatId"], "main");
                 assert_eq!(create["cwd"], "/tmp/main");
                 assert_eq!(create["branch"], "main");
 
                 pickers.apply_model_catalog(
-                    HarnessId::Codex,
-                    Loadable::Ready(vec![bare_model("codex-model", "Codex model")]),
+                    HarnessId::DeepSeek,
+                    Loadable::Ready(vec![bare_model("deepseek-flash", "DeepSeek V4.1 Flash")]),
                     cx,
                 );
-                assert_eq!(pickers.resolved(cx).model.as_deref(), Some("codex-model"));
+                // A catalog that never names the chat's own pick leaves that
+                // pick alone rather than silently swapping in a default.
+                assert_eq!(
+                    pickers.resolved(cx).model.as_deref(),
+                    Some("parent-model")
+                );
             });
         });
     }
 
     #[gpui::test]
-    fn side_chat_favorites_switch_harness_locally_and_lock_after_creation(
+    fn side_chat_favorites_pick_locally_and_lock_after_creation(
         cx: &mut gpui::TestAppContext,
     ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -7560,23 +7433,23 @@ mod tests {
                 )));
             });
             pickers.update(cx, |pickers, cx| {
-                let mut model = bare_model("codex-model", "Codex model");
+                let mut model = bare_model("deepseek-flash", "DeepSeek V4.1 Flash");
                 model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::Medium];
                 pickers
                     .models
-                    .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+                    .insert(HarnessId::DeepSeek, Loadable::Ready(vec![model]));
                 pickers
                     .defaults
-                    .toggle_favorite(HarnessId::Codex, "codex-model");
+                    .toggle_favorite(HarnessId::DeepSeek, "deepseek-flash");
                 pickers.model_rail = ModelRail::Favorites;
                 let rows = pickers.model_rows(cx);
                 assert_eq!(rows.len(), 1);
-                assert_eq!(rows[0].harness, HarnessId::Codex);
+                assert_eq!(rows[0].harness, HarnessId::DeepSeek);
                 pickers.activate_model_index(0, cx);
                 pickers.pick_reasoning(ReasoningLevel::Low, cx);
                 let create = state.read(cx).unsaved_side_chat_create("side").unwrap();
-                assert_eq!(create["config"]["harness"], "codex");
-                assert_eq!(create["config"]["model"], "codex-model");
+                assert_eq!(create["config"]["harness"], "deepseek");
+                assert_eq!(create["config"]["model"], "deepseek-flash");
                 assert_eq!(create["config"]["reasoning"], "low");
                 assert_eq!(create["config"]["modelOptions"], serde_json::json!({}));
                 assert!(pickers.mutate_task.is_none());
@@ -7600,7 +7473,7 @@ mod tests {
                 assert!(pickers.harness_locked(cx), "locked mid-turn");
                 assert_eq!(pickers.rail_descriptors(cx).len(), 1);
                 pickers.pick_harness(HarnessId::Codex, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
             let (state, pickers) = side_chat_picker(true, cx);
             state.update(cx, |state, _| {
@@ -7612,7 +7485,7 @@ mod tests {
                     "first send fixes the harness before the RPC finishes"
                 );
                 pickers.pick_harness(HarnessId::Codex, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
             state.update(cx, |state, _| state.end_pending_send("side", "first"));
             assert!(
@@ -7626,7 +7499,7 @@ mod tests {
             pickers.update(cx, |pickers, cx| {
                 assert!(pickers.harness_locked(cx));
                 pickers.pick_harness(HarnessId::Codex, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
         });
     }
@@ -7648,7 +7521,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn saved_chat_switches_provider_between_turns_and_persists_it(cx: &mut gpui::TestAppContext) {
+    fn saved_chat_refuses_a_retired_provider_switch_and_sends_nothing(
+        cx: &mut gpui::TestAppContext,
+    ) {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -7666,23 +7541,43 @@ mod tests {
             });
             pickers.update(cx, |pickers, cx| {
                 assert!(!pickers.harness_locked(cx), "idle saved chat can switch");
-                assert_eq!(pickers.rail_descriptors(cx).len(), 2);
+                assert_eq!(
+                    pickers
+                        .rail_descriptors(cx)
+                        .into_iter()
+                        .map(|d| d.id)
+                        .collect::<Vec<_>>(),
+                    vec![HarnessId::DeepSeek]
+                );
+                // The one runtime is already the chat's: a retired provider is
+                // refused, and nothing is written.
                 pickers.pick_harness(HarnessId::Codex, cx);
                 let resolved = pickers.resolved(cx);
-                assert_eq!(resolved.harness, Some(HarnessId::Codex));
-                assert_eq!(resolved.model, None, "the old provider's model must not linger");
-                assert!(resolved.model_options.is_empty());
-                assert!(pickers.mutate_task.is_some(), "a saved chat persists the switch");
+                assert_eq!(resolved.harness, Some(HarnessId::DeepSeek));
+                assert_eq!(resolved.model.as_deref(), Some("parent-model"));
+                assert!(pickers.mutate_task.is_none(), "no switch, no write");
             });
             (state, pickers)
         });
         cx.run_until_parked();
-        let sent = requests.try_recv().expect("setChatConfig went out");
-        assert!(sent.contains("setChatConfig") && sent.contains("\"codex\""), "{sent}");
+        assert!(
+            requests.try_recv().is_err(),
+            "a refused switch must not send setChatConfig"
+        );
         cx.update(|cx| {
-            let row = state.read(cx).selected_chat_row().unwrap().config.clone().unwrap();
-            assert_eq!(row.harness, HarnessId::Codex);
-            assert_eq!(row.sandbox, zeron_proto::SandboxLevel::ReadOnly, "sandbox is kept");
+            let row = state
+                .read(cx)
+                .selected_chat_row()
+                .unwrap()
+                .config
+                .clone()
+                .unwrap();
+            assert_eq!(row.harness, HarnessId::DeepSeek);
+            assert_eq!(
+                row.sandbox,
+                zeron_proto::SandboxLevel::ReadOnly,
+                "sandbox is kept"
+            );
 
             // A turn starts: the switch is refused until it ends.
             state.update(cx, |state, _| {
@@ -7690,16 +7585,21 @@ mod tests {
             });
             pickers.update(cx, |pickers, cx| {
                 assert!(pickers.harness_locked(cx));
-                pickers.pick_harness(HarnessId::ClaudeCode, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
+                pickers.pick_harness(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
             state.update(cx, |state, _| state.apply_sessions(Vec::new()));
-            assert!(!pickers.read(cx).harness_locked(cx), "unlocks when the turn ends");
+            assert!(
+                !pickers.read(cx).harness_locked(cx),
+                "unlocks when the turn ends"
+            );
         });
     }
 
     #[gpui::test]
-    fn compact_saved_chat_can_switch_provider_only_between_turns(cx: &mut gpui::TestAppContext) {
+    fn compact_saved_chat_offers_one_provider_and_refuses_a_retired_pick(
+        cx: &mut gpui::TestAppContext,
+    ) {
         cx.update(|cx| {
             cx.set_global(Theme::dark());
             let (state, pickers) = side_chat_picker(false, cx);
@@ -7713,10 +7613,14 @@ mod tests {
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
                 assert_eq!(pickers.model_rail, ModelRail::All);
-                assert_eq!(providers(pickers, cx).len(), 2, "every provider is offered");
+                assert_eq!(
+                    providers(pickers, cx),
+                    vec![HarnessId::DeepSeek],
+                    "the one runtime is every provider on offer"
+                );
                 pickers.pick_compact_provider(HarnessId::Codex, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
-                assert_eq!(pickers.resolved(cx).model, None);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
+                assert_eq!(pickers.resolved(cx).model.as_deref(), Some("parent-model"));
                 assert!(!pickers.compact_model_list);
             });
             state.update(cx, |state, _| {
@@ -7725,16 +7629,20 @@ mod tests {
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
                 assert_eq!(pickers.model_rail, ModelRail::Harness);
-                assert_eq!(providers(pickers, cx), vec![HarnessId::Codex], "locked mid-turn");
-                pickers.pick_compact_provider(HarnessId::ClaudeCode, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::Codex));
+                assert_eq!(
+                    providers(pickers, cx),
+                    vec![HarnessId::DeepSeek],
+                    "locked mid-turn"
+                );
+                pickers.pick_compact_provider(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
             state.update(cx, |state, _| state.apply_sessions(Vec::new()));
             pickers.update(cx, |pickers, cx| {
                 pickers.show_compact_models(cx);
                 assert_eq!(pickers.model_rail, ModelRail::All);
-                pickers.pick_compact_provider(HarnessId::ClaudeCode, cx);
-                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                pickers.pick_compact_provider(HarnessId::Codex, cx);
+                assert_eq!(pickers.resolved(cx).harness, Some(HarnessId::DeepSeek));
             });
         });
     }
@@ -7763,40 +7671,39 @@ mod tests {
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut pickers = Pickers::new(state, cx);
-            pickers.config.harness = Some(HarnessId::ClaudeCode);
+            pickers.config.harness = Some(HarnessId::DeepSeek);
             pickers.config.model = Some("chosen".into());
-            pickers.harnesses =
-                Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             pickers
         });
         handle
             .update(cx, |pickers, window, cx| {
                 let rows = vec![bare_model("chosen", "Chosen"), bare_model("other", "Other")];
                 pickers.apply_model_catalog(
-                    HarnessId::ClaudeCode,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(rows.clone()),
                     cx,
                 );
                 pickers.open_model_menu(window, cx);
                 assert_eq!(pickers.active, 0);
                 pickers.apply_model_catalog(
-                    HarnessId::ClaudeCode,
+                    HarnessId::DeepSeek,
                     Loadable::Error("refresh failed".into()),
                     cx,
                 );
                 assert_eq!(
-                    pickers.models[&HarnessId::ClaudeCode],
+                    pickers.models[&HarnessId::DeepSeek],
                     Loadable::Ready(rows.clone())
                 );
                 assert_eq!(
                     pickers
                         .model_refresh_errors
-                        .get(&HarnessId::ClaudeCode)
+                        .get(&HarnessId::DeepSeek)
                         .map(String::as_str),
                     Some("refresh failed")
                 );
                 pickers.apply_model_catalog(
-                    HarnessId::ClaudeCode,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(rows.into_iter().rev().collect()),
                     cx,
                 );
@@ -7804,7 +7711,7 @@ mod tests {
                 assert!(
                     !pickers
                         .model_refresh_errors
-                        .contains_key(&HarnessId::ClaudeCode)
+                        .contains_key(&HarnessId::DeepSeek)
                 );
                 pickers.apply_model_catalog(
                     HarnessId::Codex,
@@ -7838,12 +7745,11 @@ mod tests {
             pickers: cx.new(|cx| {
                 let state = cx.new(|_| AppState::new());
                 let mut pickers = Pickers::new(state, cx);
-                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.harness = Some(HarnessId::DeepSeek);
                 pickers.config.model = Some("first".into());
-                pickers.harnesses =
-                    Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
                 pickers.models.insert(
-                    HarnessId::ClaudeCode,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(vec![
                         bare_model("first", "First"),
                         bare_model("second", "Second"),
@@ -8073,9 +7979,9 @@ mod tests {
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut pickers = Pickers::new(state, cx);
-            pickers.config.harness = Some(HarnessId::Codex);
+            pickers.config.harness = Some(HarnessId::DeepSeek);
             pickers.config.model = Some("short".into());
-            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "Codex")]);
             let mut long = bare_model("long", "A much longer model name");
             long.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
             long.options.push(ModelOption {
@@ -8094,7 +8000,7 @@ mod tests {
                 ],
             });
             pickers.models.insert(
-                HarnessId::Codex,
+                HarnessId::DeepSeek,
                 Loadable::Ready(vec![bare_model("short", "Short"), long]),
             );
             pickers
@@ -8121,7 +8027,7 @@ mod tests {
                     pickers.config.model = Some(model.into());
                     pickers
                         .defaults
-                        .model_options_mut(HarnessId::Codex, model)
+                        .model_options_mut(HarnessId::DeepSeek, model)
                         .insert(
                             "serviceTier".into(),
                             if fast { "fast" } else { "default" }.into(),
@@ -8560,19 +8466,25 @@ mod tests {
         let pickers = cx.new(|cx| Pickers::new(state.clone(), cx));
         pickers.update(cx, |pickers, cx| {
             pickers.defaults = ComposerDefaults::default();
-            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             pickers.apply_model_catalog(
-                HarnessId::Codex,
-                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                HarnessId::DeepSeek,
+                Loadable::Ready(vec![bare_model("deepseek-flash", "DeepSeek V4.1 Flash")]),
                 cx,
             );
-            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert_eq!(
+                pickers.model_name(cx),
+                ModelName::Named("DeepSeek V4.1 Flash".into())
+            );
         });
         state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
         cx.run_until_parked();
         pickers.update(cx, |pickers, cx| {
             // Same host: the catalog stands, the chip never blanks.
-            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert_eq!(
+                pickers.model_name(cx),
+                ModelName::Named("DeepSeek V4.1 Flash".into())
+            );
             assert!(matches!(pickers.harnesses, Loadable::Ready(_)));
             assert!(!pickers.harnesses_stale && pickers.stale_models.is_empty());
         });
@@ -8591,26 +8503,27 @@ mod tests {
         pickers.update(cx, |pickers, cx| {
             pickers.defaults = ComposerDefaults::default();
             // A picked harness keeps the chip naming its model throughout.
-            pickers.config.harness = Some(HarnessId::Codex);
-            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.config.harness = Some(HarnessId::DeepSeek);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             pickers.apply_model_catalog(
-                HarnessId::Codex,
-                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                HarnessId::DeepSeek,
+                Loadable::Ready(vec![bare_model("deepseek-flash", "DeepSeek V4.1 Flash")]),
                 cx,
             );
-            pickers
-                .models
-                .insert(HarnessId::ClaudeCode, Loadable::Loading);
+            pickers.models.insert(HarnessId::Mock, Loadable::Loading);
         });
         state.update(cx, |state, cx| state.select_space(Some("b".into()), cx));
         cx.run_until_parked();
         pickers.update(cx, |pickers, cx| {
             // Old rows stay on screen, marked for one reload from the new host;
             // a load in flight for the old host restarts instead.
-            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert_eq!(
+                pickers.model_name(cx),
+                ModelName::Named("DeepSeek V4.1 Flash".into())
+            );
             assert!(pickers.harnesses_stale);
-            assert_eq!(pickers.stale_models, HashSet::from([HarnessId::Codex]));
-            assert!(!pickers.models.contains_key(&HarnessId::ClaudeCode));
+            assert_eq!(pickers.stale_models, HashSet::from([HarnessId::DeepSeek]));
+            assert!(!pickers.models.contains_key(&HarnessId::Mock));
             // The old device's catalog never picks for the new one: with no
             // explicit or remembered model, a send leaves the choice to the
             // new device instead of carrying the old catalog's default.
@@ -8618,16 +8531,19 @@ mod tests {
             // A failed reload replaces the old device's rows — it is not
             // retained like a same-device refresh failure.
             pickers.land_model_reload(
-                HarnessId::Codex,
+                HarnessId::DeepSeek,
                 Loadable::Error("device offline".into()),
                 cx,
             );
             assert!(pickers.stale_models.is_empty());
             assert!(matches!(
-                pickers.models.get(&HarnessId::Codex),
+                pickers.models.get(&HarnessId::DeepSeek),
                 Some(Loadable::Error(_))
             ));
-            assert_ne!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            assert_ne!(
+                pickers.model_name(cx),
+                ModelName::Named("DeepSeek V4.1 Flash".into())
+            );
             // With nothing picked or remembered, the old device's harness list
             // doesn't choose either — for the chip or a send.
             pickers.config.harness = None;
@@ -8651,16 +8567,19 @@ mod tests {
         let pickers = cx.new(|cx| Pickers::new(state, cx));
         pickers.update(cx, |pickers, cx| {
             pickers.defaults = ComposerDefaults::default();
-            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+            pickers.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             pickers.apply_model_catalog(
-                HarnessId::Codex,
-                Loadable::Ready(vec![bare_model("gpt", "GPT")]),
+                HarnessId::DeepSeek,
+                Loadable::Ready(vec![bare_model("deepseek-flash", "DeepSeek V4.1 Flash")]),
                 cx,
             );
-            pickers.land_model_reload(HarnessId::Codex, Loadable::Error("flaky".into()), cx);
-            assert_eq!(pickers.model_name(cx), ModelName::Named("GPT".into()));
+            pickers.land_model_reload(HarnessId::DeepSeek, Loadable::Error("flaky".into()), cx);
+            assert_eq!(
+                pickers.model_name(cx),
+                ModelName::Named("DeepSeek V4.1 Flash".into())
+            );
             assert!(matches!(
-                pickers.models.get(&HarnessId::Codex),
+                pickers.models.get(&HarnessId::DeepSeek),
                 Some(Loadable::Ready(_))
             ));
         });
@@ -8981,11 +8900,11 @@ mod tests {
                             .into(),
                     })
                     .into();
-                pickers.config.harness = Some(HarnessId::ClaudeCode);
+                pickers.config.harness = Some(HarnessId::DeepSeek);
                 pickers.harnesses =
-                    Loadable::Ready(vec![descriptor(HarnessId::ClaudeCode, "Claude Code")]);
+                    Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
                 pickers.models.insert(
-                    HarnessId::ClaudeCode,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(vec![model, bare_model("haiku", "Haiku")]),
                 );
                 pickers.pick_model("opus".into(), cx);
@@ -9855,16 +9774,16 @@ mod tests {
         handle
             .update(cx, |picker, _, cx| {
                 // Harness catalog still loading, a pick remembered: named.
-                picker.config.harness = Some(HarnessId::Codex);
+                picker.config.harness = Some(HarnessId::DeepSeek);
                 picker.defaults.remember_model(
-                    HarnessId::Codex,
+                    HarnessId::DeepSeek,
                     "gpt-6-luna".into(),
                     "GPT-6-Luna".into(),
                 );
                 assert_eq!(picker.model_name(cx), named("GPT-6-Luna"));
                 // Model catalog loading, pick remembered: still named.
-                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
-                picker.models.insert(HarnessId::Codex, Loadable::Loading);
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
+                picker.models.insert(HarnessId::DeepSeek, Loadable::Loading);
                 assert_eq!(picker.model_name(cx), named("GPT-6-Luna"));
                 // A draft id the catalog never learned keeps its id.
                 picker.config.model = Some("gpt-7".into());
@@ -9877,24 +9796,24 @@ mod tests {
                 picker.harnesses = Loadable::Loading;
                 assert_eq!(picker.model_name(cx), ModelName::Loading);
                 // Catalog in, nothing remembered: its default model.
-                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::Codex, "Codex")]);
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
                 picker.models.insert(
-                    HarnessId::Codex,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(vec![bare_model("gpt-a", "A"), bare_model("gpt-b", "B")]),
                 );
                 assert_eq!(picker.model_name(cx), named("A"));
                 // Only a provider with nothing to offer is unnamed.
                 picker
                     .models
-                    .insert(HarnessId::Codex, Loadable::Ready(Vec::new()));
+                    .insert(HarnessId::DeepSeek, Loadable::Ready(Vec::new()));
                 assert_eq!(picker.model_name(cx), ModelName::None { no_agents: false });
                 picker
                     .models
-                    .insert(HarnessId::Codex, Loadable::Error("offline".into()));
+                    .insert(HarnessId::DeepSeek, Loadable::Error("offline".into()));
                 assert_eq!(picker.model_name(cx), ModelName::None { no_agents: false });
                 // ...and a remembered pick names it even then.
                 picker.defaults.remember_model(
-                    HarnessId::Codex,
+                    HarnessId::DeepSeek,
                     "gpt-6-luna".into(),
                     "GPT-6-Luna".into(),
                 );
@@ -9920,22 +9839,15 @@ mod tests {
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut picker = Pickers::new(state, cx);
-            picker.config.harness = Some(HarnessId::Codex);
-            picker.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::Codex, "Codex"),
-                descriptor(HarnessId::ClaudeCode, "Claude"),
-            ]);
+            picker.config.harness = Some(HarnessId::DeepSeek);
+            picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
             picker.models.insert(
-                HarnessId::Codex,
+                HarnessId::DeepSeek,
                 Loadable::Ready(vec![
                     laddered("model", "Model"),
                     laddered("other", "Other model"),
                     laddered("third", "Third model"),
                 ]),
-            );
-            picker.models.insert(
-                HarnessId::ClaudeCode,
-                Loadable::Ready(vec![laddered("claude", "Claude model")]),
             );
             picker
         });
@@ -9981,7 +9893,7 @@ mod tests {
         cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
         handle
             .read_with(cx, |picker, cx| {
-                assert!(picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert!(picker.defaults.is_favorite(HarnessId::DeepSeek, "third"));
                 assert_eq!(picker.active, 0, "Favorite should move to the first row");
                 assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
                 assert_eq!(picker.selected_model(cx).unwrap().id, "other");
@@ -9990,7 +9902,7 @@ mod tests {
         cx.simulate_keystrokes(handle.into(), "cmd-shift-f");
         handle
             .read_with(cx, |picker, cx| {
-                assert!(!picker.defaults.is_favorite(HarnessId::Codex, "third"));
+                assert!(!picker.defaults.is_favorite(HarnessId::DeepSeek, "third"));
                 assert_eq!(
                     picker.active, 2,
                     "Focus must follow the unstarred model back"
@@ -9998,26 +9910,21 @@ mod tests {
                 assert_eq!(picker.model_rows(cx)[picker.active].model.id, "third");
             })
             .unwrap();
-        // Tab cycles providers in place, each at its last-used model.
+        // Tab cycles the one provider in place, at its last-used model.
         cx.simulate_keystrokes(handle.into(), "escape");
         cx.simulate_keystrokes(handle.into(), "tab");
         handle
             .read_with(cx, |picker, cx| {
                 assert!(!picker.compact_model_list);
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-            })
-            .unwrap();
-        cx.simulate_keystrokes(handle.into(), "tab");
-        handle
-            .read_with(cx, |picker, cx| {
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::Codex));
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::DeepSeek));
                 assert_eq!(picker.selected_model(cx).unwrap().id, "other");
             })
             .unwrap();
         cx.simulate_keystrokes(handle.into(), "shift-tab");
         handle
             .read_with(cx, |picker, cx| {
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::DeepSeek));
+                assert_eq!(picker.selected_model(cx).unwrap().id, "other");
             })
             .unwrap();
         // Left/Right and Home/End set the effort, one haptic per change
@@ -10176,14 +10083,14 @@ mod tests {
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut picker = Pickers::new(state, cx);
-            picker.config.harness = Some(HarnessId::Codex);
+            picker.config.harness = Some(HarnessId::DeepSeek);
             picker.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::DeepSeek, "DeepSeek"),
                 descriptor(HarnessId::ClaudeCode, "Claude"),
                 descriptor(HarnessId::Grok, "Grok"),
             ]);
             picker.models.insert(
-                HarnessId::Codex,
+                HarnessId::DeepSeek,
                 Loadable::Ready(vec![bare_model("model", "Model")]),
             );
             picker.models.insert(
@@ -10209,23 +10116,37 @@ mod tests {
             .unwrap();
         handle
             .update(cx, |picker, _, cx| {
+                // A retired provider's catalog finishing changes nothing: it
+                // is not a choice this build can run.
                 picker.models.insert(
                     HarnessId::ClaudeCode,
                     Loadable::Ready(vec![bare_model("claude", "Claude model")]),
                 );
                 picker.catalog_rev += 1;
-                // A provider's models become directly selectable when its
-                // catalog finishes loading; no provider-page detour is needed.
+                assert_eq!(picker.model_rows_len(cx), 1);
+                // The runtime's own catalog finishing adds its rows directly;
+                // no provider-page detour is needed.
+                picker.models.insert(
+                    HarnessId::DeepSeek,
+                    Loadable::Ready(vec![
+                        bare_model("model", "Model"),
+                        bare_model("deepseek-flash", "DeepSeek V4.1 Flash"),
+                    ]),
+                );
+                picker.catalog_rev += 1;
                 assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
+                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::DeepSeek);
                 picker.activate_model_index(1, cx);
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude"));
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::DeepSeek));
+                assert_eq!(
+                    picker.resolved(cx).model.as_deref(),
+                    Some("deepseek-flash")
+                );
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 2);
                 assert_eq!(
                     picker.model_rows(cx)[picker.active].harness,
-                    HarnessId::ClaudeCode
+                    HarnessId::DeepSeek
                 );
             })
             .unwrap();
@@ -10283,7 +10204,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn switching_provider_restores_its_last_model_and_effort(cx: &mut gpui::TestAppContext) {
+    fn switching_model_restores_its_last_effort(cx: &mut gpui::TestAppContext) {
         let dir = tempfile::tempdir().unwrap();
         cx.update(|cx| {
             cx.set_global(Theme::dark());
@@ -10306,33 +10227,23 @@ mod tests {
         };
         handle
             .update(cx, |picker, _, cx| {
-                picker.harnesses = Loadable::Ready(vec![
-                    descriptor(HarnessId::Codex, "Codex"),
-                    descriptor(HarnessId::ClaudeCode, "Claude"),
-                ]);
+                picker.harnesses = Loadable::Ready(vec![descriptor(HarnessId::DeepSeek, "DeepSeek")]);
                 picker.models.insert(
-                    HarnessId::Codex,
+                    HarnessId::DeepSeek,
                     Loadable::Ready(vec![laddered("gpt-a", "A"), laddered("gpt-b", "B")]),
                 );
-                picker.models.insert(
-                    HarnessId::ClaudeCode,
-                    Loadable::Ready(vec![laddered("opus", "Opus")]),
-                );
-                picker.pick_harness(HarnessId::Codex, cx);
+                picker.pick_harness(HarnessId::DeepSeek, cx);
                 picker.pick_model("gpt-b".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::Low, cx);
-                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
+                picker.pick_model("gpt-a".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::High, cx);
-                // Back to Codex: its last model, at that model's last effort.
-                picker.pick_compact_provider(HarnessId::Codex, cx);
+                // Back to B: its own last effort, not A's.
+                picker.pick_model("gpt-b".into(), cx);
                 assert_eq!(picker.resolved(cx).model.as_deref(), Some("gpt-b"));
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::Low));
-                // A model with no effort of its own takes the last one used
-                // anywhere (High, on Claude).
+                // And back to A: its own.
                 picker.pick_model("gpt-a".into(), cx);
-                assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
-                picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
-                assert_eq!(picker.resolved(cx).model.as_deref(), Some("opus"));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("gpt-a"));
                 assert_eq!(picker.effective_reasoning(cx), Some(ReasoningLevel::High));
                 // The list's tabs are its provider groups, in list order;
                 // starring adds a Starred tab ahead of them, holding the
@@ -10340,24 +10251,17 @@ mod tests {
                 picker.show_compact_models(cx);
                 assert_eq!(
                     picker.compact_groups(cx),
-                    vec![
-                        (Some(HarnessId::Codex), 0),
-                        (Some(HarnessId::ClaudeCode), 2)
-                    ]
+                    vec![(Some(HarnessId::DeepSeek), 0)]
                 );
-                picker.toggle_model_favorite(HarnessId::Codex, "gpt-a", cx);
+                picker.toggle_model_favorite(HarnessId::DeepSeek, "gpt-a", cx);
                 assert_eq!(
                     picker.compact_groups(cx),
-                    vec![
-                        (None, 0),
-                        (Some(HarnessId::Codex), 1),
-                        (Some(HarnessId::ClaudeCode), 2),
-                    ]
+                    vec![(None, 0), (Some(HarnessId::DeepSeek), 1)]
                 );
                 let rows = picker.model_rows(cx);
                 assert_eq!(
                     (rows[0].harness, rows[0].model.id.as_str()),
-                    (HarnessId::Codex, "gpt-a")
+                    (HarnessId::DeepSeek, "gpt-a")
                 );
             })
             .unwrap();
@@ -10377,17 +10281,17 @@ mod tests {
         let handle = cx.add_window(|_, cx| {
             let state = cx.new(|_| AppState::new());
             let mut picker = Pickers::new(state, cx);
-            picker.config.harness = Some(HarnessId::Codex);
-            picker.config.model = Some("codex-model".into());
+            picker.config.harness = Some(HarnessId::DeepSeek);
+            picker.config.model = Some("deepseek-model".into());
             picker.harnesses = Loadable::Ready(vec![
-                descriptor(HarnessId::Codex, "Codex"),
+                descriptor(HarnessId::DeepSeek, "DeepSeek"),
                 descriptor(HarnessId::ClaudeCode, "Claude"),
             ]);
-            let mut model = bare_model("codex-model", "Codex model");
+            let mut model = bare_model("deepseek-model", "DeepSeek model");
             model.reasoning_levels = vec![ReasoningLevel::Low, ReasoningLevel::High];
             picker
                 .models
-                .insert(HarnessId::Codex, Loadable::Ready(vec![model]));
+                .insert(HarnessId::DeepSeek, Loadable::Ready(vec![model]));
             picker.models.insert(
                 HarnessId::ClaudeCode,
                 Loadable::Ready(vec![bare_model("claude-model", "Claude model")]),
@@ -10398,37 +10302,28 @@ mod tests {
             .update(cx, |picker, window, cx| {
                 picker.open_model_menu(window, cx);
                 assert!(!picker.compact_model_list);
-                // Models from every offered provider are directly selectable.
+                // The one runtime's models are directly selectable.
                 picker.show_compact_models(cx);
-                assert_eq!(picker.model_rows_len(cx), 2);
-                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::Codex);
-                assert_eq!(picker.model_rows(cx)[1].harness, HarnessId::ClaudeCode);
-                // Searching must also find another provider's model.
+                assert_eq!(picker.model_rows_len(cx), 1);
+                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::DeepSeek);
+                // Searching never surfaces a retired provider's model.
                 picker
                     .search
                     .update(cx, |input, cx| input.set_text("Claude", cx));
-                assert_eq!(picker.model_rows_len(cx), 1);
-                assert_eq!(picker.model_rows(cx)[0].harness, HarnessId::ClaudeCode);
+                assert_eq!(picker.model_rows_len(cx), 0);
+                picker.search.update(cx, |input, cx| input.set_text("", cx));
                 picker.activate_model_index(0, cx);
                 assert!(!picker.compact_model_list);
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
-                picker.pick_harness(HarnessId::Codex, cx);
-                // Clicking a foreign-provider row works without a search too.
-                picker.show_compact_models(cx);
-                picker.activate_model_index(1, cx);
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-                picker.pick_harness(HarnessId::Codex, cx);
-                // Switching provider (Tab on the panel) lands back on the
-                // panel at that provider's model.
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::DeepSeek));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("deepseek-model"));
+                // A retired provider is not a tab: the pick is refused.
                 picker.pick_compact_provider(HarnessId::ClaudeCode, cx);
                 assert!(!picker.compact_model_list);
-                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::ClaudeCode));
-                assert_eq!(picker.resolved(cx).model.as_deref(), Some("claude-model"));
-                picker.pick_harness(HarnessId::Codex, cx);
-                picker.pick_model("codex-model".into(), cx);
+                assert_eq!(picker.resolved(cx).harness, Some(HarnessId::DeepSeek));
+                assert_eq!(picker.resolved(cx).model.as_deref(), Some("deepseek-model"));
+                picker.pick_model("deepseek-model".into(), cx);
                 picker.pick_reasoning(ReasoningLevel::Low, cx);
-                assert_eq!(picker.config.model.as_deref(), Some("codex-model"));
+                assert_eq!(picker.config.model.as_deref(), Some("deepseek-model"));
                 picker.state.update(cx, |state, cx| {
                     state.selected_chat = Some("thread".into());
                     state.apply_sessions(vec![running_session("thread")]);
@@ -10436,14 +10331,17 @@ mod tests {
                 });
                 picker.show_compact_models(cx);
                 assert_eq!(picker.model_rows_len(cx), 1);
-                assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::Codex);
+                assert_eq!(picker.rail_descriptors(cx)[0].id, HarnessId::DeepSeek);
                 picker
                     .search
                     .update(cx, |input, cx| input.set_text("Claude", cx));
                 assert_eq!(picker.model_rows_len(cx), 0);
                 picker.search.update(cx, |input, cx| input.set_text("", cx));
                 // A running turn locks the provider to one tab, its own.
-                assert_eq!(picker.compact_groups(cx), vec![(Some(HarnessId::Codex), 0)]);
+                assert_eq!(
+                    picker.compact_groups(cx),
+                    vec![(Some(HarnessId::DeepSeek), 0)]
+                );
                 picker.compact_model_list = false;
                 picker.focus_on_mount = true;
             })
@@ -10657,98 +10555,40 @@ mod tests {
     }
 
     #[test]
-    fn normalize_drops_default_alias_and_folds_orphan_1m_rows() {
-        // The shape an OLDER engine serves: a `default` alias row plus
-        // 1M-pinned variants with no bare base. A non-claude harness keeps
-        // wire labels (no curated catalog to borrow from).
+    fn normalize_drops_the_default_alias_row_and_refuses_retired_providers() {
+        // The shape an OLDER engine serves: a `default` alias row beside the
+        // real ones. The alias goes; the real rows keep their wire labels.
         let models = normalize_model_rows(
-            HarnessId::Codex,
+            HarnessId::DeepSeek,
             vec![
                 bare_model("default", "Default (recommended)"),
-                bare_model("titan[1m]", "Titan (1M context)"),
-                bare_model("gpt-x-9[1m]", "GPT X-9"),
-                bare_model("nano", "Nano"),
+                bare_model("deepseek-flash", "DeepSeek V4.1 Flash"),
+                bare_model("deepseek-v4-pro", "DeepSeek V4 Pro"),
             ],
         );
         assert_eq!(
             models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec!["titan", "gpt-x-9", "nano"]
+            vec!["deepseek-flash", "deepseek-v4-pro"]
         );
-        assert_eq!(models[0].label, "Titan");
-        assert_eq!(models[1].label, "GPT X-9");
-        // Folded rows pin the Context Window trait to 1M.
-        assert!(
-            models[0]
-                .options
-                .iter()
-                .any(|o| o.id == "contextWindow" && o.default_choice == "1m")
-        );
-        assert!(models[2].options.is_empty());
+        assert_eq!(models[0].label, "DeepSeek V4.1 Flash");
 
         // A `default`-only list survives (nothing real to prefer).
         let only_default =
-            normalize_model_rows(HarnessId::Codex, vec![bare_model("default", "Default")]);
+            normalize_model_rows(HarnessId::DeepSeek, vec![bare_model("default", "Default")]);
         assert_eq!(only_default.len(), 1);
 
-        // A base-plus-variant pair (already folded by a NEWER engine — the
-        // variant never reaches us; belt-and-braces if it does): variant
-        // drops, base is untouched.
-        let paired = normalize_model_rows(
-            HarnessId::Codex,
-            vec![
-                bare_model("titan-5", "Titan 5"),
-                bare_model("titan-5[1m]", "Titan 5 (1M)"),
-            ],
-        );
-        assert_eq!(paired.len(), 1);
-        assert_eq!(paired[0].id, "titan-5");
-
         // Idempotent over a clean list.
-        let clean = vec![bare_model("titan-5", "Titan 5")];
-        assert_eq!(normalize_model_rows(HarnessId::Codex, clean.clone()), clean);
-    }
+        let clean = vec![bare_model("deepseek-v4-pro", "DeepSeek V4 Pro")];
+        assert_eq!(
+            normalize_model_rows(HarnessId::DeepSeek, clean.clone()),
+            clean
+        );
 
-    #[test]
-    fn normalize_gives_claude_rows_their_versioned_catalog_labels() {
-        // The real prod shape: alias values with terse names. Claude rows
-        // adopt the curated labels so the version number always shows
-        // (user request), exact ids included; foreign ids pass through.
-        let models = normalize_model_rows(
-            HarnessId::ClaudeCode,
-            vec![
-                bare_model("default", "Default (recommended)"),
-                bare_model("opus[1m]", "Opus (1M context)"),
-                bare_model("claude-fable-5[1m]", "Fable"),
-                bare_model("fable", "Fable"),
-                bare_model("sonnet", "Sonnet"),
-                bare_model("haiku", "Haiku"),
-                bare_model("claude-nova-1", "Nova 1"),
-            ],
-        );
-        // A bare alias takes its family's newest curated row (the catalog is
-        // best-first): fable is Fable 5.2, sonnet Sonnet 5.5, haiku Haiku 5.5,
-        // as the CLI resolves them. An exact id keeps its own version.
-        assert_eq!(
-            models.iter().map(|m| m.label.as_str()).collect::<Vec<_>>(),
-            vec![
-                "Opus 5.5",
-                "Fable 5",
-                "Fable 5.2",
-                "Sonnet 5.5",
-                "Haiku 5.5",
-                "Nova 1"
-            ]
-        );
-        assert_eq!(
-            models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-            vec![
-                "opus",
-                "claude-fable-5",
-                "fable",
-                "sonnet",
-                "haiku",
-                "claude-nova-1"
-            ]
+        // A retired provider's rows are dropped outright: this build cannot
+        // run it, so nothing it lists may reach the picker.
+        assert!(
+            normalize_model_rows(HarnessId::ClaudeCode, vec![bare_model("opus", "Opus 5.5")])
+                .is_empty()
         );
     }
 
@@ -11193,7 +11033,7 @@ mod tests {
     }
 
     #[test]
-    fn mock_harness_hidden_unless_alone() {
+    fn only_deepseek_is_visible_and_mock_only_when_opted_in() {
         let descriptor = |id: HarnessId, name: &str| HarnessDescriptor {
             icon: None,
             id,
@@ -11209,14 +11049,18 @@ mod tests {
         };
         let mixed = vec![
             descriptor(HarnessId::Mock, "Mock"),
+            descriptor(HarnessId::DeepSeek, "DeepSeek"),
             descriptor(HarnessId::ClaudeCode, "Claude Code"),
         ];
-        // Env-independent core: mock hidden in production…
+        // Env-independent core: the one runtime, and the mock hidden in
+        // production…
         let visible = visible_harnesses_impl(&mixed, false);
         assert_eq!(visible.len(), 1);
-        assert_eq!(visible[0].id, HarnessId::ClaudeCode);
-        let only_mock = vec![descriptor(HarnessId::Mock, "Mock")];
-        assert_eq!(visible_harnesses_impl(&only_mock, false).len(), 1);
+        assert_eq!(visible[0].id, HarnessId::DeepSeek);
+        // A retired provider is never visible, not even alone: the rail has no
+        // fallback to a driver this build cannot run.
+        let only_legacy = vec![descriptor(HarnessId::ClaudeCode, "Claude Code")];
+        assert!(visible_harnesses_impl(&only_legacy, false).is_empty());
         // …and opted back in by ZERON_HARNESS=mock (the e2e rig).
         assert_eq!(visible_harnesses_impl(&mixed, true).len(), 2);
         assert_eq!(visible_harnesses_impl(&mixed, true)[0].id, HarnessId::Mock);
@@ -11237,40 +11081,41 @@ mod tests {
             access_modes: Vec::new(),
             supports_plan: false,
         };
-        let catalog = |claude: Option<bool>, codex: Option<bool>, grok: Option<bool>| {
+        let catalog = |deepseek: Option<bool>, claude: Option<bool>, codex: Option<bool>| {
             vec![
                 descriptor(HarnessId::Mock, "Mock", Some(false)),
+                descriptor(HarnessId::DeepSeek, "DeepSeek", deepseek),
                 descriptor(HarnessId::ClaudeCode, "Claude Code", claude),
                 descriptor(HarnessId::Codex, "Codex", codex),
-                descriptor(HarnessId::Grok, "Grok", grok),
             ]
         };
         // A catalog from an engine predating the flag (all None) follows its
-        // installed probes, so every detected real harness is offered.
+        // installed probes: the one runtime is offered, and the retired
+        // providers beside it never are.
         let offered = offered_harnesses_impl(&catalog(None, None, None), false);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Codex, HarnessId::Grok]
+            vec![HarnessId::DeepSeek]
         );
-        // The device's flags win: Grok on, Codex off; catalog order holds.
-        let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), Some(true)), false);
+        // The device's flags win for the runtime it can run; a retired
+        // provider switched on is still not offered.
+        let offered = offered_harnesses_impl(&catalog(Some(true), Some(true), Some(true)), false);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::ClaudeCode, HarnessId::Grok]
+            vec![HarnessId::DeepSeek]
         );
-        // The dev-rig mock opt-in survives the enabled filter (and Grok's
-        // unknown flag still resolves through its installed probe).
-        let offered = offered_harnesses_impl(&catalog(Some(true), Some(false), None), true);
+        // The dev-rig mock opt-in survives the enabled filter.
+        let offered = offered_harnesses_impl(&catalog(Some(true), Some(true), None), true);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::Mock, HarnessId::ClaudeCode, HarnessId::Grok]
+            vec![HarnessId::Mock, HarnessId::DeepSeek]
         );
         // Nothing enabled offers nothing — the composer renders the
         // no-agents empty state instead of resurrecting disabled agents.
         let offered =
             offered_harnesses_impl(&catalog(Some(false), Some(false), Some(false)), false);
         assert!(offered.is_empty());
-        // So does a legacy catalog whose installed probes all failed: never
+        // So does a catalog whose installed probes all failed: never
         // resurface unrunnable agents just to avoid an empty picker.
         let mut missing = catalog(None, None, None);
         missing.iter_mut().for_each(|d| d.installed = false);
@@ -11294,28 +11139,31 @@ mod tests {
                 supports_plan: false,
             };
         // Enabled-but-missing-CLI agents stay out of the rail; an installed
-        // enabled one rides along. A live engine no longer stamps that
-        // combination (enablement follows detection), but a catalog from an
-        // older engine still can — the filter is the cross-version defense.
+        // enabled one rides along. A retired provider that is installed and
+        // enabled is still not offered — the runtime is the only choice.
         let catalog = vec![
-            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
-            descriptor(HarnessId::Codex, "Codex", Some(true), false),
-            descriptor(HarnessId::Grok, "Grok", Some(true), true),
+            descriptor(HarnessId::DeepSeek, "DeepSeek", Some(true), false),
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), true),
+        ];
+        let offered = offered_harnesses_impl(&catalog, false);
+        assert!(offered.is_empty());
+        // The installed, enabled runtime rides along.
+        let catalog = vec![
+            descriptor(HarnessId::DeepSeek, "DeepSeek", Some(true), true),
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), true),
         ];
         let offered = offered_harnesses_impl(&catalog, false);
         assert_eq!(
             offered.iter().map(|d| d.id).collect::<Vec<_>>(),
-            vec![HarnessId::Grok]
+            vec![HarnessId::DeepSeek]
         );
         // Nothing enabled AND installed: an empty offered set — the fresh
-        // machine where the default-enabled Claude/Codex have no CLIs (#128).
-        // No fallback: offering them again would only manufacture
-        // NotInstalled errors at send; the composer shows the no-agents
-        // state and blocks new sends instead.
+        // machine where the runtime has no CLI (#128). No fallback: offering
+        // it again would only manufacture NotInstalled errors at send; the
+        // composer shows the no-agents state and blocks new sends instead.
         let catalog = vec![
-            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(true), false),
-            descriptor(HarnessId::Codex, "Codex", Some(false), false),
-            descriptor(HarnessId::Grok, "Grok", Some(false), true),
+            descriptor(HarnessId::DeepSeek, "DeepSeek", Some(false), true),
+            descriptor(HarnessId::ClaudeCode, "Claude Code", Some(false), false),
         ];
         let offered = offered_harnesses_impl(&catalog, false);
         assert!(offered.is_empty());
