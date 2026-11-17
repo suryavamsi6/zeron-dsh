@@ -41,6 +41,75 @@ impl GatewayProvider {
     }
 }
 
+/// The models the gateway's configured routes offer, for the model picker.
+///
+/// A route counts as configured when its `apiKeyEnv` reference is stored, or
+/// when it is the ChatGPT subscription and the account is signed in. Best
+/// effort throughout: discovery is a network call per route, so a route that
+/// cannot answer contributes nothing and the caller keeps its own list.
+pub async fn route_models(
+    gateway: &zeron_harness::deepseek::gateway::Gateway,
+    chatgpt_signed_in: bool,
+) -> Vec<zeron_proto::Model> {
+    use zeron_proto::{Model, ModelProvider};
+
+    let Ok(catalog) = gateway
+        .call("llm/listConfigurableProviders", serde_json::json!({}))
+        .await
+    else {
+        return Vec::new();
+    };
+    let routes = parse_provider_catalog(&catalog);
+    let refs: Vec<&str> = routes.iter().filter_map(GatewayProvider::credential_ref).collect();
+    let describe = if refs.is_empty() {
+        None
+    } else {
+        gateway
+            .call("credentials/describe", describe_credentials_params(&refs))
+            .await
+            .ok()
+    };
+    let mut models = Vec::new();
+    for route in &routes {
+        let ready = route
+            .credential_ref()
+            .is_some_and(|key| describe.as_ref().is_some_and(|d| credential_configured(d, key)))
+            || (route.chatgpt && chatgpt_signed_in);
+        if !ready {
+            continue;
+        }
+        let Ok(found) = gateway
+            .call(
+                "llm/discoverModels",
+                serde_json::json!({
+                    "settingsNs": route.settings_ns,
+                    "request": { "provider": route.id },
+                }),
+            )
+            .await
+        else {
+            continue;
+        };
+        let Some(list) = found.as_array() else { continue };
+        for entry in list {
+            let Some(id) = entry["id"].as_str() else { continue };
+            models.push(Model {
+                id: id.to_string(),
+                label: entry["name"].as_str().unwrap_or(id).to_string(),
+                description: None,
+                provider: Some(ModelProvider {
+                    id: route.id.clone(),
+                    name: route.display_name.clone(),
+                }),
+                reasoning_levels: Vec::new(),
+                options: Vec::new(),
+                default: false,
+            });
+        }
+    }
+    models
+}
+
 /// Parse the `llm/listConfigurableProviders` answer. Entries without a
 /// `provider` or `settingsNs` are skipped, not guessed at.
 pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {

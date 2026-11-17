@@ -190,6 +190,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		keys[arg.ref] = true
 		return settled(nil)
 	end,
+	["DshMutateSettings"] = function(arg: any)
+		if refuse:peek() then
+			return failed("refused")
+		end
+		if type(arg) ~= "table" or type(arg.ops) ~= "table" then
+			return failed("no ops")
+		end
+		return settled(nil)
+	end,
 	["DshChatgptStart"] = function()
 		if refuse:peek() then
 			return failed("refused")

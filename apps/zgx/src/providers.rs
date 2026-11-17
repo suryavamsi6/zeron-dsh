@@ -30,6 +30,13 @@ pub fn install(host: &ScriptHost) {
             answer(engine::get().call("DshSetCredential", params).await)
         }
     });
+    // The page's write: `{ ns, ops }` straight through, since the gateway
+    // validates the ops itself (`settings/mutate`).
+    host.async_action("DshMutateSettings", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshMutateSettings", params).await)
+    });
     host.async_action("DshChatgptStart", |_| async {
         answer(engine::get().call("DshChatgptStart", json!({})).await)
     });

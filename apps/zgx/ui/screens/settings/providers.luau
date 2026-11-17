@@ -114,6 +114,17 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 		save_err:set(nil)
 		note:set(nil)
 		host.call("DshSetCredential", { ref = ref, value = value }):after(function()
+			-- A stored key alone does nothing: pi-ai resolves the route's
+			-- `profile.apiKeyEnv` through the credential store, and falls back
+			-- to the environment variable when the profile names none
+			-- (`dsh-llm-pi-ai`: MISSING_CREDENTIAL). One leaf-addressed set
+			-- names it without touching the rest of the route's profile.
+			if item.settings_ns == "llm-pi-ai" then
+				host.call("DshMutateSettings", {
+					ns = item.settings_ns,
+					ops = { { op = "set", path = { "providers", item.id, "apiKeyEnv" }, value = ref } },
+				})
+			end
 			saving:set(false)
 			if key:peek() == value then
 				key:set("")
@@ -149,6 +160,15 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 				disabled = remote,
 				error = save_err,
 				on_commit = save,
+			},
+			ds.Button {
+				ui.t("settings.providers.routes.key.save"),
+				size = "sm",
+				busy = saving,
+				disabled = function(): boolean
+					return remote() or saving:get() or key:get() == ""
+				end,
+				on_click = save,
 			},
 			ds.Button {
 				ui.t("settings.providers.routes.key.save"),

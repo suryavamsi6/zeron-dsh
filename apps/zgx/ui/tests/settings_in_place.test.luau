@@ -1003,6 +1003,16 @@ test("Shortcuts shows the Appshot hotkey while Appshots are on, as set, and send
 	expect(shows(app, PAGE, "Capture Appshots")).to_be(true)
 end)
 
+test("Providers saves a key and names it in the route's profile", function()
+	local app = open("Providers")
+	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
+	app:click('role:button "Save"')
+	app:frames(10)
+	expect(asked(app, "DshSetCredential")).to_be(true)
+	-- A stored key alone does nothing: the route's profile has to name it.
+	expect(asked(app, "DshMutateSettings")).to_be(true)
+end)
+
 test("Providers stands on the page's middle, as General does", function()
 	local app = open("General")
 	app:resize(1400, 900)
