@@ -211,18 +211,29 @@ test('native policy asks before unknown tools and cannot turn a refusal into per
   assert.equal(guard(accepted), undefined);
   assert.match(guard(execution()), /explicit approval/);
   let dispatched = false;
-  assert.throws(() => modelGuard({ provider: 'openai', model: 'other' }, () => { dispatched = true; }), /only permits/);
-  assert.equal(dispatched, false);
+  // A route the host stamped is one DSH resolves; the official route keeps
+  // its own two models, and a route id that is not one is refused.
+  assert.doesNotThrow(() => modelGuard({ provider: 'openai', model: 'other' }, () => { dispatched = true; }));
+  assert.equal(dispatched, true, "a host-stamped route's request is dispatched");
+  dispatched = false;
+  assert.throws(() => modelGuard({ provider: 'Not A Route', model: 'other' }, () => { dispatched = true; }), /only permits/);
+  assert.equal(dispatched, false, "a refused route's request never is");
 });
 
-test('all root and descendant LLM requests must use an official DeepSeek route', () => {
+test('the official route runs its own models, and a host-stamped route its own', () => {
   for (const model of ['deepseek-flash', 'deepseek-v4-pro']) assert.doesNotThrow(() => assertRoute({ provider: 'deepseek-official', model }));
-  for (const options of [
-    { provider: 'deepseek-account', model: 'deepseek-flash' },
-    { provider: 'openai', model: 'deepseek-flash' },
-    { provider: 'deepseek-official', model: 'deepseek-chat' },
-    { provider: 'deepseek-official', model: 'another-model' },
-  ]) assert.throws(() => assertRoute(options), /only permits official DeepSeek/);
+  // The official route offers nothing else.
+  for (const model of ['deepseek-chat', 'another-model']) {
+    assert.throws(() => assertRoute({ provider: 'deepseek-official', model }), /only permits official DeepSeek/);
+  }
+  // Any other route is one the host stamped (`ZERON_DEEPSEEK_PROVIDER`, which
+  // never rides the wire); DSH resolves its models and reports an unknown one.
+  for (const provider of ['openai', 'opencode-go', 'deepseek-account']) {
+    assert.doesNotThrow(() => assertRoute({ provider, model: 'whatever' }));
+  }
+  for (const provider of ['Not A Route', '', 'UPPER', '-leading']) {
+    assert.throws(() => assertRoute({ provider, model: 'x' }), /only permits official DeepSeek/);
+  }
 });
 
 test('credential filtering retains only DeepSeek auth and explicit Git tools overlays', () => {
