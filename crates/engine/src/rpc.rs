@@ -1042,6 +1042,28 @@ impl EngineRpc {
             .call(call, args)
             .await
             .map_err(|error| RpcError::Failed(error.to_string()))?;
+        // The DeepSeek key has two stores: DSH's gateway (what its routes
+        // read) and the harness's own `{data_dir}/deepseek/api-key` (what a
+        // run's environment and the account list read). Saving one without
+        // the other leaves a key that looks stored and is never used.
+        if let Some(key) = params.get("ref").and_then(|r| r.as_str())
+            && key == crate::agent_accounts::DEEPSEEK_KEY_REF
+        {
+            let dir = self.repos.data_dir().join("deepseek");
+            let path = dir.join("api-key");
+            match method {
+                methods::DSH_SET_CREDENTIAL => {
+                    if let Some(value) = params.get("value").and_then(|v| v.as_str()) {
+                        let _ = std::fs::create_dir_all(&dir);
+                        let _ = std::fs::write(&path, value);
+                    }
+                }
+                methods::DSH_UNSET_CREDENTIAL => {
+                    let _ = std::fs::remove_file(&path);
+                }
+                _ => {}
+            }
+        }
         Ok(RpcReply::Value(value))
     }
 
