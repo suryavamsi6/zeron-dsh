@@ -72,7 +72,7 @@ jobs:
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
@@ -84,11 +84,22 @@ jobs:
           test -n "$REV"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      # Saved here, not by the action's post-step: that one is skipped when a
+      # later step fails, which is how this job rebuilt the CLI every run
+      # (459 s) while it was red.
+      - name: Save the zgx CLI
+        if: steps.zgx-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
-      - name: apps/zgx Luau UI tests
-        if: ${{ !cancelled() }}
-        run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
+      # The Luau suite runs on Linux only: its layout is headless and identical
+      # on both machines (measured 631 s vs 635 s; no font, DPI or scrollbar
+      # difference in the path), and it was the step that kept this job red on
+      # a rotating subset of the `transcript_return*` family. macOS keeps the
+      # tests that need Metal.
       - name: Engine plugin tests
         if: ${{ !cancelled() }}
         run: |
@@ -129,7 +140,7 @@ jobs:
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
       - id: zgx-cli
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
@@ -141,6 +152,15 @@ jobs:
           test -n "$REV"
           CARGO_TARGET_DIR="$RUNNER_TEMP/zgx-cli-target" cargo install --locked \
             --git https://github.com/zeronsh/zgx --rev "$REV" zgx-script --bin zgx --features inspect --root ~/zgx-cli
+      # Saved here, not by the action's post-step: that one is skipped when a
+      # later step fails, which is how this job rebuilt the CLI every run
+      # (459 s) while it was red.
+      - name: Save the zgx CLI
+        if: steps.zgx-cli.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/zgx-cli
+          key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
       - name: apps/zgx unit tests
         run: scripts/ci/test-zgx.sh rust
       - name: apps/zgx Luau UI tests
