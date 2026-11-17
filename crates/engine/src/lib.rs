@@ -70,6 +70,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod dsh_gateway;
+pub mod dsh_providers;
 pub mod runner;
 pub mod wake_trace;
 pub mod wake_update;
