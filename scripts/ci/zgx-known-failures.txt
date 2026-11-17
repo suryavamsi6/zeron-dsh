@@ -5,8 +5,6 @@
 #   rust: <test path>        both runners: `cargo test --bin zeron-zgx` (skipped, exact name)
 #   rust-macos: <test path>  the macOS runner only: skipped there, run by the others
 #   luau: <test name>        `zgx test ui` (run; its FAIL line accepted)
-#   luau-macos: <test name>  the macOS runner only: its FAIL line accepted there,
-#                            a failure on the others
 #
 # A `rust`/`rust-macos` test is skipped, so it can't report that it passes
 # again: delete its line when the runner or the test is fixed.
@@ -31,13 +29,3 @@ rust-macos: transcript_paint_tests::rows_that_come_whole_after_they_show_stay_ap
 # second, and the test wants more than 10: its frames come too slowly there.
 # (Not a GPU device fault: the frames it does draw are right, just few.)
 rust-macos: visuals_tests::a_visual_scrolled_away_does_not_animate
-
-# The macOS runner restores a different scroll anchor than the test expects:
-# `transcript_return.test.luau:108` wants "u17 at -27" and gets "u29 at 25",
-# and its sibling wants the row it left and gets another. Both pass on Linux
-# (1376/1376 on this workstation) and in the app on macOS, so what differs is
-# the runner's row metrics, not the scroll code: the expectation is pinned to
-# heights measured on Linux. What clears these lines is an expectation derived
-# from the rows the test itself lays out, or a runner whose metrics match.
-luau-macos: a chat scrolled far up comes back there once its history arrives
-luau-macos: mid-scroll, back from a new chat
