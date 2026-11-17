@@ -102,7 +102,8 @@ VOICE_PATHS = ["crates/audio/**", ".github/workflows/voice-tests.yml"]
 
 # The zgx suite's own files, and the crates it builds: main() replaces ZGX_CORE
 # with the closure of reuse.SUITE_PACKAGES["zgx"]; this list is the fallback.
-ZGX_PATHS = ["apps/zgx/**", "scripts/ci/nextest.toml", ".github/workflows/zgx-tests.yml"]
+ZGX_PATHS = ["apps/zgx/**", "scripts/ci/nextest.toml", ".github/workflows/zgx-tests.yml",
+             "scripts/ci/test-zgx.sh", "scripts/ci/zgx-known-failures.txt"]
 ZGX_CORE = [
     "crates/engine/**", "crates/plugin-guard/**", "crates/zatex/**", "crates/theme/**",
     "crates/preview-label/**", "crates/cli/**", "crates/launch/**", "crates/notify/**",
