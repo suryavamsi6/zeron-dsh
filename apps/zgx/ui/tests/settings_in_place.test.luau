@@ -239,7 +239,7 @@ test("each heading shows once, its pages under it, ahead of Archived", function(
 	expect(at("Members") < at("Archived")).to_be(true)
 end)
 
-test("Providers asks the gateway for its routes", function()
+test("Providers asks the engine for its routes", function()
 	local app = open("Providers")
 	expect(asked(app, "DshProviders")).to_be(true)
 	-- (A route with no key waits behind "Show all": the catalog's tail.)
@@ -1018,16 +1018,13 @@ test("Providers offers each route's models to switch", function()
 	expect(shows(app, PAGE, "Serves 1 model")).to_be(true)
 end)
 
--- The agents' accounts read as the upstream screen lists them: who, the
--- plan, and what it is using.
-test("Providers lists the agents' accounts with their plans", function()
+-- A signed-in provider's plan draws as the upstream screen's meters: its
+-- windows (label, bar, percent) on the provider's own row.
+test("Providers draws a signed-in provider's usage", function()
 	local app = open("Providers")
-	expect(shows(app, PAGE, "d@example.com")).to_be(true)
-	expect(shows(app, PAGE, "ChatGPT Plus")).to_be(true)
-	expect(shows(app, PAGE, "Session 1% · Week 22% · 1 reset banked")).to_be(true)
-	expect(shows(app, PAGE, "Add account")).to_be(true)
-	-- The banked reset is a button, as the upstream screen's is.
-	expect(shows(app, PAGE, "Use reset")).to_be(true)
+	expect(shows(app, PAGE, "Session")).to_be(true)
+	expect(shows(app, PAGE, "Week")).to_be(true)
+	expect(shows(app, PAGE, "22%")).to_be(true)
 end)
 
 -- The route DSH runs by default says so, as the upstream screen marks it.

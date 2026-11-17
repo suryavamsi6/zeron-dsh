@@ -77,6 +77,7 @@ add(profile, "user-rounded", "Personal")
 add(browser, "global", "Browser")
 add(browser_history, "clock-circle", "Browser")
 add(providers, "widget", "Devices")
+
 add(devices, "laptop", "Devices")
 add(projects_page, "folder-with-files", "Devices")
 add(members, "users-group-rounded", "Organization")

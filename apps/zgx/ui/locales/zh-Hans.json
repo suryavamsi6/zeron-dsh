@@ -2406,6 +2406,13 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "移除"
       }
+    },
+    "gateway": {
+      "title": "网关"
+    },
+    "agents": {
+      "title": "智能体",
+      "description": "此设备上的编程智能体、它们的登录账户，以及各自的使用情况。"
     }
   },
   "common": {

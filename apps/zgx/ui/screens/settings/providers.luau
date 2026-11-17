@@ -111,6 +111,79 @@ local function say(err: any): string
 	return if type(err) == "table" and type(err.message) == "string" then err.message else tostring(err)
 end
 
+-- One usage window as the upstream screen draws it: its label, its bar, its
+-- percent. The widths are `crates/ui/src/settings/accounts.rs`'s —
+-- `USAGE_LABEL_WIDTH` 52, `USAGE_BAR_WIDTH` 88 (4 high), `USAGE_PERCENT_WIDTH`
+-- 34, 8 apart — so the rows line up in a column.
+local function usage_meter(label: string, value: any): Node
+	-- (A number, or a function of the state: a row is built once and its
+	-- meters follow the account as it loads.)
+	local read = if type(value) == "function" then value else function(): any
+		return value
+	end
+	local function fraction(): number
+		return math.max(0, math.min(1, tonumber(read()) or 0))
+	end
+	return ui.row {
+		items = "center",
+		gap = "$space.2",
+		ui.text {
+			label,
+			w = ui.raw(52, "the usage label's column"),
+			color = "$text.secondary",
+			text_size = "$font.size.xs",
+		},
+		ds.ProgressBar {
+			value = fraction,
+			w = ui.raw(88, "the usage bar's width"),
+			size = "regular",
+		},
+		ui.text {
+			function(): string
+				return `{math.floor(fraction() * 100 + 0.5)}%`
+			end,
+			w = ui.raw(34, "the usage percent's column"),
+			color = "$text.secondary",
+			text_size = "$font.size.xs",
+			align = "end",
+		},
+	}
+end
+
+-- The agent account behind a route, when one is signed in: its usage
+-- windows are what the meters draw. (`deepseek-official` is the `deepseek`
+-- agent's route, `openai` the ChatGPT one's.)
+local function account_for(route: any): any?
+	local now = agents.now:get()
+	for _, agent in now.list or {} do
+		local id = agent.id
+		if type(id) == "string" and (route.id == id or string.sub(route.id, 1, #id) == id) then
+			for _, account in agent.accounts or {} do
+				if account.active then
+					return account
+				end
+			end
+		end
+	end
+	return nil
+end
+
+-- A signed-in provider's plan, as the upstream screen draws it: its windows
+-- (label, bar, percent) — nothing for a provider with no account or no plan.
+local function route_usage(item: any): Node
+	local function of(key: string): any
+		return function(): any
+			local account = account_for(item)
+			return if account then account[key] else nil
+		end
+	end
+	return ui.column {
+		gap = "$space.1",
+		usage_meter("Session", of("session")),
+		usage_meter("Week", of("week")),
+	}
+end
+
 -- An API-key route's trailing control: the masked field and Save beside
 -- it. Saving clears the field only while nobody typed over it, and marks
 -- the ref configured in place (no reload).
@@ -169,7 +242,14 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 		detail = function(): string?
 			return note:get()
 		end,
-		control = ui.row {
+		control = ui.column {
+			gap = "$space.1",
+			items = "end",
+			ui.show(function(): boolean
+				local account = account_for(item)
+				return account ~= nil and account.key ~= true
+			end, route_usage(item)),
+			ui.row {
 			w = lane(),
 			shrink = 0,
 			gap = "$space.2",
@@ -193,6 +273,7 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 					return remote() or saving:get() or key:get() == ""
 				end,
 				on_click = save,
+			},
 			},
 		},
 	}
@@ -301,7 +382,14 @@ local function chatgpt_row(item: any, remote: () -> boolean): Node
 		detail = function(): string?
 			return note:get()
 		end,
-		control = ui.row {
+		control = ui.column {
+			gap = "$space.1",
+			items = "end",
+			ui.show(function(): boolean
+				local account = account_for(item)
+				return account ~= nil and account.key ~= true
+			end, route_usage(item)),
+			ui.row {
 			w = lane(),
 			shrink = 0,
 			gap = "$space.2",
@@ -347,6 +435,7 @@ local function chatgpt_row(item: any, remote: () -> boolean): Node
 					end
 				end,
 			}),
+			},
 		},
 	}
 end
@@ -361,9 +450,14 @@ local function route_row(item: any, remote: () -> boolean, creds: State<any>): N
 	elseif item.key_ref then
 		return key_row(item, remote, creds)
 	elseif item.account then
+		-- The account's own route: its plan's windows ride on the row.
 		return ds.Settings.Row {
 			label = ui.t("settings.providers.routes.account_line"),
 			description = ui.t("settings.providers.routes.account"),
+			control = ui.show(function(): boolean
+				local account = account_for(item)
+				return account ~= nil and account.key ~= true
+			end, route_usage(item)),
 		}
 	elseif item.oauth then
 		return ds.Settings.Row {
@@ -466,100 +560,6 @@ end
 
 -- The agents' accounts, as the upstream screen lists them: who is signed in,
 -- what the plan is using, and which one runs.
-local function account_row(agent_id: string, account: any): Node
-	local function pct(value: any): string
-		return `{math.floor((tonumber(value) or 0) * 100 + 0.5)}%`
-	end
-	return ds.Settings.Row {
-		label = account.email,
-		description = account.plan,
-		badge = ui.show(function(): boolean
-			return account.active == true
-		end, ds.Badge { ui.t("settings.providers.accounts.in_use"), tone = "accent", size = "sm" }),
-		detail = function(): string?
-			-- (An API key has no plan, so no windows to show.)
-			if account.key then
-				return nil
-			end
-			local line = `Session {pct(account.session)} · Week {pct(account.week)}`
-			-- A Codex account banks resets: how many are left, as the upstream
-			-- screen says ("1 reset banked").
-			local banked = tonumber(account.banked) or 0
-			if banked > 0 then
-				line = `{line} · {ui.t("settings.providers.accounts.banked", { count = banked }):get()}`
-			end
-			return line
-		end,
-		control = ui.column {
-			gap = "$space.1",
-			items = "end",
-			-- The soonest-to-expire reset spends first, as the upstream does.
-			ui.show(function(): boolean
-				return account.banked ~= nil and (tonumber(account.banked) or 0) > 0
-			end, ds.Button {
-				ui.t("settings.providers.accounts.use_reset"),
-				size = "sm",
-				tone = "secondary",
-				on_click = function()
-					local first = (account.resets or {})[1]
-					if first then
-						agents.use_reset(account.id, first.id)
-					end
-				end,
-			}),
-			ui.show(function(): boolean
-				return account.switchable == true and account.active ~= true
-			end, ds.Button {
-				ui.t("settings.providers.accounts.use"),
-				size = "sm",
-				tone = "secondary",
-				on_click = function()
-					agents.switch_on(agents.now:get().target or "", agent_id, account.id)
-				end,
-			}),
-		},
-	}
-end
-
--- One block per agent that has accounts, its own "Add account" under them.
-local function accounts_section(): Node?
-	local now = agents.now:get()
-	local blocks = {}
-	for _, agent in now.list or {} do
-		local accounts = agent.accounts or {}
-		if #accounts > 0 then
-			local rows = {}
-			for _, account in accounts do
-				table.insert(rows, account_row(agent.id, account))
-			end
-			table.insert(blocks, ds.Settings.Section {
-				title = agent.name,
-				ds.Settings.Group(rows),
-				ui.row {
-					w_full = true,
-					px = ds.Settings.inset(),
-					ds.Button {
-						ui.t("settings.providers.accounts.add"),
-						size = "sm",
-						tone = "secondary",
-						on_click = function()
-							agents.sign_in(agent.id)
-						end,
-					},
-				},
-			})
-		end
-	end
-	if #blocks == 0 then
-		return nil
-	end
-	return ds.Settings.Section {
-		title = ui.t("settings.providers.accounts.title"),
-		description = ui.t("settings.providers.accounts.description"),
-		ui.column { w_full = true, gap = "$space.4", blocks },
-	}
-end
-
 function M.body(): Node
 	return ui.component(function(): Node
 		-- The catalog and what it needs, loaded once a visit (Try again
@@ -706,11 +706,9 @@ function M.body(): Node
 			end
 			return out
 		end)
-		local accounts = accounts_section()
 		return ui.column {
 			w_full = true,
 			gap = "$space.6",
-			if accounts then accounts else nil,
 			search.anchor(
 				"routes",
 				ds.Settings.Section {

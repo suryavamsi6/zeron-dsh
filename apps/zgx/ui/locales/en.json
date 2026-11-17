@@ -2406,6 +2406,13 @@
         "description": "Parakeet v3 · {total} MB",
         "remove": "Remove"
       }
+    },
+    "gateway": {
+      "title": "Gateway"
+    },
+    "agents": {
+      "title": "Agents",
+      "description": "The coding agents this device has, the accounts they sign in with, and what each is using."
     }
   },
   "common": {
