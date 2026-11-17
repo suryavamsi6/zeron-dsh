@@ -84,11 +84,6 @@ local function route_of(entry: any): any?
 	local native = if type(entry.nativeAuth) == "table" then entry.nativeAuth else {}
 	local env = if type(native.env) == "table" then native.env[1] else nil
 	local id = entry.provider
-	-- This screen presents the ChatGPT subscription through Codex, whose
-	-- account usage and banked resets are available here. Keep the legacy
-	-- OpenAI route in the gateway/model catalog, but don't show a duplicate
-	-- standalone account card.
-	if id == "openai" then return nil end
 	-- OpenAI and Codex use distinct grants and are signed in independently.
 	local chatgpt = id == "openai" or id == "openai-codex"
 	local oauth = (native.oauth == true and not chatgpt) or id == "mistral"
