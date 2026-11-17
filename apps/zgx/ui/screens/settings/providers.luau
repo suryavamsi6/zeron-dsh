@@ -157,7 +157,7 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 		end)
 	end
 	return ds.Settings.Row {
-		label = item.name,
+		label = ui.t("settings.providers.routes.key.line"),
 		description = ui.t("settings.providers.routes.key.description", { ref = ref }),
 		badge = ui.show(function(): boolean
 			return item.in_use == true or configured_in(creds:get(), ref)
@@ -293,7 +293,7 @@ local function chatgpt_row(item: any, remote: () -> boolean): Node
 		end)
 	end
 	return ds.Settings.Row {
-		label = item.name,
+		label = ui.t("settings.providers.routes.sign_in.line"),
 		description = ui.t("settings.providers.routes.sign_in.description"),
 		badge = ui.show(function(): boolean
 			return phase:get() == "signed_in"
@@ -354,23 +354,25 @@ end
 -- A route's row by the control it needs (the engine's own precedence:
 -- its sign-in, then its key, then the account it's already part of).
 local function route_row(item: any, remote: () -> boolean, creds: State<any>): Node
+	-- (The block's title already names the provider: its row names the
+	-- account or key it takes, as the upstream screen's lines do.)
 	if item.chatgpt then
 		return chatgpt_row(item, remote)
 	elseif item.key_ref then
 		return key_row(item, remote, creds)
 	elseif item.account then
 		return ds.Settings.Row {
-			label = item.name,
+			label = ui.t("settings.providers.routes.account_line"),
 			description = ui.t("settings.providers.routes.account"),
 		}
 	elseif item.oauth then
 		return ds.Settings.Row {
-			label = item.name,
+			label = ui.t("settings.providers.routes.oauth_line"),
 			description = ui.t("settings.providers.routes.oauth_elsewhere"),
 		}
 	end
 	return ds.Settings.Row {
-		label = item.name,
+		label = ui.t("settings.providers.routes.nothing_line"),
 		description = ui.t("settings.providers.routes.nothing"),
 	}
 end
@@ -480,24 +482,50 @@ function M.body(): Node
 		-- in `load`, so a key saved on this visit moves its row at once.
 		-- (By the catalog's own order within each group: `table.sort` is not
 		-- stable.)
+		-- The providers this device actually has, as the upstream screen lists
+		-- them; the catalog's long tail (a route per API host, most with no
+		-- key) waits behind "Show all".
+		local show_all = ui.use_state(false)
+		local function ready(route: any, saved: any): boolean
+			if route.chatgpt then
+				return route.authorized == true
+			end
+			return route.key_ref ~= nil and configured_in(saved, route.key_ref)
+		end
 		local catalog = ui.computed(function(): { any }
 			local d = res.data:get()
 			local routes = if d then table.clone(d.routes) else {}
 			local saved = creds:get()
-			local function ready(route: any): boolean
-				if route.chatgpt then
-					return route.authorized == true
+			local all = show_all:get()
+			local shown = {}
+			for _, route in routes do
+				if all or ready(route, saved) or route.account then
+					table.insert(shown, route)
 				end
-				return route.key_ref ~= nil and configured_in(saved, route.key_ref)
 			end
-			table.sort(routes, function(a: any, b: any): boolean
-				local a_ready, b_ready = ready(a), ready(b)
+			table.sort(shown, function(a: any, b: any): boolean
+				local a_ready, b_ready = ready(a, saved), ready(b, saved)
 				if a_ready ~= b_ready then
 					return a_ready
 				end
 				return a.order < b.order
 			end)
-			return routes
+			return shown
+		end)
+		-- How many the catalog holds beyond what is shown.
+		local hidden_count = ui.computed(function(): number
+			local d = res.data:get()
+			if not d then
+				return 0
+			end
+			local saved = creds:get()
+			local n = 0
+			for _, route in d.routes do
+				if not ready(route, saved) and not route.account then
+					n += 1
+				end
+			end
+			return n
 		end)
 		local function remote(): boolean
 			local target = agents.now:get().target
@@ -516,6 +544,26 @@ function M.body(): Node
 			end, { key = function(item: any): string
 				return item.id
 			end }),
+			-- The rest of the catalog, on request.
+			ui.show(function(): boolean
+				return hidden_count:get() > 0 or show_all:get()
+			end, ui.row {
+				w_full = true,
+				px = ds.Settings.inset(),
+				ds.Button {
+					function(): string
+						if show_all:get() then
+							return ui.t("settings.providers.routes.show_fewer"):get()
+						end
+						return ui.t("settings.providers.routes.show_all", { count = hidden_count:get() }):get()
+					end,
+					tone = "secondary",
+					size = "sm",
+					on_click = function()
+						show_all:set(not show_all:peek())
+					end,
+				},
+			}),
 			ui.show(function(): boolean
 				return res.error:get() ~= nil
 			end, ui.row {

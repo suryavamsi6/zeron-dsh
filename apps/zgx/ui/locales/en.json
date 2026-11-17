@@ -1522,7 +1522,8 @@
           "configured": "Configured",
           "saved": "Saved.",
           "failed": "Couldn't save it: {says}",
-          "whitespace": "A key has no spaces around it."
+          "whitespace": "A key has no spaces around it.",
+          "line": "API key"
         },
         "sign_in": {
           "start": "Sign in with ChatGPT",
@@ -1532,9 +1533,15 @@
           "signed_in": "Signed in",
           "not_completed": "The sign-in wasn't completed.",
           "try_again": "Try again",
-          "failed": "The sign-in didn't start: {says}"
+          "failed": "The sign-in didn't start: {says}",
+          "line": "ChatGPT account"
         },
-        "in_use": "In use"
+        "in_use": "In use",
+        "show_all": "Show all {count} providers",
+        "show_fewer": "Show fewer",
+        "account_line": "DeepSeek account",
+        "oauth_line": "Account",
+        "nothing_line": "No key"
       },
       "agent_settings": "Agent settings",
       "agents": {

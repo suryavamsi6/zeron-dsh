@@ -1678,7 +1678,8 @@
           "configured": "已配置",
           "saved": "已保存。",
           "failed": "无法保存：{says}",
-          "whitespace": "密钥前后不能有空格。"
+          "whitespace": "密钥前后不能有空格。",
+          "line": "API 密钥"
         },
         "sign_in": {
           "start": "使用 ChatGPT 登录",
@@ -1688,9 +1689,15 @@
           "signed_in": "已登录",
           "not_completed": "登录未完成。",
           "try_again": "重试",
-          "failed": "登录未能开始：{says}"
+          "failed": "登录未能开始：{says}",
+          "line": "ChatGPT 账户"
         },
-        "in_use": "使用中"
+        "in_use": "使用中",
+        "show_all": "显示全部 {count} 个提供商",
+        "show_fewer": "收起",
+        "account_line": "DeepSeek 账户",
+        "oauth_line": "账户",
+        "nothing_line": "无密钥"
       }
     },
     "devices": {
