@@ -4,7 +4,8 @@
 #
 #   scripts/ci/test-zgx.sh rust      cargo test --bin zeron-zgx (its unit tests,
 #                                    src/plugins/*_tests.rs among them), the
-#                                    known ones skipped by exact name
+#                                    known ones skipped by exact name, and the
+#                                    `rust-macos:` ones on the macOS runner only
 #   scripts/ci/test-zgx.sh ui [zgx]  zgx test ui (the Luau UI tests), with the
 #                                    zgx CLI given or on PATH; fails on any FAIL
 #                                    not listed, and names listed ones that pass
@@ -19,7 +20,15 @@ listed() { sed -n "s/^$1: //p" "$known"; }
 case "${1:-}" in
   rust)
     skips=()
-    while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed rust)
+    skip_listed() {
+      local name
+      while IFS= read -r name; do
+        if [ -n "$name" ]; then skips+=(--skip "$name"); fi
+      done < <(listed "$1")
+    }
+    skip_listed rust
+    # (A test the macOS runner can't pass, which the other runners keep running.)
+    if [ "$(uname -s)" = Darwin ]; then skip_listed rust-macos; fi
     cd "$root/apps/zgx"
     # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
     # calls unbound.)

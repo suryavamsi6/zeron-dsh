@@ -2,8 +2,30 @@
 # its CI job (zgx-tests.yml) gates everything else. Every other failure fails the
 # job. A known one that passes again is reported: then delete its line.
 #
-#   rust: <test path>     `cargo test --bin zeron-zgx` (skipped, exact name)
-#   luau: <test name>     `zgx test ui` (run; its FAIL line accepted)
+#   rust: <test path>        both runners: `cargo test --bin zeron-zgx` (skipped, exact name)
+#   rust-macos: <test path>  the macOS runner only: skipped there, run by the others
+#   luau: <test name>        `zgx test ui` (run; its FAIL line accepted)
 #
-# None now (2026-11-11): every test passes on macOS and Linux. A test that
-# can't pass yet goes here only with why, and whose fix it waits on.
+# A `rust`/`rust-macos` test is skipped, so it can't report that it passes
+# again: delete its line when the runner or the test is fixed.
+#
+# No `rust:` or `luau:` line now (2026-11-11): those tests pass on macOS and
+# Linux. A test that can't pass yet goes here only with why, and whose fix it
+# waits on.
+
+# The macOS CI runner's Metal device: wgpu-hal panics in metal/device.rs (an
+# unwrap on None) and no shader draws through it, so the tests that draw on the
+# GPU thread cannot pass there. They keep running on Linux, on macOS itself
+# (`cargo test` there skips nothing), and in the app; what clears these lines
+# is a runner whose GPU works, or zgx-gpu detecting that broken device the way
+# `zeron_visual_gpu::unavailable_reason` already detects none at all.
+rust-macos: visuals_tests::scenes_and_shaders_render_on_the_gpu_thread
+rust-macos: transcript_paint_tests::a_long_chat_opened_and_scrolled_draws_what_a_whole_repaint_draws
+rust-macos: transcript_paint_tests::a_long_chat_come_back_to_mid_scroll_draws_what_a_whole_repaint_draws
+rust-macos: transcript_paint_tests::a_long_chat_of_other_chats_messages_opened_and_scrolled_draws_what_a_whole_repaint_draws
+rust-macos: transcript_paint_tests::rows_that_come_whole_after_they_show_stay_apart_and_drawn
+
+# A canvas animating in view runs its script 10 times in the runner's half
+# second, and the test wants more than 10: its frames come too slowly there.
+# (Not a GPU device fault: the frames it does draw are right, just few.)
+rust-macos: visuals_tests::a_visual_scrolled_away_does_not_animate
