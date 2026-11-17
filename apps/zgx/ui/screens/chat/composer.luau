@@ -401,6 +401,25 @@ local function Composer(): Node
 				any_change = true
 			end
 		end
+		-- A model the gateway's routes list names its route in the config: a
+		-- chat saved before the route rode with the model gets it now, since
+		-- the run needs it and the picker's pick is only sent once.
+		if not any_change then
+			-- (`s.model` is the picker's own value form, "<harness>/<model>".)
+			local saved = (s :: any).model
+			if saved then
+				for _, m in store.catalog:peek().models do
+					if m.value == saved and m.provider then
+						local opts = (s :: any).model_options or {}
+						if opts.provider ~= m.provider.id then
+							patch.model_options = { provider = m.provider.id }
+							applied.model_options = patch.model_options
+							any_change = true
+						end
+					end
+				end
+			end
+		end
 		if any_change then
 			-- A model of another agent takes its agent with it.
 			if patch.model then
@@ -907,6 +926,12 @@ local function Composer(): Node
 					for _, m in store.catalog:peek().models do
 						if m.value == pick.model then
 							req.harness = m.harness
+							-- Which provider route serves it: a model id alone is
+							-- ambiguous (`gpt-4` is on `openai` and `openrouter`),
+							-- and the run has to name the route it may use.
+							if m.provider then
+								req.model_options = { provider = m.provider.id }
+							end
 						end
 					end
 				end

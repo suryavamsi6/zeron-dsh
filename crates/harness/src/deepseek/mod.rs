@@ -434,9 +434,18 @@ impl Harness for DeepSeekHarness {
             )));
         }
         let environment = launch_environment(&request)?;
-        if !environment
-            .get(std::ffi::OsStr::new("DEEPSEEK_API_KEY"))
-            .is_some_and(|v| !v.to_string_lossy().trim().is_empty())
+        // The official route's credential, and only its: any other route
+        // resolves its own through DSH (a stored `apiKeyEnv` or an account
+        // grant), so requiring this key would refuse every gateway model.
+        let provider = request
+            .env
+            .get("ZERON_DEEPSEEK_PROVIDER")
+            .map(String::as_str)
+            .unwrap_or(DEFAULT_PROVIDER);
+        if provider == DEFAULT_PROVIDER
+            && !environment
+                .get(std::ffi::OsStr::new("DEEPSEEK_API_KEY"))
+                .is_some_and(|v| !v.to_string_lossy().trim().is_empty())
         {
             return Err(HarnessError::NotSignedIn(
                 "Set DEEPSEEK_API_KEY in DeepSeek provider settings or the launching environment"

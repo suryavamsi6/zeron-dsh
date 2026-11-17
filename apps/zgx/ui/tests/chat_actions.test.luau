@@ -539,6 +539,32 @@ test("project files added to the chat are chips, sent where they are", function(
 	expect(calls).to_contain("att:/tmp/atlas/docs/notes.md|host")
 end)
 
+-- A chat saved on a gateway model before its route rode with it gets the
+-- route written into its config when it opens: the run needs it, and the
+-- picker's pick is only sent once.
+test("a saved gateway model gets its route backfilled", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s3")
+	settle(app)
+	expect(app:state("calls")).to_contain("configure:s3:model_options=")
+end)
+
+-- A gateway model's route rides with it: the run has to name the route,
+-- since a model id alone is ambiguous (`gpt-4` is on `openai` and
+-- `openrouter`), and the engine stamps `ZERON_DEEPSEEK_PROVIDER` from it.
+test("a gateway model sends the route it is served from", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s2")
+	app:set_state("chat_model", "deepseek/gpt-6-luna")
+	settle(app)
+	app:type('role:textbox ~"Message"', "hello")
+	app:key("Enter")
+	settle(app)
+	expect(app:state("calls")).to_contain("send_provider:openai")
+end)
+
 -- The model picker opens folded on the chosen model's reasoning, the list
 -- (its tabs, its search) a press away; Escape folds it back, then closes
 -- it (Zeron's compact picker, the only one).

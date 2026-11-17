@@ -851,6 +851,32 @@ impl SessionsEngine {
         ))
     }
 
+    /// Stamp the provider route a gateway model runs on. The harness accepts
+    /// any route's models, but only when the host names the route
+    /// (`ZERON_DEEPSEEK_PROVIDER`); the picker sends it with the model
+    /// (`modelOptions.provider`), because a model id alone is ambiguous —
+    /// `gpt-4` exists on `openai` and `openrouter`.
+    fn stamp_provider_route(request: &mut RunRequest) {
+        const STAMP: &str = "ZERON_DEEPSEEK_PROVIDER";
+        if request.env.contains_key(STAMP) {
+            return;
+        }
+        let Some(provider) = request
+            .model_options
+            .get("provider")
+            .and_then(serde_json::Value::as_str)
+            .filter(|provider| !provider.is_empty())
+            .map(str::to_owned)
+        else {
+            return;
+        };
+        // Taken, not forwarded: it names the route, and the harness would
+        // read it as a model option of its own ("Unsupported DeepSeek model
+        // option").
+        request.model_options.remove("provider");
+        request.env.insert(STAMP.to_owned(), provider);
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_inner(
         &self,
@@ -884,6 +910,9 @@ impl SessionsEngine {
             .unwrap_or_else(|| crate::repos::home_dir().join(".zeron").join("scratch"));
         request.cwd = crate::repos::resolve_chat_cwd(&request.cwd, &scratch_root)
             .map_err(EngineError::Other)?;
+        if harness_id == HarnessId::DeepSeek {
+            Self::stamp_provider_route(&mut request);
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -6281,6 +6310,41 @@ mod tests {
                 "/a".into(),
                 Some(zeron_proto::HarnessId::ClaudeCode)
             ))
+        );
+    }
+
+    #[test]
+    fn a_gateway_model_runs_on_the_route_its_picker_named() {
+        let mut picked = request();
+        picked.model = Some("gpt-4.1".into());
+        picked
+            .model_options
+            .insert("provider".into(), serde_json::json!("openai"));
+        SessionsEngine::stamp_provider_route(&mut picked);
+        assert_eq!(
+            picked.env.get("ZERON_DEEPSEEK_PROVIDER").map(String::as_str),
+            Some("openai")
+        );
+        // Consumed: the harness would read it as a model option.
+        assert!(!picked.model_options.contains_key("provider"));
+
+        // The official two carry no provider, and a host stamp is never
+        // widened by what a sender put in the options.
+        let mut official = request();
+        SessionsEngine::stamp_provider_route(&mut official);
+        assert!(!official.env.contains_key("ZERON_DEEPSEEK_PROVIDER"));
+
+        let mut stamped = request();
+        stamped
+            .env
+            .insert("ZERON_DEEPSEEK_PROVIDER".into(), "deepseek-official".into());
+        stamped
+            .model_options
+            .insert("provider".into(), serde_json::json!("openai"));
+        SessionsEngine::stamp_provider_route(&mut stamped);
+        assert_eq!(
+            stamped.env.get("ZERON_DEEPSEEK_PROVIDER").map(String::as_str),
+            Some("deepseek-official")
         );
     }
 

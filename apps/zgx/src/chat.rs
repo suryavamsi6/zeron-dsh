@@ -1784,6 +1784,21 @@ fn model_value(harness: &str, m: &Json) -> Value {
         ("harness", Value::from(harness)),
         ("fast", Value::Bool(fast.is_some())),
     ];
+    // Where it is served from, for a model the gateway's routes list: the
+    // picker shows it, and the run names it (`modelOptions.provider`), since
+    // the id alone is ambiguous.
+    if let Some(provider) = m["provider"].as_object() {
+        let id = provider["id"].as_str().unwrap_or_default();
+        if !id.is_empty() {
+            fields.push((
+                "provider",
+                Value::record([
+                    ("id", Value::from(id)),
+                    ("name", Value::from(provider["name"].as_str().unwrap_or(id))),
+                ]),
+            ));
+        }
+    }
     if !efforts.is_empty() {
         fields.push(("efforts", Value::List(efforts.into())));
     }
@@ -3325,6 +3340,18 @@ fn merged_config(config: &Json, args: &Value) -> Json {
         if c.get(key).is_none() {
             c[key] = Json::Null;
         }
+    }
+    if let Some(options) = args
+        .field("model_options")
+        .and_then(|value| serde_json::from_str::<Json>(&value.to_json()).ok())
+        .and_then(|value| value.as_object().cloned())
+    {
+        // Merged, not replaced: the route joins fast and the rest.
+        let mut merged = c["modelOptions"].as_object().cloned().unwrap_or_default();
+        for (key, value) in options {
+            merged.insert(key, value);
+        }
+        c["modelOptions"] = Json::Object(merged);
     }
     let field = |key: &str| args.field(key).map(text).filter(|s| !s.is_empty());
     if let Some(model) = field("model") {
@@ -6618,6 +6645,22 @@ mod tests {
     /// folder, never a config with no agent (which the engine refuses as
     /// bad params: the user's "Your message didn't send", Nov 2).
     #[test]
+    fn a_gateway_model_keeps_the_route_it_is_served_from() {
+        let model = serde_json::json!({
+            "id": "gpt-4.1",
+            "label": "GPT-4.1",
+            "provider": { "id": "openai", "name": "OpenAI" },
+        });
+        let value = super::model_value("deepseek", &model);
+        assert_eq!(value.field("value").map(|v| v.to_json()), Some("\"deepseek/gpt-4.1\"".into()));
+        let provider = value.field("provider").expect("the route rides with the model");
+        assert_eq!(provider.field("id").map(|v| v.to_json()), Some("\"openai\"".into()));
+        // A harness with one source names none, and the row stays as it was.
+        let plain = serde_json::json!({ "id": "deepseek-flash", "label": "Flash" });
+        assert!(super::model_value("deepseek", &plain).field("provider").is_none());
+    }
+
+    #[test]
     fn a_chat_just_made_is_sent_as_it_was_made() {
         let id = "77777777-7777-4777-8777-777777777777";
         let params = serde_json::json!({
@@ -6644,6 +6687,14 @@ mod tests {
         let picked = zgx_script::Value::from_json(r#"{"model":"codex/gpt-6.1"}"#).unwrap();
         let config = super::merged_config(&row["config"], &picked);
         assert_eq!((config["harness"].as_str(), config["model"].as_str()), (Some("codex"), Some("gpt-6.1")));
+        // A gateway model's route rides in with it: the run has to name the
+        // route, since the id alone is ambiguous.
+        let routed = zgx_script::Value::from_json(
+            r#"{"model":"gpt-4.1","model_options":{"provider":"openai"}}"#,
+        )
+        .unwrap();
+        let config = super::merged_config(&row["config"], &routed);
+        assert_eq!(config["modelOptions"]["provider"], "openai");
     }
 
     #[test]
