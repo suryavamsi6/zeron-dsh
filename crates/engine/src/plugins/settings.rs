@@ -23,7 +23,7 @@
 //! so a default the plugin changes reaches whoever never set it. A value that
 //! no longer fits its setting (an option dropped, a kind changed) is ignored
 //! for its default. Removing the plugin removes the file
-//! ([`PluginSettings::forget`]; the engine's `RemovePlugin`).
+//! ([`forget`]; the engine's `RemovePlugin`).
 //!
 //! This is the one store and the one set of rules for those values: the
 //! engine owns the folder, the file name and the checks, and an app draws the
@@ -398,6 +398,9 @@ pub struct PluginSettings {
     pub stored: Map<String, Json>,
     /// The page's own line under its title.
     pub description: Option<String>,
+    /// Its settings file there but unreadable: [`PluginSettings::set`]
+    /// refuses, so a save can't drop what was kept.
+    load_error: Option<String>,
 }
 
 impl PluginSettings {
@@ -410,16 +413,20 @@ impl PluginSettings {
             .unwrap_or_default()
             .to_string();
         let declared = declared(manifest, builtin);
-        let stored = if declared.iter().any(|s| !is_app_row(&s.kind)) {
-            load(storage, &id)
+        let (stored, load_error) = if declared.iter().any(|s| !is_app_row(&s.kind)) {
+            match load(storage, &id) {
+                Ok(stored) => (stored, None),
+                Err(error) => (Map::new(), Some(error)),
+            }
         } else {
-            Map::new()
+            (Map::new(), None)
         };
         Self {
             id,
             declared,
             stored,
             description: page_description(manifest),
+            load_error,
         }
     }
 
@@ -442,8 +449,13 @@ impl PluginSettings {
 
     /// Set `id` to `value` (`null`: back to its default) in `storage`,
     /// returning whether the file changed. A value that doesn't fit its
-    /// setting is refused with what it takes instead.
+    /// setting is refused with what it takes instead, and so is any change
+    /// while its settings file can't be read back — a save would drop what
+    /// it keeps.
     pub fn set(&mut self, storage: &Path, id: &str, value: &Json) -> Result<bool, String> {
+        if let Some(error) = self.load_error.as_ref() {
+            return Err(format!("{error}, so it can't be changed"));
+        }
         let Some(setting) = self
             .declared
             .iter()
@@ -462,19 +474,20 @@ impl PluginSettings {
                 )
             })?)
         };
-        let before = self.stored.clone();
+        let mut next = self.stored.clone();
         match held {
             Some(v) => {
-                self.stored.insert(id.to_string(), v);
+                next.insert(id.to_string(), v);
             }
             None => {
-                self.stored.remove(id);
+                next.remove(id);
             }
         }
-        if before == self.stored {
+        if next == self.stored {
             return Ok(false);
         }
-        store(storage, &self.id, &self.stored)?;
+        store(storage, &self.id, &next)?;
+        self.stored = next;
         Ok(true)
     }
 }
@@ -492,31 +505,81 @@ pub fn storage_in(plugins_dir: &Path) -> PathBuf {
     plugins_dir.join(STORAGE_DIR)
 }
 
-/// What `id` keeps in `storage`: an object, or none.
-pub fn load(storage: &Path, id: &str) -> Map<String, Json> {
-    path_in(storage, id)
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str::<Json>(&text).ok())
-        .and_then(|value| value.as_object().cloned())
-        .unwrap_or_default()
+/// Whether `storage` is a link: the store never follows one to a folder of
+/// the link's choosing.
+fn storage_is_link(storage: &Path) -> bool {
+    std::fs::symlink_metadata(storage)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
-/// Keep `held` as `id`'s settings: nothing kept means no file.
+/// What `id` keeps in `storage`: an object, or none. A file there but
+/// unreadable is an error — never nothing kept, which a later save would
+/// write over.
+pub fn load(storage: &Path, id: &str) -> Result<Map<String, Json>, String> {
+    if storage_is_link(storage) {
+        return Err("its settings folder is a link".to_string());
+    }
+    let Some(path) = path_in(storage, id) else {
+        return Ok(Map::new());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(e) => return Err(format!("its settings file can't be read ({e})")),
+    };
+    let value = serde_json::from_str::<Json>(&text)
+        .map_err(|e| format!("its settings file can't be read ({e})"))?;
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| "its settings file isn't a JSON object".to_string())
+}
+
+/// Keep `held` as `id`'s settings: nothing kept means no file. Written
+/// beside the file then renamed over it, the temporary file made, never
+/// followed — a link there fails instead of writing where it points.
 pub fn store(storage: &Path, id: &str, held: &Map<String, Json>) -> Result<(), String> {
     let path = path_in(storage, id).ok_or("there's nowhere to keep it")?;
+    if storage_is_link(storage) {
+        return Err("its settings folder is a link".to_string());
+    }
     if held.is_empty() {
-        let _ = std::fs::remove_file(&path);
-        return Ok(());
+        return match std::fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        };
     }
     std::fs::create_dir_all(storage).map_err(|e| e.to_string())?;
     let text = serde_json::to_string(held).map_err(|e| e.to_string())?;
     let aside = path.with_extension("json.new");
-    std::fs::write(&aside, text).map_err(|e| e.to_string())?;
+    let write_aside = || {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&aside)
+    };
+    let mut file = write_aside().or_else(|e| {
+        // One left over from an interrupted save may go; a link or anything
+        // else may not be touched.
+        if e.kind() == std::io::ErrorKind::AlreadyExists
+            && std::fs::symlink_metadata(&aside).is_ok_and(|m| m.is_file())
+        {
+            std::fs::remove_file(&aside).map_err(|e| e.to_string())?;
+        }
+        write_aside().map_err(|e| e.to_string())
+    })?;
+    std::io::Write::write_all(&mut file, text.as_bytes()).map_err(|e| e.to_string())?;
+    drop(file);
     std::fs::rename(&aside, &path).map_err(|e| e.to_string())
 }
 
 /// Plugin `id`'s settings let go of (it was removed).
 pub fn forget(storage: &Path, id: &str) {
+    if storage_is_link(storage) {
+        return;
+    }
     if let Some(path) = path_in(storage, id) {
         let _ = std::fs::remove_file(path);
     }
@@ -816,16 +879,99 @@ mod tests {
     fn a_settings_file_is_an_object_and_a_plugin_id_is_a_file_name() {
         let dir = scratch("file");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("demo.settings.json"), "[1,2]").unwrap();
-        assert!(load(&dir, "demo").is_empty(), "not an object: nothing kept");
+        assert!(
+            load(&dir, "demo").unwrap().is_empty(),
+            "none there: nothing kept"
+        );
         std::fs::write(dir.join("demo.settings.json"), "{\"tone\":\"dry\"}").unwrap();
-        assert_eq!(load(&dir, "demo")["tone"], "dry");
+        assert_eq!(load(&dir, "demo").unwrap()["tone"], "dry");
         assert_eq!(
             storage_in(Path::new("/d/plugins")),
             PathBuf::from("/d/plugins/.storage")
         );
         assert!(path_in(&dir, "a/b").is_none());
         assert!(path_in(&dir, "").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_file_there_but_unreadable_isnt_emptied_or_written_over() {
+        let dir = scratch("unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("demo.settings.json"), "[1,2]").unwrap();
+        assert!(load(&dir, "demo").is_err(), "not an object: unreadable");
+        std::fs::write(dir.join("demo.settings.json"), "{ not json").unwrap();
+        let mut settings = PluginSettings::read(&dir, &manifest(), false);
+        assert!(
+            settings.set(&dir, "tone", &json!("dry")).is_err(),
+            "a save would drop what it keeps, so it's refused"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("demo.settings.json")).unwrap(),
+            "{ not json",
+            "the file it couldn't read stays as it was"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_that_fails_keeps_what_it_knew_and_can_be_tried_again() {
+        let dir = scratch("retry");
+        std::fs::create_dir_all(&dir).unwrap();
+        // The temporary file as a folder: the write fails.
+        std::fs::create_dir_all(dir.join("demo.settings.json.new")).unwrap();
+        let mut settings = PluginSettings::read(&dir, &manifest(), false);
+        assert!(settings.set(&dir, "tone", &json!("dry")).is_err());
+        assert_eq!(settings.stored, Map::new(), "nothing kept was made up");
+        std::fs::remove_dir(dir.join("demo.settings.json.new")).unwrap();
+        assert!(
+            settings.set(&dir, "tone", &json!("dry")).unwrap(),
+            "the same value asked again tries the save again"
+        );
+        assert_eq!(settings.stored["tone"], "dry");
+        // Nothing kept means no file — and removing it failing is a failure.
+        std::fs::remove_file(dir.join("demo.settings.json")).unwrap();
+        std::fs::create_dir(dir.join("demo.settings.json")).unwrap();
+        assert!(
+            store(&dir, "demo", &Map::new()).is_err(),
+            "what couldn't be removed isn't said gone"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_isnt_followed_to_where_it_points() {
+        let dir = scratch("links");
+        let inside = dir.join("storage");
+        let outside = dir.join("elsewhere");
+        std::fs::create_dir_all(&inside).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        // `<id>.settings.json.new` a link: its target isn't written.
+        let victim = outside.join("victim.txt");
+        std::fs::write(&victim, "precious").unwrap();
+        std::os::unix::fs::symlink(&victim, inside.join("demo.settings.json.new")).unwrap();
+        let mut settings = PluginSettings::read(&inside, &manifest(), false);
+        assert!(settings.set(&inside, "tone", &json!("dry")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&victim).unwrap(),
+            "precious",
+            "the link's target was never written"
+        );
+        assert!(!inside.join("demo.settings.json").exists());
+        // `.storage` itself a link: read and write are both refused.
+        let linked = dir.join("linked");
+        std::os::unix::fs::symlink(&outside, &linked).unwrap();
+        let settings = PluginSettings::read(&linked, &manifest(), false);
+        assert_eq!(settings.values()["tone"], "warm");
+        let mut held = Map::new();
+        held.insert("tone".to_string(), json!("dry"));
+        assert!(
+            store(&linked, "demo", &held).is_err()
+                && store(&linked, "demo", &Map::new()).is_err(),
+            "a linked folder keeps nothing and takes nothing"
+        );
+        assert!(!outside.join("demo.settings.json").exists());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

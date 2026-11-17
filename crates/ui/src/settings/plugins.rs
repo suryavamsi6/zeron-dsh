@@ -554,8 +554,8 @@ impl PluginsPage {
         };
         let value = match declared.kind.as_str() {
             "number" => match text.parse::<f64>() {
-                Ok(number) => json!(number),
-                Err(_) => {
+                Ok(number) if number.is_finite() => json!(number),
+                _ => {
                     if let Some(editor) = self.editor.as_mut() {
                         editor.error = Some("That isn't a number.".into());
                     }
@@ -1032,9 +1032,11 @@ impl PluginsPage {
                                 .and_then(|row| {
                                     row.settings.declared.iter().find(|s| s.id == setting_id)
                                 })
-                                .and_then(|s| s.options().get(ix).cloned());
-                            if let Some(option) = value {
-                                page.set_value(&plugin, &setting_id, option, cx);
+                                .and_then(|s| s.options().get(ix))
+                                .and_then(|option| option.get("value"))
+                                .cloned();
+                            if let Some(value) = value {
+                                page.set_value(&plugin, &setting_id, value, cx);
                             }
                         },
                     );
@@ -1561,6 +1563,115 @@ mod tests {
         assert!(
             !titles.iter().any(|t| t == "Show the graph"),
             "an off plugin draws no settings: {titles:?}"
+        );
+    }
+
+    /// A dropdown's pick is the option's `value` — the string the store
+    /// checks against its options — never the option itself.
+    #[gpui::test]
+    fn a_dropdown_keeps_the_options_value(cx: &mut gpui::TestAppContext) {
+        use gpui::VisualTestContext;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let item = json!({
+            "id": "demo",
+            "name": "Demo",
+            "status": "on",
+        });
+        let plugins = dir.path().join("plugins");
+        let storage = zeron_engine::plugins::settings::storage_in(&plugins);
+        let row = PluginRow::from_item(&item, Some(&manifest()), &storage);
+        let (_page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            PluginsPage::for_test(state, dir.path().to_path_buf(), vec![row], cx)
+        });
+        cx.simulate_resize(gpui::size(px(1200.0), px(800.0)));
+        draw(cx);
+        let trigger = cx
+            .debug_bounds("plugin-setting-demo:scene")
+            .expect("the dropdown's trigger");
+        cx.simulate_click(trigger.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        draw(cx);
+        let shuffle = cx
+            .debug_bounds("plugin-setting-demo:scene-option-0")
+            .expect("the first option");
+        cx.simulate_click(shuffle.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        let kept: Json = serde_json::from_str(
+            &std::fs::read_to_string(storage.join("demo.settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            kept,
+            json!({ "scene": "shuffle" }),
+            "the option's value, not the option"
+        );
+    }
+
+    /// A number that parses but isn't a number — NaN, an infinity — is
+    /// refused rather than kept as `null`, which would read as "back to the
+    /// default" and drop the override.
+    #[gpui::test]
+    fn a_number_outside_the_finite_is_refused(cx: &mut gpui::TestAppContext) {
+        use gpui::VisualTestContext;
+
+        let dir = tempfile::tempdir().unwrap();
+        cx.update(|cx| {
+            gpui_base::init(cx);
+            cx.set_global(Theme::dark());
+            crate::settings::init(Default::default(), dir.path(), cx);
+        });
+        let plugins = dir.path().join("plugins");
+        let storage = zeron_engine::plugins::settings::storage_in(&plugins);
+        std::fs::create_dir_all(&storage).unwrap();
+        std::fs::write(
+            storage.join("demo.settings.json"),
+            serde_json::to_string(&json!({ "every": 120.0 })).unwrap(),
+        )
+        .unwrap();
+        let item = json!({
+            "id": "demo",
+            "name": "Demo",
+            "status": "on",
+        });
+        let row = PluginRow::from_item(&item, Some(&manifest()), &storage);
+        let (_page, cx) = cx.add_window_view(|_, cx| {
+            let state = cx.new(|_| AppState::new());
+            PluginsPage::for_test(state, dir.path().to_path_buf(), vec![row], cx)
+        });
+        _page.update(cx, |page, cx| {
+            let setting = page.rows[0]
+                .settings
+                .declared
+                .iter()
+                .find(|s| s.id == "every")
+                .unwrap()
+                .clone();
+            page.open_editor("demo", &setting, cx);
+            let input = page.editor.as_ref().unwrap().input.clone();
+            input.update(cx, |input, cx| input.set_text("NaN", cx));
+            page.submit_editor(cx);
+            assert_eq!(
+                page.editor.as_ref().unwrap().error.as_deref(),
+                Some("That isn't a number."),
+                "a validation error, said"
+            );
+            assert_eq!(page.rows[0].settings.value("every"), Some(json!(120.0)));
+        });
+        let kept: Json = serde_json::from_str(
+            &std::fs::read_to_string(storage.join("demo.settings.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            kept,
+            json!({ "every": 120.0 }),
+            "the override stands: NaN didn't reset it"
         );
     }
 
