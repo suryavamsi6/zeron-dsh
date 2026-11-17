@@ -3,11 +3,15 @@
 //! settings do.
 
 use std::path::PathBuf;
+use std::rc::Rc;
 
+use gpui::{AppContext, Context, Entity, Render, TestAppContext, div, prelude::*};
 use serde_json::{Value as Json, json};
 use zeron_visual::{ImageFit, Node, NodeKind};
 
-use super::{NEW_CHAT_BACKGROUND, WallpaperPlugin, read_locale, read_modules};
+use super::{
+    NEW_CHAT_BACKGROUND, PluginScene, SceneState, WallpaperPlugin, read_locale, read_modules,
+};
 use zeron_visual::plugin::PluginScript;
 
 /// The shipping parallax plugin, as it is in this repository.
@@ -258,4 +262,167 @@ fn a_plugin_folder_cannot_be_escaped() {
     assert!(super::plugin_path(&dir, "../parallax-scenes/init.luau").is_none());
     assert!(super::plugin_path(&dir, "/etc/passwd").is_none());
     assert!(super::plugin_path(&dir, "art/nowhere.webp").is_none());
+}
+
+/// The wallpaper resolver's stand-in for the shell: it keeps the scene
+/// while it draws and takes the image wallpaper's place once it fails.
+struct Page {
+    scene: Entity<PluginScene>,
+    fell_back: bool,
+}
+
+impl Render for Page {
+    fn render(&mut self, _window: &mut gpui::Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let drawing = !matches!(self.scene.read(cx).state(), SceneState::Failed(_));
+        self.fell_back = !drawing;
+        if drawing {
+            div().child(self.scene.clone()).into_any_element()
+        } else {
+            div().id("wallpaper").into_any_element()
+        }
+    }
+}
+
+/// A plugin folder with just an entry: `entry` is its whole `init.luau`.
+fn plugin_dir(entry: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("a plugin folder");
+    std::fs::write(dir.path().join("init.luau"), entry).expect("its entry");
+    let data = tempfile::tempdir().expect("a data dir");
+    (dir, data)
+}
+
+fn page_window(
+    cx: &mut TestAppContext,
+    plugin: WallpaperPlugin,
+    data_dir: &std::path::Path,
+) -> gpui::WindowHandle<Page> {
+    cx.update(|cx| cx.set_global(crate::theme::Theme::dark()));
+    cx.add_window(|_, cx| {
+        let scene = cx.new(|cx| PluginScene::new(plugin, data_dir, cx));
+        Page {
+            scene,
+            fell_back: false,
+        }
+    })
+}
+
+#[gpui::test]
+fn a_pointer_move_rebuilds_the_scene_even_when_it_is_still(cx: &mut TestAppContext) {
+    let data = tempfile::tempdir().expect("a data dir");
+    cx.update(|cx| cx.set_global(crate::theme::Theme::dark()));
+    let plugin = WallpaperPlugin {
+        id: "parallax-scenes".to_string(),
+        name: "Parallax scenes".to_string(),
+        dir: parallax_dir(),
+    };
+    let window = cx.add_window(|_, cx| PluginScene::new(plugin, data.path(), cx));
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    let before = window
+        .update(cx, |scene, _, _| {
+            assert!(matches!(scene.state(), SceneState::Drawing));
+            assert!(!scene.moving, "at rest, nothing moves");
+            Rc::as_ptr(scene.tree.as_ref().expect("a tree"))
+        })
+        .unwrap();
+    // Nothing asked for a frame: drawing again reuses the tree as-is.
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    let still = window
+        .update(cx, |scene, _, _| Rc::as_ptr(scene.tree.as_ref().unwrap()))
+        .unwrap();
+    assert_eq!(still, before, "a still scene is built once");
+    // The pointer is what the drawing follows, so its move rebuilds even
+    // though no spring was moving.
+    window
+        .update(cx, |scene, _, cx| scene.set_pointer(Some((0.0, 0.5)), cx))
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    let after = window
+        .update(cx, |scene, _, _| Rc::as_ptr(scene.tree.as_ref().unwrap()))
+        .unwrap();
+    assert_ne!(after, before, "the pointer's move rebuilt the tree");
+}
+
+#[gpui::test]
+fn a_build_that_fails_after_the_plugin_was_chosen_falls_back(cx: &mut TestAppContext) {
+    let (dir, data) = plugin_dir(
+        r##"
+        zeron.place {
+            at = "#new-chat-background",
+            fill = true,
+            replace = function() error("its scene is broken") end,
+        }
+        "##,
+    );
+    let plugin = WallpaperPlugin {
+        id: "broken".to_string(),
+        name: "Broken".to_string(),
+        dir: dir.path().to_path_buf(),
+    };
+    let window = page_window(cx, plugin, data.path());
+    // The plugin was chosen and loaded; its build failing makes the scene
+    // report the failure and ask for the frame that swaps the wallpaper in.
+    let ran = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            window.simulate_next_frame(cx)
+        })
+        .unwrap();
+    assert!(ran > 0, "a failure asks the page to reconsider");
+    window
+        .update(cx, |page, _, cx| {
+            assert!(matches!(
+                page.scene.read(cx).state(),
+                SceneState::Failed(_)
+            ));
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    window
+        .update(cx, |page, _, _| assert!(page.fell_back, "the wallpaper shows"))
+        .unwrap();
+}
+
+#[gpui::test]
+fn a_picture_that_will_not_read_falls_back(cx: &mut TestAppContext) {
+    let (dir, data) = plugin_dir(
+        r##"
+        zeron.place {
+            at = "#new-chat-background",
+            fill = true,
+            replace = function()
+                return ui.div { ui.image { src = "art/nowhere.webp" } }
+            end,
+        }
+        "##,
+    );
+    let plugin = WallpaperPlugin {
+        id: "missing-picture".to_string(),
+        name: "Missing picture".to_string(),
+        dir: dir.path().to_path_buf(),
+    };
+    let window = page_window(cx, plugin, data.path());
+    let ran = cx
+        .update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear();
+            window.simulate_next_frame(cx)
+        })
+        .unwrap();
+    assert!(ran > 0, "a picture it can't read asks the page to reconsider");
+    window
+        .update(cx, |page, _, cx| {
+            assert!(matches!(
+                page.scene.read(cx).state(),
+                SceneState::Failed(_)
+            ));
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| window.draw(cx).clear())
+        .unwrap();
+    window
+        .update(cx, |page, _, _| assert!(page.fell_back, "the wallpaper shows"))
+        .unwrap();
 }

@@ -483,3 +483,63 @@ fn missing_and_broken_assets_fail_the_check_with_their_names() {
         error.message
     );
 }
+
+#[test]
+fn a_metamethod_in_the_parse_is_still_on_the_clock() {
+    // Reading the built tree can run Lua: a `__index` that never returns
+    // must hit the build's deadline, not hang the render thread.
+    let mut script = plugin::PluginScript::load(
+        r##"
+        local spinning = setmetatable({}, { __index = function() while true do end end })
+        zeron.place {
+            at = "#new-chat-background",
+            replace = function()
+                return { __kind = "scene", height = 200, camera = spinning }
+            end,
+        }
+        "##,
+        &plugin::Modules::new(),
+        &Default::default(),
+        &Default::default(),
+        false,
+    )
+    .expect("the plugin loads");
+    let started = Instant::now();
+    let error = script
+        .build("#new-chat-background", None, Instant::now())
+        .expect_err("the looping metamethod is stopped");
+    assert!(error.message.contains("time budget"), "{}", error.message);
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
+
+#[test]
+fn what_a_plugin_prints_is_capped() {
+    // Every printed argument is copied into a Rust string, outside the VM's
+    // memory limit, so line count alone can't bound it.
+    let mut script = plugin::PluginScript::load(
+        r##"
+        local big = string.rep("x", 64 * 1024)
+        for i = 1, 80 do
+            print(big, big, big)
+        end
+        print("last")
+        zeron.place {
+            at = "#new-chat-background",
+            replace = function() return ui.div {} end,
+        }
+        "##,
+        &plugin::Modules::new(),
+        &Default::default(),
+        &Default::default(),
+        false,
+    )
+    .expect("the plugin loads");
+    let logs = script.logs();
+    assert!(!logs.is_empty());
+    let total: usize = logs.iter().map(String::len).sum();
+    for line in &logs {
+        assert!(line.len() <= 4 * 1024, "a line of {} bytes", line.len());
+    }
+    assert!(total <= 256 * 1024, "{total} bytes kept");
+    assert!(!logs.iter().any(|line| line == "last"));
+}

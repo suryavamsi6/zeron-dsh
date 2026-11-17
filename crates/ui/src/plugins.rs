@@ -98,6 +98,9 @@ pub struct PluginScene {
     stamp: Option<(SystemTime, u64)>,
     /// The tree built for the frame being drawn.
     tree: Option<Rc<Node>>,
+    /// The last build is out of date (the pointer moved since), so the next
+    /// frame rebuilds even while nothing is moving.
+    dirty: bool,
     /// Whether the springs were still moving at the last build.
     moving: bool,
     at: Instant,
@@ -114,6 +117,7 @@ impl PluginScene {
             pointer: None,
             stamp: None,
             tree: None,
+            dirty: false,
             moving: false,
             at: Instant::now(),
             images: HashMap::new(),
@@ -138,6 +142,9 @@ impl PluginScene {
             return;
         }
         self.pointer = pointer;
+        // A still scene rebuilds for this too: the pointer is what its
+        // drawing follows, even while no spring is moving yet.
+        self.dirty = true;
         cx.notify();
     }
 
@@ -210,6 +217,7 @@ impl PluginScene {
     /// Build this frame's tree, with the pointer and the time since the
     /// last build.
     fn build(&mut self) {
+        self.dirty = false;
         let Some(script) = self.script.as_mut() else {
             self.tree = None;
             return;
@@ -238,9 +246,11 @@ impl PluginScene {
 impl Render for PluginScene {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let data_dir = crate::settings::data_dir(cx).unwrap_or_default();
+        let was_failed = matches!(self.state, SceneState::Failed(_));
         self.follow_settings(&data_dir, cx);
-        // A still scene with nothing to follow is laid out once.
-        if self.moving || self.tree.is_none() {
+        // A still scene with nothing to follow is laid out once; a new
+        // pointer or an unfinished animation builds it again.
+        if self.moving || self.dirty || self.tree.is_none() {
             self.build();
         }
         if self.moving {
@@ -253,6 +263,11 @@ impl Render for PluginScene {
                 layer = layer.role(gpui::Role::Group).aria_label(label);
             }
             layer = layer.child(self.node(&tree, &theme, cx));
+        }
+        if !was_failed && matches!(self.state, SceneState::Failed(_)) {
+            // The page only keeps this scene while it draws: one more frame
+            // so the chosen wallpaper takes its place back.
+            window.request_animation_frame();
         }
         layer
     }
@@ -280,7 +295,17 @@ impl PluginScene {
                         }
                         element.into_any_element()
                     }
-                    None => div().into_any_element(),
+                    None => {
+                        // A picture that won't read is part of the drawing:
+                        // the scene fails so the image wallpaper shows.
+                        if matches!(self.state, SceneState::Drawing) {
+                            self.state = SceneState::Failed(SharedString::from(format!(
+                                "Its picture {:?} couldn't be read.",
+                                image.src
+                            )));
+                        }
+                        div().into_any_element()
+                    }
                 }
             }
             NodeKind::Text(text) => {

@@ -41,6 +41,13 @@ const LOAD_BUDGET: Duration = Duration::from_millis(2_000);
 /// be quick: a plugin that spends longer is told why.
 const BUILD_BUDGET: Duration = Duration::from_millis(16);
 const MAX_LOG_LINES: usize = 200;
+/// One printed line is capped, so a long argument can't grow a log without
+/// limit.
+const MAX_LOG_LINE_BYTES: usize = 4 * 1024;
+/// What all the kept lines may hold together: each argument is formatted
+/// into a Rust `String` outside the VM's memory limit, so the copies need
+/// their own budget.
+const MAX_LOG_BYTES: usize = 256 * 1024;
 
 /// A plugin's own modules, by the name a `require` asks for: the path in
 /// its folder without `./` or `.luau` (`scenes`, `rule/colour`). The app
@@ -205,8 +212,41 @@ impl PluginScript {
             lua.create_function(move |_, args: mlua::Variadic<Value>| {
                 let mut logs = sink.borrow_mut();
                 if logs.len() < MAX_LOG_LINES {
-                    let line: Vec<String> = args.iter().map(crate::node::value_text).collect();
-                    logs.push(line.join("\t"));
+                    let kept: usize = logs.iter().map(String::len).sum();
+                    let left = MAX_LOG_BYTES.saturating_sub(kept);
+                    if left > 0 {
+                        let mut line = String::new();
+                        for (at, arg) in args.iter().enumerate() {
+                            let cap = MAX_LOG_LINE_BYTES.min(left);
+                            // A separator counts toward the cap, so the
+                            // assembled line is never pushed over it.
+                            let room = cap.saturating_sub(line.len() + usize::from(at > 0));
+                            if room == 0 {
+                                break;
+                            }
+                            if at > 0 {
+                                line.push('\t');
+                            }
+                            let text = match arg {
+                                // A long string is cut from its bytes first,
+                                // so the copy out of the VM is bounded too.
+                                Value::String(text) => {
+                                    let bytes = text.as_bytes();
+                                    String::from_utf8_lossy(&bytes[..room.min(bytes.len())])
+                                        .into_owned()
+                                }
+                                other => crate::node::value_text(other),
+                            };
+                            // The copy can run long where a cut sits inside a
+                            // UTF-8 sequence; bound what the line gets.
+                            let mut end = room.min(text.len());
+                            while !text.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            line.push_str(&text[..end]);
+                        }
+                        logs.push(line);
+                    }
                 }
                 Ok(())
             })?,
@@ -301,11 +341,12 @@ impl PluginScript {
         let build = self.places[index].build.clone();
         let fill = self.places[index].fill;
         self.deadline.set(Some(now + BUILD_BUDGET));
-        let called = build.call::<Value>(());
+        // The budget covers the parse too: reading the tree can run Lua
+        // (`__index`, `__len`), and a metamethod that loops has to stop.
+        let value = build.call::<Value>(()).map_err(VisualError::from);
+        let node = value.and_then(|value| Parser::new().root(value));
         self.deadline.set(None);
-        let value = called?;
-        let mut parser = Parser::new();
-        let node = parser.root(value)?;
+        let node = node?;
         let node = if fill {
             Node {
                 kind: crate::NodeKind::Frame(Box::new(crate::Frame {
