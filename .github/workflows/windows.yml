@@ -1,7 +1,7 @@
 name: Windows tests
 
 # Called by ci.yml (which decides when Windows runs and holds the runners for
-# it, see scripts/ci/admit.py). Dispatch it by hand for the native GUI probes.
+# it, see scripts/ci/admit.py). Dispatch it by hand for a manual run.
 on:
   workflow_call:
     inputs:
@@ -13,15 +13,7 @@ on:
         description: JSON list of jobs that already passed on the same inputs (ci.yml skips them).
         type: string
         default: '[]'
-      native_gui:
-        type: boolean
-        default: false
   workflow_dispatch:
-    inputs:
-      native_gui:
-        description: 'Run native GUI/pixel probes (requires a usable desktop and Direct3D)'
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -38,8 +30,6 @@ jobs:
   # Every Windows crate suite in ONE build: separate `cargo test` invocations
   # with different package sets each recompiled the shared dependency graph
   # (they used to be three jobs, ~20 min each, almost all of it compiling).
-  # nextest runs each test in its own process, so zeron-ui's tests run side by
-  # side (the old in-process `--test-threads=1` run needed them one at a time).
   tests:
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022
@@ -52,26 +42,23 @@ jobs:
       - name: Build tests
         run: >-
           cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked
-          -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine
+          -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine
           --lib --bins
           --test background_engine --test noop_browser
           --test worktree_on_run --test auth
-      # Same selection as the old commands:
-      #   UI: the zeron-ui library (native_diff_font_geometry included)
-      #   DeepSeek harness SDK normalization and shared lifecycle tests
-      #   shader layout, application and updater, worktree paths, engine unit/catalog/login/auth
-      # gpui_windows (shader layout) is a git dependency, which a filterset cannot name: the last
-      # clause picks it as "not one of the workspace packages above".
-      - name: UI, harness, shader layout, application, updater and engine tests
+      # Same selection as before, minus the deleted GPUI app and its shader layout:
+      #   harness SDK normalization and shared lifecycle tests
+      #   application and updater, worktree paths, engine unit/catalog/login/auth
+      - name: Harness, application, updater and engine tests
         env:
           RUST_BACKTRACE: '1'
         run: >-
           cargo nextest run --config-file scripts/ci/nextest.toml --release --locked --no-fail-fast
-          -p zeron-ui -p zeron-harness -p gpui_windows -p zeron -p zeron-update -p zeron-proto -p zeron-engine
+          -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine
           --lib --bins
           --test background_engine --test noop_browser
           --test worktree_on_run --test auth
-          -E "(package(zeron-ui) & kind(lib)) | package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_)))) | (not package(zeron-ui) & not package(zeron-harness) & not package(zeron) & not package(zeron-update) & not package(zeron-proto) & not package(zeron-engine) & test(layout))"
+          -E "package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_))))"
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -134,51 +121,9 @@ jobs:
           if (-not ($output -match '^Mode:\s+local only$')) {
             throw 'An isolated Windows startup must select local-only mode'
           }
-      - name: Build rendering fixture
-        if: ${{ inputs.native_gui }}
-        run: cargo build --release --locked -p zeron-ui --example windows-render-fixture --features windows-render-fixture
-      - name: Upload GUI test binaries
-        if: ${{ inputs.native_gui }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-gui-binaries
-          path: |
-            target/release/zeron.exe
-            target/release/examples/windows-render-fixture.exe
-          if-no-files-found: error
-          retention-days: 1
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-app
-
-  native-gui:
-    if: ${{ inputs.native_gui }}
-    needs: app
-    runs-on: windows-2022
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: windows-gui-binaries
-          path: target/release
-      - name: App lifecycle tests
-        run: ./scripts/test-windows-lifecycle.ps1
-      - name: Rendering tests
-        run: ./scripts/test-windows-rendering.ps1
-      - name: Upload GUI test results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: windows-native-probes
-          path: |
-            target/windows-render-*/capture.png
-            target/windows-render-*/measurements.json
-            target/windows-render-*/stdout.txt
-            target/windows-render-*/stderr.txt
-            target/windows-lifecycle-*/result.txt
-            target/windows-lifecycle-*/run-*.txt
-          if-no-files-found: warn

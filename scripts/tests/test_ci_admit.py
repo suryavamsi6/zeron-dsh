@@ -53,14 +53,14 @@ class ReservationTests(unittest.TestCase):
             job("admit [linux=3 windows=2 macos=1]", "ubuntu-24.04"),
             job("linux / core-tests", "ubuntu-24.04"),
             job("windows / tests", "windows-2022", "in_progress", None),
-            job("macos / macos-native", "macos-latest", conclusion="failure"),
-            job("macos / macos-frame-source", "macos-latest", conclusion="skipped"),
+            job("macos / ios-tests", "macos-latest", conclusion="failure"),
+            job("macos / zgx-macos", "macos-latest", conclusion="skipped"),
         ]
         self.assertEqual(held(declared, jobs), {"linux": 2, "windows": 2, "macos": 0})
 
     def test_jobs_that_never_appear_stop_counting(self):
         declared = {"linux": 2, "windows": 0, "macos": 3}
-        jobs = [job("macos / macos-native", "macos-latest", "in_progress", None)]
+        jobs = [job("macos / ios-tests", "macos-latest", "in_progress", None)]
         self.assertEqual(held(declared, jobs, since_admitted=60)["macos"], 3)
         # After CREATE_GRACE only the late jobs (result, Android publish) may still be missing.
         self.assertEqual(held(declared, jobs, since_admitted=admit.CREATE_GRACE + 1),
@@ -74,7 +74,7 @@ class ReservationTests(unittest.TestCase):
         import time
         stamp = lambda ago: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - ago))  # noqa: E731
         jobs = [dict(job("linux / core-tests", "ubuntu-24.04", "queued", None), created_at=stamp(700)),
-                dict(job("macos / macos-native", "macos-latest", "queued", None), created_at=stamp(3000)),
+                dict(job("macos / ios-tests", "macos-latest", "queued", None), created_at=stamp(3000)),
                 dict(job("windows / tests", "windows-2022", "in_progress", None), created_at=stamp(5000))]
         self.assertAlmostEqual(admit.stalled_for(jobs), 700, delta=5)  # macOS queues behind its own limit
         self.assertEqual(admit.stalled_for(jobs[1:]), 0)
@@ -284,11 +284,11 @@ class PriorityAndLockTests(unittest.TestCase):
 
     def test_a_lock_holds_a_full_run_while_idle(self):
         full = need_of(admit.MAX_RESERVATION)
-        snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=6)], locked={90})
+        snap = Snapshot([waiter(5, 1, linux=3, macos=2)], [held_(macos=7)], locked={90})
         d = decide(5, need(linux=3, macos=2), snap, self.BIG)
-        self.assertEqual(d.used["macos"], 6 + full["macos"])
-        self.assertFalse(d.admit)  # 6 + 4 locked + 2 > 10
-        snap.holding = [held_(macos=4)]
+        self.assertEqual(d.used["macos"], 7 + full["macos"])
+        self.assertFalse(d.admit)  # 7 + 2 locked + 2 > 10
+        snap.holding = [held_(macos=6)]
         self.assertTrue(decide(5, need(linux=3, macos=2), snap, self.BIG).admit)
 
     def test_the_locked_pull_request_goes_ahead_of_everyone_into_its_reservation(self):
@@ -398,7 +398,7 @@ class SchedulerTests(unittest.TestCase):
         runs = [{"id": 1, "updated_at": "a"}, {"id": 2, "updated_at": "a"}, {"id": 3, "updated_at": "a"}]
         jobs = {
             1: [job("plan", "ubuntu-24.04"), job("admit [linux=2 macos=1]", "ubuntu-24.04"),
-                job("macos / macos-native", "macos-latest", "in_progress", None)],
+                job("macos / ios-tests", "macos-latest", "in_progress", None)],
             2: [dict(job("admit [linux=1 windows=2]", "ubuntu-24.04", "in_progress", None),
                      created_at="2026-10-27T00:00:01Z", id=20)],
             3: [job("plan", "ubuntu-24.04", "in_progress", None)],

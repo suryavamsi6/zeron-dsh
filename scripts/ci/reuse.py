@@ -15,7 +15,7 @@ A suite's inputs:
   - for Rust suites, the directories of the workspace packages it tests and of
     every workspace package those depend on (Cargo.toml path dependencies, of
     every kind), plus any file outside those directories that their Rust
-    sources name with a relative path ("../ui/src/file-icons.json",
+    sources name with a relative path ("../engine/src/catalog.json",
     CARGO_MANIFEST_DIR.join("../harness/tests/fixtures")), found by scanning
     the sources on every run.
 
@@ -60,8 +60,6 @@ NEXTEST = ["scripts/ci/nextest.toml"]
 
 SUITE_INPUTS: dict[str, list[str]] = {
     "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
-    "ui": [".github/workflows/ui-tests.yml", "scripts/test-linux-browser.sh", "scripts/test-browser-storage.py"]
-          + LINUX_SETUP + NEXTEST,
     "deepseek": [".github/workflows/deepseek-compatibility.yml", "crates/harness/src/deepseek/**",
                  "crates/harness/tests/deepseek*", "crates/harness/tests/fixtures/**"],
     "edge": [".github/workflows/preview-tests.yml", "edge/**"],
@@ -71,9 +69,6 @@ SUITE_INPUTS: dict[str, list[str]] = {
     "voice": [".github/workflows/voice-tests.yml", "crates/audio/**"] + LINUX_SETUP + NEXTEST,
     "windows": [".github/workflows/windows.yml", "dist/windows/**", "scripts/test-windows-*.ps1",
                 "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**"] + NEXTEST,
-    "macos": [".github/workflows/macos.yml", "edge/**", "scripts/run-macos-browser-fixture.sh",
-              "scripts/test-browser-storage.py", "dist/macos/**", "scripts/ci/run-macos-fixture.sh"] + NEXTEST,
-    "frame_source": [".github/workflows/macos.yml"],
     "ios": [".github/workflows/macos.yml", "apps/ios/**", "scripts/ios/**"],
     "android": [".github/workflows/android.yml", "apps/android/**", "scripts/android/**",
                 "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**"],
@@ -87,11 +82,8 @@ SUITE_PACKAGES: dict[str, list[str]] = {
     "core": ["zeron-harness", "zeron-engine", "zeron-sync", "zeron-update", "zeron-doc", "zeron-preview",
              "zeron-mcp", "zeron-proto", "zeron-rpc", "zeron-orb", "zeron-voice-session",
              "zeron-cli", "zeron-launch", "zeron-notify"],
-    "ui": ["zeron-ui"],
     "voice": ["zeron-audio"],
-    "windows": ["zeron-ui", "zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine",
-                ],
-    "macos": ["zeron-update", "zeron-preview", "zeron-ui", "zeron-text", "zeron"],
+    "windows": ["zeron-harness", "zeron", "zeron-update", "zeron-proto", "zeron-engine"],
     "ios": ["zeron-mobile", "zeron-text", "zeron-markdown", "zeron-client"],
     "android": ["zeron-mobile"],
     # zeron-engine's plugin tests, and the root crates apps/zgx builds against.
