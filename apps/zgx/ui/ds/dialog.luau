@@ -107,7 +107,10 @@ local function stage(props: { open: State<boolean>, label: Label, dismissable: b
 			moving = anime.animate(phase, motion.params(closing))
 		end
 	end)
-	return ui.modal {
+	-- Closed (the panel gone), the modal's own goes too: `ui.modal` keeps
+	-- its element mounted but transparent, so without the show a closed
+	-- dialog still answers `role:dialog` (it sits in the a11y tree).
+	return ui.show(shown, ui.modal {
 		open = function()
 			return shown:get()
 		end,
@@ -138,7 +141,7 @@ local function stage(props: { open: State<boolean>, label: Label, dismissable: b
 				props.panel(phase),
 			}
 		end,
-	}
+	})
 end
 
 -- The panel: a dialog's glass, corner and shadow.

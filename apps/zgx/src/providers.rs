@@ -41,8 +41,15 @@ pub fn install(host: &ScriptHost) {
     });
     host.async_action("DshPluginAdd", |args| {
         let spec = args.field("spec").map(text).unwrap_or_default();
+        // The go-ahead a build-script asking sends on its retry, for the
+        // one package it named.
+        let allow_build = args.field("allowBuild").map(text);
         async move {
-            answer(engine::get().call("DshPluginAdd", json!({ "spec": spec })).await)
+            let mut params = json!({ "spec": spec });
+            if let Some(allow_build) = allow_build {
+                params["allowBuild"] = json!(allow_build);
+            }
+            answer(engine::get().call("DshPluginAdd", params).await)
         }
     });
     host.async_action("DshPluginRemove", |args| {

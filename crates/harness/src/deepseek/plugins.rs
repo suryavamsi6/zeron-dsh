@@ -396,6 +396,192 @@ pub fn engines_refusal(log: &str) -> Option<String> {
     ))
 }
 
+/// `package`, allowed to run its build scripts in the `sdk` profile.
+///
+/// pnpm 10 skips a dependency's install-time scripts until the package is
+/// listed under `allowBuilds` in the profile's pnpm-workspace.yaml. The
+/// file is flat keys, so the row is written by hand — no YAML dependency —
+/// preserving what is already there. A package already listed keeps the
+/// user's own value for it, whatever it is. A name that could not sit in a
+/// key (empty, a leading `-` or `.`, a space or `:` in it) is refused
+/// before anything is written.
+pub fn allow_build(home: &Path, package: &str) -> Result<(), HarnessError> {
+    if !valid_build_name(package) {
+        return Err(HarnessError::Protocol(format!(
+            "invalid allowBuilds package: {package:?}"
+        )));
+    }
+    let path = profile_dir(home).join("pnpm-workspace.yaml");
+    let yaml = match std::fs::read_to_string(&path) {
+        Ok(yaml) => yaml,
+        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e.into()),
+    };
+    let key = build_key(package);
+    let out = match allow_builds(&yaml) {
+        // The user's own say for it stands, whatever it is.
+        Some(AllowBlock::Rows { names, .. }) | Some(AllowBlock::Inline { names, .. })
+            if names.iter().any(|name| name.as_str() == package) =>
+        {
+            return Ok(())
+        }
+        // A rows block takes the new row at its last row's own indent.
+        Some(AllowBlock::Rows { at, indent, .. }) => {
+            let mut out = yaml;
+            out.insert_str(at, &format!("{indent}{key}: true\n"));
+            out
+        }
+        // An inline `{…}` gets the key inside its braces.
+        Some(AllowBlock::Inline { brace, empty, .. }) => {
+            let mut out = yaml;
+            let pad = if empty { "" } else { ", " };
+            out.insert_str(brace, &format!("{pad}{key}: true"));
+            out
+        }
+        None => {
+            let mut out = yaml;
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str("allowBuilds:\n");
+            out.push_str(&format!("  {key}: true\n"));
+            out
+        }
+    };
+    std::fs::create_dir_all(profile_dir(home))?;
+    std::fs::write(&path, out)?;
+    Ok(())
+}
+
+/// A name as an `allowBuilds` key: `[@a-z0-9/._-]+`, so a row it writes
+/// can never carry a space or a `:` into a second place, and nothing that
+/// is not a package's name (a leading `-` or `.`) starts it.
+fn valid_build_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with(['-', '.'])
+        && name.chars().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '@' | '/' | '.' | '_' | '-')
+        })
+}
+
+/// `name` as a YAML key, quoted when a plain scalar would not stay one: a
+/// scope's leading `@` is a reserved character, and a bare `true`, `123`
+/// or `1.5` would read as a value, not a name.
+fn build_key(name: &str) -> String {
+    if name.starts_with('@')
+        || matches!(name, "true" | "false" | "null")
+        || name.parse::<f64>().is_ok()
+    {
+        format!("\"{name}\"")
+    } else {
+        name.to_owned()
+    }
+}
+
+/// What an `allowBuilds:` line heads, for [`allow_build`]: a block of
+/// indented rows, or an inline `{name: value, …}` map.
+enum AllowBlock {
+    /// Indented rows: the names already there, the byte offset a new row
+    /// lands at (just past the block's last line), and the indent rows use.
+    Rows {
+        names: Vec<String>,
+        at: usize,
+        indent: String,
+    },
+    /// An inline map: the names inside it, the byte offset of its closing
+    /// `}`, and whether it holds nothing yet.
+    Inline {
+        names: Vec<String>,
+        brace: usize,
+        empty: bool,
+    },
+}
+
+/// The `allowBuilds:` block in `yaml`, when the file has one. Only a
+/// top-level key counts — one nested under another map is not pnpm's.
+fn allow_builds(yaml: &str) -> Option<AllowBlock> {
+    let mut at = 0;
+    for line in yaml.split_inclusive('\n') {
+        let text = line.trim_end();
+        if let Some(rest) = text.strip_prefix("allowBuilds:") {
+            let rest = rest.trim_start();
+            if rest.is_empty() || rest.starts_with('#') {
+                return Some(rows_block(yaml, at + line.len()));
+            }
+            if rest.starts_with('{') {
+                return inline_block(at, text);
+            }
+            // A value that is not a map is a broken file's own problem:
+            // treated as no block, so a fresh one is appended.
+            return None;
+        }
+        at += line.len();
+    }
+    None
+}
+
+/// The rows under an `allowBuilds:` header: each line that is blank,
+/// indented, or an indented comment still belongs to the block; the next
+/// top-level line ends it.
+fn rows_block(yaml: &str, from: usize) -> AllowBlock {
+    let mut names = Vec::new();
+    let mut indent = None;
+    let mut insert_at = from;
+    let mut at = from;
+    for line in yaml[from..].split_inclusive('\n') {
+        let text = line.trim_end();
+        if !text.is_empty() && !text.starts_with([' ', '\t']) {
+            break;
+        }
+        if !text.is_empty() {
+            insert_at = at + line.len();
+            let body = text.trim_start();
+            if !body.starts_with('#') {
+                if indent.is_none() {
+                    indent = Some(text[..text.len() - body.len()].to_owned());
+                }
+                if let Some(name) = row_name(body) {
+                    names.push(name);
+                }
+            }
+        }
+        at += line.len();
+    }
+    AllowBlock::Rows {
+        names,
+        at: insert_at,
+        indent: indent.unwrap_or_else(|| "  ".into()),
+    }
+}
+
+/// An `allowBuilds: {…}` on one line: the names inside the braces, and
+/// where its `}` is. One that never closes on the line is left alone.
+fn inline_block(at: usize, text: &str) -> Option<AllowBlock> {
+    let open = text.find('{')?;
+    let close = open + text[open..].find('}')?;
+    let inner = &text[open + 1..close];
+    Some(AllowBlock::Inline {
+        names: inner.split(',').filter_map(row_name).collect(),
+        brace: at + close,
+        empty: inner.trim().is_empty(),
+    })
+}
+
+/// The name a row or inline entry keys on — `esbuild` from
+/// `esbuild: true`, `@scope/p` from `"@scope/p": false` — quotes dropped.
+fn row_name(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    let name = match text.chars().next()? {
+        quote @ ('\'' | '"') => {
+            let end = text[1..].find(quote)? + 1;
+            &text[1..end]
+        }
+        _ => text.split([':', ' ']).next()?,
+    };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -751,5 +937,88 @@ mod tests {
             assert!(!refusal.contains('\n'), "{refusal:?}");
         }
         assert_eq!(engines_refusal("added 1 package in 2s"), None);
+    }
+
+    fn workspace(home: &Path) -> PathBuf {
+        profile_dir(home).join("pnpm-workspace.yaml")
+    }
+
+    fn read(home: &Path) -> String {
+        std::fs::read_to_string(workspace(home)).unwrap()
+    }
+
+    #[test]
+    fn allow_build_writes_a_new_file() {
+        let dir = tempfile::tempdir().unwrap();
+        allow_build(dir.path(), "dsh-hello-plugin").unwrap();
+        assert_eq!(
+            read(dir.path()),
+            "allowBuilds:\n  dsh-hello-plugin: true\n"
+        );
+    }
+
+    #[test]
+    fn allow_build_appends_to_a_file_with_other_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        write(&workspace(dir.path()), "packages:\n  - '.'\ncatalogs: {}\n");
+        allow_build(dir.path(), "dsh-hello-plugin").unwrap();
+        assert_eq!(
+            read(dir.path()),
+            "packages:\n  - '.'\ncatalogs: {}\nallowBuilds:\n  dsh-hello-plugin: true\n"
+        );
+    }
+
+    #[test]
+    fn allow_build_joins_an_existing_block() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &workspace(dir.path()),
+            "allowBuilds:\n  esbuild: true\n  # kept as found\nother: 1\n",
+        );
+        allow_build(dir.path(), "dsh-hello-plugin").unwrap();
+        // The row lands inside the block, before the next top-level key.
+        assert_eq!(
+            read(dir.path()),
+            "allowBuilds:\n  esbuild: true\n  # kept as found\n  dsh-hello-plugin: true\nother: 1\n"
+        );
+    }
+
+    #[test]
+    fn allow_build_never_rewrites_a_name_already_there() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            &workspace(dir.path()),
+            "allowBuilds:\n  esbuild: true\n  \"@scope/dsh-denied\": false\n",
+        );
+        allow_build(dir.path(), "dsh-hello-plugin").unwrap();
+        // A scoped name is quoted: a `@` cannot open a plain YAML scalar.
+        allow_build(dir.path(), "@scope/dsh-plugin").unwrap();
+        let before = read(dir.path());
+        assert_eq!(
+            before,
+            "allowBuilds:\n  esbuild: true\n  \"@scope/dsh-denied\": false\n  dsh-hello-plugin: true\n  \"@scope/dsh-plugin\": true\n"
+        );
+        // Idempotent: the same ask again changes nothing.
+        allow_build(dir.path(), "dsh-hello-plugin").unwrap();
+        allow_build(dir.path(), "@scope/dsh-plugin").unwrap();
+        assert_eq!(read(dir.path()), before);
+        // And a user's own `false` for it is never overwritten.
+        allow_build(dir.path(), "@scope/dsh-denied").unwrap();
+        assert_eq!(read(dir.path()), before);
+    }
+
+    #[test]
+    fn a_bad_name_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        for bad in ["", "-pkg", ".pkg", "a b", "a:b", "UPPER", "pkg\nother: 1"] {
+            assert!(
+                matches!(
+                    allow_build(dir.path(), bad),
+                    Err(HarnessError::Protocol(_))
+                ),
+                "{bad:?} should be refused"
+            );
+        }
+        assert!(!workspace(dir.path()).exists());
     }
 }
