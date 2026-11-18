@@ -7,11 +7,14 @@
 //! own `plugin` subcommand, built here and run by the caller.
 
 use std::{
+    ffi::OsString,
     io::ErrorKind,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use serde_json::Value;
+use tokio::io::AsyncReadExt;
 
 use crate::{
     HarnessError,
@@ -217,6 +220,142 @@ pub fn plugin_command(
     Ok(command)
 }
 
+/// How long `dsh plugin` may take: pnpm resolves, downloads and links a
+/// bundle, which is slow on a cold store but never unbounded.
+const PLUGIN_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Longest log tail kept for the UI.
+const LOG_TAIL: usize = 4000;
+
+/// The outcome of one `dsh plugin` run, small enough to hand to the UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PluginRun {
+    pub ok: bool,
+    pub exit_code: Option<i32>,
+    /// The end of the child's output, redacted, for the failure message.
+    pub log_tail: String,
+}
+
+/// Whether `pnpm` is on PATH. `dsh plugin` shells out to it, so a host
+/// without it cannot manage plugins at all.
+pub fn pnpm_available() -> bool {
+    pnpm_available_with(&|name| std::env::var_os(name), crate::shell_env::user_path())
+}
+
+fn pnpm_available_with(
+    env: &impl Fn(&str) -> Option<OsString>,
+    login_shell_path: Option<OsString>,
+) -> bool {
+    crate::executable::find_on_paths_with(
+        "pnpm",
+        Vec::new(),
+        env,
+        login_shell_path,
+        crate::executable::Platform::current(),
+    )
+    .is_some()
+}
+
+/// Run `op` against the `sdk` profile and report how it went.
+///
+/// pnpm is checked first: `dsh plugin` needs it, and a host without it gets
+/// one clear message instead of a child that fails on its own.
+pub async fn run_plugin_op(
+    sdk_root: &Path,
+    home: &Path,
+    op: PluginOp,
+) -> Result<PluginRun, HarnessError> {
+    run_plugin_op_with(pnpm_available(), super::node(), sdk_root, home, op).await
+}
+
+async fn run_plugin_op_with(
+    pnpm: bool,
+    node: Option<PathBuf>,
+    sdk_root: &Path,
+    home: &Path,
+    op: PluginOp,
+) -> Result<PluginRun, HarnessError> {
+    if !pnpm {
+        return Err(HarnessError::NotInstalled(
+            "Install pnpm 10 or newer to manage DeepSeek plugins".into(),
+        ));
+    }
+    let node = node.ok_or_else(|| {
+        HarnessError::NotInstalled("Install Node.js to manage DeepSeek plugins".into())
+    })?;
+    let mut child = plugin_command(&node, sdk_root, home, &op)?.spawn()?;
+    let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+    // The child stays owned here so a timeout can still kill it.
+    let running = &mut child;
+    let collected = tokio::time::timeout(PLUGIN_TIMEOUT, async move {
+        let (out, err) = tokio::join!(read_all(stdout), read_all(stderr));
+        (out, err, running.wait().await)
+    })
+    .await;
+    match collected {
+        Ok((out, err, status)) => {
+            let status = status?;
+            Ok(PluginRun {
+                ok: status.success(),
+                exit_code: status.code(),
+                log_tail: tail(&output_text(&out, &err)),
+            })
+        }
+        Err(_) => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            Ok(PluginRun {
+                ok: false,
+                exit_code: None,
+                log_tail: tail(&format!(
+                    "dsh plugin timed out after {} seconds",
+                    PLUGIN_TIMEOUT.as_secs()
+                )),
+            })
+        }
+    }
+}
+
+/// Everything a child pipe wrote, or nothing when it was not captured.
+async fn read_all<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    if let Some(mut pipe) = pipe {
+        let _ = pipe.read_to_end(&mut bytes).await;
+    }
+    bytes
+}
+
+/// stdout then stderr, lossy: what the child printed, in order.
+fn output_text(stdout: &[u8], stderr: &[u8]) -> String {
+    let mut text = String::from_utf8_lossy(stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(stderr));
+    text
+}
+
+/// The last [`LOG_TAIL`] chars of `log`, cut on a char boundary and redacted.
+fn tail(log: &str) -> String {
+    let start = log
+        .char_indices()
+        .rev()
+        .nth(LOG_TAIL - 1)
+        .map_or(0, |(at, _)| at);
+    crate::redact_secrets(&log[start..])
+}
+
+/// The CLI's compatibility refusal, as one line for the UI.
+///
+/// `dsh plugin` exits non-zero when a bundle's `engines.dsh` does not accept
+/// the bundled dsh; the reason is the first log line that says so.
+pub fn engines_refusal(log: &str) -> Option<String> {
+    let line = log
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains("engines.dsh") || line.contains("does not satisfy"))?;
+    Some(format!(
+        "This plugin is not compatible with the bundled dsh version (engines.dsh). {line}"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -412,5 +551,60 @@ mod tests {
                 "{spec:?} should build a command"
             );
         }
+    }
+
+    fn add() -> PluginOp {
+        PluginOp::Add("dsh-hello-plugin".into())
+    }
+
+    #[test]
+    fn pnpm_is_missing_without_a_path() {
+        assert!(!pnpm_available_with(&|_: &str| None, None));
+    }
+
+    #[tokio::test]
+    async fn a_host_without_pnpm_is_told_to_install_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let node = Some(PathBuf::from("/usr/bin/node"));
+        let error = run_plugin_op_with(false, node, Path::new("/sdk"), dir.path(), add())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, HarnessError::NotInstalled(message) if message.contains("pnpm")),
+            "{error:?}"
+        );
+        // pnpm is checked first: a host with neither hears about pnpm.
+        let error = run_plugin_op_with(false, None, Path::new("/sdk"), dir.path(), add())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&error, HarnessError::NotInstalled(message) if message.contains("pnpm")),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn the_log_tail_keeps_the_last_four_thousand_chars() {
+        let log = "é".repeat(LOG_TAIL + 500);
+        let kept = tail(&log);
+        assert_eq!(kept.chars().count(), LOG_TAIL);
+        assert!(log.ends_with(&kept));
+        assert_eq!(tail("added 1 package"), "added 1 package");
+        // Credentials never reach the UI.
+        assert_eq!(tail("Bearer secret"), "Bearer [REDACTED]");
+    }
+
+    #[test]
+    fn an_engines_refusal_is_explained_in_one_line() {
+        for log in [
+            "pnpm install failed\n  dsh-hello-plugin requires engines.dsh >=0.3\n",
+            "ERR_PNPM: dsh-hello-plugin@1.0.0 does not satisfy engines.dsh\n",
+        ] {
+            let refusal = engines_refusal(log).unwrap();
+            assert!(refusal.starts_with("This plugin is not compatible"));
+            assert!(refusal.contains("dsh-hello-plugin"));
+            assert!(!refusal.contains('\n'), "{refusal:?}");
+        }
+        assert_eq!(engines_refusal("added 1 package in 2s"), None);
     }
 }
