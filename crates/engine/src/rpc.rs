@@ -3348,6 +3348,19 @@ impl RpcService for EngineRpc {
             let value = crate::schedules::call(&schedules, method, &params)?;
             return Ok(RpcReply::Value(value));
         }
+        // An answer read aloud spends this device's DeepSeek key: it never
+        // leaves the engine, so only this device's own window may ask.
+        if method == methods::READ_ALOUD {
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: answers are read aloud from this device's own window"
+                )));
+            }
+            let home = crate::agent_accounts::AgentAccountsConfig::detect(self.repos.data_dir())
+                .deepseek_home;
+            let value = crate::read_aloud::call(self.credentials.as_ref(), &home, &params).await?;
+            return Ok(RpcReply::Value(value));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)

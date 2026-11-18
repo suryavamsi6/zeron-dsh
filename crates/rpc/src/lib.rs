@@ -750,6 +750,11 @@ pub mod methods {
     /// shown as the engine's own are, under the same Settings, at most a few
     /// a minute for each `source`; clicking it opens `session`.
     pub const POST_NOTIFICATION: &str = "PostNotification";
+    /// `{text, voice?}` → `{sampleRate, channels, pcm}`: the text spoken by
+    /// DeepSeek's TTS as 24 kHz 16-bit mono PCM (base64). This device's own
+    /// IPC only ([`local_only`]): it spends this device's DeepSeek key,
+    /// which never leaves the engine.
+    pub const READ_ALOUD: &str = "ReadAloud";
 }
 
 /// Methods answered only over this device's own local IPC, never to a peer
@@ -815,6 +820,8 @@ pub fn local_only(method: &str) -> bool {
             | methods::SCHEDULE_SAVE
             | methods::SCHEDULE_DELETE
             | methods::SCHEDULE_RUN_NOW
+            // Reading an answer aloud spends this device's DeepSeek key.
+            | methods::READ_ALOUD
     )
 }
 
