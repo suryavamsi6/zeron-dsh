@@ -13,10 +13,12 @@ local function settle(app: any)
 	app:frames(30)
 end
 
-local function chat(): any
+-- (s1 where a picture must go: its DeepSeek Flash reads one, s2's V4
+-- Pro won't take it.)
+local function chat(id: string?): any
 	local app = mount("chat_fixture.luau")
 	app:resize(1000, 800)
-	app:command("go_s2")
+	app:command(`go_{id or "s2"}`)
 	settle(app)
 	return app
 end
@@ -163,7 +165,7 @@ test("a file picked goes as its mention, a chat as Zeron's chat link", function(
 end)
 
 test("what's attached, picked, goes as its mention (a picture by its number); once it's taken off, its name alone", function()
-	local app = chat()
+	local app = chat("s1")
 	app:command("drop_pictures")
 	app:command("attach_passage")
 	settle(app)
@@ -219,7 +221,7 @@ test("an older prompt's \"(attachment: <name>)\" for what it carries is that one
 end)
 
 test("round trip: an attachment picked in the draft goes as its mention, and the sent bubble draws it as its chip", function()
-	local app = chat()
+	local app = chat("s1")
 	app:command("drop_pictures")
 	settle(app)
 	app:type(BOX, "Look at @zgx")
