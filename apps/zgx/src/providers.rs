@@ -58,6 +58,19 @@ pub fn install(host: &ScriptHost) {
             answer(engine::get().call("DshPluginRemove", json!({ "name": name })).await)
         }
     });
+    // A bundle's patch rows, and a row's switch written into the
+    // profile's cordis.patch.yml. Args pass through whole: the engine
+    // names what it takes, and a field added there reaches it.
+    host.async_action("DshPluginRows", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshPluginRows", params).await)
+    });
+    host.async_action("DshPluginSetRow", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshPluginSetRow", params).await)
+    });
     // The page's write: `{ ns, ops }` straight through, since the gateway
     // validates the ops itself (`settings/mutate`).
     host.async_action("DshMutateSettings", |args| async move {

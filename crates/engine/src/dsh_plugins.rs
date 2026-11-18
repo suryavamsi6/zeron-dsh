@@ -12,26 +12,31 @@ use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use zeron_harness::deepseek::{
     plugins::{
-        allow_build, engines_refusal, installed_bundles, pnpm_available, run_plugin_op, valid_spec,
-        PluginOp, PluginRun,
+        allow_build, bundle_rows, engines_refusal, installed_bundles, pnpm_available,
+        run_plugin_op, set_row_disabled, valid_spec, BundleRow, PluginOp, PluginRun,
     },
     DeepSeekHarness,
 };
 use zeron_rpc::{methods, RpcError};
 
 /// One `dsh plugin` run at a time: pnpm writes the whole profile, so a second
-/// install started while the first is running would corrupt it.
+/// install started while the first is running would corrupt it. A row write
+/// joins it: the profile's cordis.patch.yml is a file an install rewrites.
 static INSTALL: Mutex<()> = Mutex::const_new(());
 
 /// Whether `method` is answered here.
 pub fn handles(method: &str) -> bool {
     matches!(
         method,
-        methods::DSH_PLUGINS | methods::DSH_PLUGIN_ADD | methods::DSH_PLUGIN_REMOVE
+        methods::DSH_PLUGINS
+            | methods::DSH_PLUGIN_ADD
+            | methods::DSH_PLUGIN_REMOVE
+            | methods::DSH_PLUGIN_ROWS
+            | methods::DSH_PLUGIN_SET_ROW
     )
 }
 
-/// Answer one of the three methods.
+/// Answer one of the five methods.
 pub async fn call(
     harness: &DeepSeekHarness,
     method: &str,
@@ -39,6 +44,26 @@ pub async fn call(
 ) -> Result<Value, RpcError> {
     match method {
         methods::DSH_PLUGINS => list(harness.home()),
+        methods::DSH_PLUGIN_ROWS => {
+            let name = params
+                .get("name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| RpcError::BadParams("rows takes a name string".into()))?;
+            let rows = bundle_rows(harness.home(), name)
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+            Ok(json!({ "rows": rows_json(rows) }))
+        }
+        methods::DSH_PLUGIN_SET_ROW => {
+            let (id, disabled) = set_row(params)?;
+            // Held across the write, as an install is: the profile's
+            // cordis.patch.yml is the same file an install rewrites.
+            let _running = INSTALL.lock().await;
+            set_row_disabled(harness.home(), id, disabled)
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+            let rows = rows_owning(harness.home(), id)
+                .map_err(|error| RpcError::Failed(error.to_string()))?;
+            Ok(json!({ "rows": rows_json(rows) }))
+        }
         methods::DSH_PLUGIN_ADD | methods::DSH_PLUGIN_REMOVE => {
             let op = plugin_op(method, params)?;
             // Held across the run, not just the spawn: the profile is one
@@ -65,6 +90,47 @@ pub async fn call(
         }
         other => Err(RpcError::UnknownMethod(other.into())),
     }
+}
+
+/// A row's fields as the page reads them.
+fn rows_json(rows: Vec<BundleRow>) -> Vec<Value> {
+    rows.into_iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "title": row.title,
+                "disabled": row.disabled,
+                "overridden": row.overridden,
+                "editable": row.editable,
+                "note": row.note,
+            })
+        })
+        .collect()
+}
+
+/// The `{id, disabled}` a set takes.
+fn set_row(params: &Value) -> Result<(&str, bool), RpcError> {
+    let id = params
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcError::BadParams("set takes an id string".into()))?;
+    let disabled = params
+        .get("disabled")
+        .and_then(Value::as_bool)
+        .ok_or_else(|| RpcError::BadParams("set takes a disabled bool".into()))?;
+    Ok((id, disabled))
+}
+
+/// The bundle whose patch rows name `id`, listed again after the write:
+/// the rows the page shows it under, refreshed.
+fn rows_owning(home: &Path, id: &str) -> Result<Vec<BundleRow>, zeron_harness::HarnessError> {
+    for bundle in installed_bundles(home)? {
+        let rows = bundle_rows(home, &bundle.name)?;
+        if rows.iter().any(|row| row.id == id) {
+            return Ok(rows);
+        }
+    }
+    Ok(Vec::new())
 }
 
 /// The `sdk` profile's bundles, and whether this host can change them at all.
@@ -146,15 +212,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_three_plugin_methods_are_handled_and_providers_is_not() {
+    fn the_five_plugin_methods_are_handled_and_providers_is_not() {
         for method in [
             methods::DSH_PLUGINS,
             methods::DSH_PLUGIN_ADD,
             methods::DSH_PLUGIN_REMOVE,
+            methods::DSH_PLUGIN_ROWS,
+            methods::DSH_PLUGIN_SET_ROW,
         ] {
             assert!(handles(method), "{method}");
         }
         assert!(!handles(methods::DSH_PROVIDERS));
+    }
+
+    #[test]
+    fn set_row_needs_an_id_and_a_bool() {
+        for params in [
+            json!({}),
+            json!({ "id": "tool-fs" }),
+            json!({ "disabled": true }),
+            json!({ "id": 7, "disabled": true }),
+            json!({ "id": "tool-fs", "disabled": "yes" }),
+        ] {
+            assert!(
+                matches!(set_row(&params), Err(RpcError::BadParams(_))),
+                "{params}"
+            );
+        }
+        assert_eq!(
+            set_row(&json!({ "id": "tool-fs", "disabled": true })).unwrap(),
+            ("tool-fs", true)
+        );
     }
 
     #[test]
