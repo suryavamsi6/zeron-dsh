@@ -113,6 +113,67 @@ fn only_verified_official_models_and_efforts_are_accepted() {
 }
 
 #[test]
+fn the_web_search_switch_defaults_on_and_turns_search_off_per_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    // Every advertised model offers the switch, on by default.
+    for model in static_models() {
+        let option = model
+            .options
+            .iter()
+            .find(|option| option.id == "webSearch")
+            .expect("webSearch option");
+        assert_eq!(option.label, "Web search");
+        assert_eq!(
+            option
+                .choices
+                .iter()
+                .map(|choice| choice.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["on", "off"]
+        );
+        assert_eq!(option.default_choice, "on");
+    }
+    // An unpicked switch keeps `web_search` on; "off" is the only spell that
+    // turns its search half off for the run.
+    assert_eq!(
+        configuration(&request, dir.path(), "session").unwrap()["webSearch"],
+        true
+    );
+    for (choice, expected) in [("on", true), ("off", false)] {
+        request
+            .model_options
+            .insert("webSearch".into(), json!(choice));
+        assert_eq!(
+            configuration(&request, dir.path(), "session").unwrap()["webSearch"],
+            expected
+        );
+    }
+    for bad in [json!("maybe"), json!(false), json!(1)] {
+        request.model_options.insert("webSearch".into(), bad);
+        assert!(matches!(
+            configuration(&request, dir.path(), "session"),
+            Err(HarnessError::Protocol(_))
+        ));
+    }
+    // The switch rides alongside the other accepted model option.
+    request
+        .model_options
+        .insert("webSearch".into(), json!("off"));
+    request
+        .model_options
+        .insert("maxTokens".into(), json!(8192));
+    let config = configuration(&request, dir.path(), "session").unwrap();
+    assert_eq!(config["webSearch"], false);
+    assert_eq!(config["maxTokens"], 8192);
+    // Anything the models do not advertise is still refused.
+    request
+        .model_options
+        .insert("speed".into(), json!("fast"));
+    assert!(configuration(&request, dir.path(), "session").is_err());
+}
+
+#[test]
 fn host_owned_profile_home_and_git_overlays_are_preserved_without_other_auth() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = request(dir.path());

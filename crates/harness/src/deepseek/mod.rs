@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SteeringMode, UserInputQuestion,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    ReasoningLevel, RunRequest, SandboxLevel, SteeringMode, UserInputQuestion,
 };
 
 use crate::{
@@ -104,6 +104,23 @@ fn sdk_installed(root: &Path) -> bool {
         })
 }
 
+/// The chat's "Web search" switch: dsh's `web_search` tool is on unless the
+/// chat turns it off for a run (`modelOptions.webSearch`).
+fn web_search_option() -> ModelOption {
+    ModelOption {
+        id: "webSearch".into(),
+        label: "Web search".into(),
+        choices: [("on", "On"), ("off", "Off")]
+            .into_iter()
+            .map(|(id, label)| ModelOptionChoice {
+                id: id.into(),
+                label: label.into(),
+            })
+            .collect(),
+        default_choice: "on".into(),
+    }
+}
+
 pub fn static_models() -> Vec<Model> {
     [
         (DEFAULT_MODEL, "DeepSeek V4.1 Flash"),
@@ -116,7 +133,7 @@ pub fn static_models() -> Vec<Model> {
         description: None,
         provider: None,
         reasoning_levels: EFFORTS.to_vec(),
-        options: vec![],
+        options: vec![web_search_option()],
         default: id == DEFAULT_MODEL,
     })
     .collect()
@@ -311,7 +328,11 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             ));
         }
     };
-    if request.model_options.keys().any(|key| key != "maxTokens") {
+    if request
+        .model_options
+        .keys()
+        .any(|key| !matches!(key.as_str(), "maxTokens" | "webSearch"))
+    {
         return Err(HarnessError::Protocol(
             "Unsupported DeepSeek model option".into(),
         ));
@@ -328,6 +349,20 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
                 })
         })
         .transpose()?;
+    // "off" is the only spell that turns the run's search off; an unpicked
+    // switch leaves `web_search` on, as the picker's default says.
+    let web_search = match request.model_options.get("webSearch") {
+        None => true,
+        Some(value) => match value.as_str() {
+            Some("on") => true,
+            Some("off") => false,
+            _ => {
+                return Err(HarnessError::Protocol(
+                    "webSearch must be on or off".into(),
+                ));
+            }
+        },
+    };
     let cwd = std::path::absolute(&request.cwd)?;
     let mut config = json!({
         "type": "start", "sessionId": session, "resume": request.resume.is_some(),
@@ -342,6 +377,7 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
     if let Some(max_tokens) = max_tokens {
         config["maxTokens"] = max_tokens.into();
     }
+    config["webSearch"] = web_search.into();
     Ok(config)
 }
 

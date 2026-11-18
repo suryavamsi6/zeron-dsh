@@ -116,6 +116,12 @@ async function start(config) {
       { id: 'llm-pi-ai', disabled: true },
     ]),
     { id: 'tool-plugin-manager', disabled: true },
+    // The chat's "Web search" switch: a patch row's config replaces the base
+    // `tool-web` row's whole, so `fetch` and the search budget are restated
+    // when the run turns only the search half off.
+    ...(config.webSearch === false
+      ? [{ id: 'tool-web', config: { search: false, fetch: true, searchTimeoutMs: 60000 } }]
+      : []),
     { id: 'approval', config: { policy: 'ask' } },
     { id: 'permission', config: {
       presets: { 'zeron-managed': { sandbox: config.sandbox, approval: 'ask' } },
