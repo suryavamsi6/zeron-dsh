@@ -3094,6 +3094,7 @@
       "edit_not_saved": "你的编辑未保存",
       "didnt_send": "消息未发送",
       "didnt_remove": "无法移除这条消息",
+      "no_images": "DeepSeek V4 Pro 无法读取图片。请切换到 V4.1 Flash 或移除图片。",
       "starting_cloud": "正在启动 Cloud 设备…",
       "starting": "正在开始对话…",
       "didnt_start": "对话未能开始",

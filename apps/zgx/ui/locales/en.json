@@ -3094,6 +3094,7 @@
       "edit_not_saved": "Your edit wasn't saved",
       "didnt_send": "Your message didn't send",
       "didnt_remove": "Couldn't remove that message",
+      "no_images": "DeepSeek V4 Pro can't read images. Switch to V4.1 Flash or remove the image.",
       "starting_cloud": "Starting a Cloud machine…",
       "starting": "Starting the chat…",
       "didnt_start": "The chat didn't start",
