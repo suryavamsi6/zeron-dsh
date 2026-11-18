@@ -7,6 +7,9 @@ export type Props = {
 	compact: boolean?,
 	-- What assistive technology calls it.
 	label: Label?,
+	-- Off to the hand as to the eye (a value it can't take, a write in
+	-- flight): a bool, or a function for one that moves.
+	disabled: (boolean | () -> boolean)?,
 	on_change: ((on: boolean) -> ())?,
 }
 
@@ -17,7 +20,13 @@ local W, H, KNOB, INSET = 40, 24, 18, 3
 return function(props: Props): Node
 	local value = props.value
 	local W, H, KNOB, INSET = if props.compact then 34 else W, if props.compact then 20 else H, if props.compact then 16 else KNOB, if props.compact then 2 else INSET
+	local function off(): boolean
+		return if type(props.disabled) == "function" then props.disabled() else props.disabled == true
+	end
 	local function flip()
+		if off() then
+			return
+		end
 		value:toggle()
 		if props.on_change then
 			props.on_change(value:peek())
@@ -27,8 +36,18 @@ return function(props: Props): Node
 		role = "switch",
 		checked = value,
 		label = props.label,
-		focusable = true,
-		cursor = "pointer",
+		focusable = function()
+			return not off()
+		end,
+		disabled = function()
+			return off()
+		end,
+		opacity = function()
+			return if off() then "$zeron.disabled" else nil
+		end,
+		cursor = function()
+			return if off() then nil else "pointer"
+		end,
 		-- Focused from the keys, zgx's control ring (a point of the focus
 		-- colour), just outside the track: inside, the accent track would
 		-- swallow it while on.

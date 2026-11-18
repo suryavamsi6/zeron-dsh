@@ -44,6 +44,14 @@ local dsh_plugins_answer = ui.state("settings_stub_dsh_plugins", nil :: any)
 -- same way from `settings_stub_dsh_plugin_remove`.
 local dsh_plugin_add = ui.state("settings_stub_dsh_plugin_add", nil :: any)
 local dsh_plugin_remove = ui.state("settings_stub_dsh_plugin_remove", nil :: any)
+-- What `DshPluginRows` answers: nil, `row_store` below by bundle `name`,
+-- or what a test sets — a `{ rows = … }` answered for any name, a
+-- `{ ["bundle-name"] = { rows = … } }` answered for its own.
+local dsh_plugin_rows = ui.state("settings_stub_dsh_plugin_rows", nil :: any)
+-- What `DshPluginSetRow` answers: nil (the write lands in `row_store`
+-- and the owning bundle's refreshed rows answer), "pending" (never
+-- settles), another string (refused that way), or a table a test sets.
+local dsh_plugin_set_row = ui.state("settings_stub_dsh_plugin_set_row", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -164,9 +172,30 @@ local codex_fixture = ui.state("settings_stub_codex", nil :: any)
 local codex_accounts = ui.state("settings_stub_codex_accounts", nil :: any)
 local unscoped_chatgpt = ui.state("settings_stub_chatgpt_unscoped", false)
 -- The plugin operations asked for, in order: `{ op = "add", value = "…" }`
--- (an add's `allowBuild` kept when the page sent one) or
--- `{ op = "remove", value = "…" }`.
+-- (an add's `allowBuild` kept when the page sent one), `{ op = "remove",
+-- value = "…" }`, or `{ op = "set_row", value = "…", disabled = … }` (the
+-- write's whole `{id, disabled}` — an argument dropped on the way fails
+-- what a test reads).
 local plugin_calls = ui.state("settings_stub_dsh_plugin_calls", {} :: { any })
+-- The patch rows each bundle answers with, as a profile's manifests and
+-- cordis.patch.yml would say them: `dsh-hello-plugin` has an on row, an
+-- off-by-default one, and one it can't switch (`!!js`); `left-pad` one.
+local row_store: { [string]: { any } } = {
+	["dsh-hello-plugin"] = {
+		{ id = "hello", title = "dsh-hello-plugin", disabled = false, overridden = false, editable = true },
+		{ id = "side", disabled = true, overridden = false, editable = true },
+		{
+			id = "computed",
+			disabled = false,
+			overridden = false,
+			editable = false,
+			note = "it carries a !!js expression, which can't be switched safely",
+		},
+	},
+	["left-pad"] = {
+		{ id = "left-pad", disabled = false, overridden = false, editable = true },
+	},
+}
 
 -- A plugin run's answer: "pending" never settles, a table is it, another
 -- string the way it refused, nil the run done.
@@ -299,6 +328,52 @@ local answers: { [string]: (arg: any) -> any } = {
 	["DshPluginRemove"] = function(arg: any)
 		plugin_calls:push({ op = "remove", value = arg.name })
 		return plugin_run(dsh_plugin_remove:peek())
+	end,
+	-- One bundle's patch rows (`{name}` -> `{rows: […]}`), and a row's
+	-- switch (`{id, disabled}` -> the owning bundle's refreshed rows),
+	-- as crates/engine/src/dsh_plugins.rs answers them.
+	["DshPluginRows"] = function(arg: any)
+		local over = dsh_plugin_rows:peek()
+		if type(over) == "table" then
+			if type(over.rows) == "table" then
+				return settled(over)
+			end
+			local named = over[if type(arg) == "table" then arg.name else nil]
+			if named ~= nil then
+				return settled(named)
+			end
+		end
+		return settled({ rows = row_store[if type(arg) == "table" then arg.name else ""] or {} })
+	end,
+	["DshPluginSetRow"] = function(arg: any)
+		plugin_calls:push({ op = "set_row", value = if type(arg) == "table" then arg.id else nil, disabled = if type(arg) == "table" then arg.disabled else nil })
+		local over = dsh_plugin_set_row:peek()
+		if over == "pending" then
+			-- (Still on its way: never settles.)
+			return { done = false, after = function() end }
+		elseif type(over) == "table" then
+			return settled(over)
+		elseif type(over) == "string" then
+			return settled(nil, over)
+		end
+		-- The write lands as the profile's override would, and the owning
+		-- bundle's rows come back refreshed.
+		if type(arg) == "table" and type(arg.id) == "string" and type(arg.disabled) == "boolean" then
+			for _, list in row_store do
+				for i, r in list do
+					if r.id == arg.id then
+						local next = table.clone(list)
+						local row = table.clone(r)
+						row.disabled = arg.disabled
+						row.overridden = true
+						next[i] = row
+						list[i] = row
+						return settled({ rows = next })
+					end
+				end
+			end
+		end
+		return settled({ rows = {} })
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })

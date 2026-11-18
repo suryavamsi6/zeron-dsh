@@ -1811,7 +1811,9 @@
       "remove_title": "移除“{name}”？",
       "remove_body": "新的 DeepSeek 会话将不会加载它。",
       "remove_confirm": "移除插件",
-      "remove_failed": "无法移除。"
+      "remove_failed": "无法移除。",
+      "row_locked": "此行无法在此切换。",
+      "row_failed": "无法切换。"
     },
     "projects": {
       "title": "项目",

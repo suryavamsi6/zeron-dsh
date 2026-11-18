@@ -2,11 +2,15 @@
 -- sessions on this device (the engine's `DshPlugins`, crates/engine/src/
 -- dsh_plugins.rs), installing one from a spec (`DshPluginAdd`), and
 -- removing one (`DshPluginRemove`, asked once by name first), both run by
--- `dsh plugin` on the device. What a bundle adds or stops landing lands on
--- the sessions begun after, so the page's foot says so. The list is asked
--- once as the page opens (a `ui.resource`; Try again asks again, an
--- install or remove asks again when it lands); installing needs pnpm 10 on
--- the device, said before the rows when it isn't there.
+-- `dsh plugin` on the device. Under each bundle the rows its patch adds
+-- (`DshPluginRows`), a Switch each — the override is the profile's
+-- cordis.patch.yml (`DshPluginSetRow` writes it, the same place dsh's own
+-- plugin manager does), a row it can't safely write shown off with its
+-- reason. What a bundle or row stops landing lands on the sessions begun
+-- after, so the page's foot says so. The list is asked once as the page
+-- opens (a `ui.resource`; Try again asks again, an install or remove asks
+-- again when it lands); installing needs pnpm 10 on the device, said
+-- before the rows when it isn't there.
 
 local host = require("@app/screens/settings/host")
 local ds = require("@ds")
@@ -164,16 +168,109 @@ local function install_row(on_added: () -> ()): Node
 	}
 end
 
+-- One row of a bundle's patch: its id, its title under it (or why it can't
+-- be switched), a Switch for its `disabled` (on is on). Toggling writes
+-- `{id, disabled}` to the profile's cordis.patch.yml through the host; the
+-- answer is the bundle's rows again, which the parent's list takes whole.
+-- A refused write puts the switch back and says why on the row.
+local PatchRow = ui.component(function(props: { now: State<any>, answered: (rows: any) -> () }): Node
+	local on = ui.use_state(false)
+	local busy = ui.use_state(false)
+	local problem = ui.use_state(nil :: string?)
+	-- The switch reads the row's `disabled`; a refreshed row re-reads it.
+	ui.effect(function()
+		local r = props.now:get()
+		on:set(not (type(r) == "table" and r.disabled == true))
+		problem:set(nil)
+	end)
+	local function row(): any
+		return props.now:get()
+	end
+	local function flip(on_next: boolean)
+		local r = props.now:peek()
+		if type(r) ~= "table" or type(r.id) ~= "string" then
+			return
+		end
+		-- Shown at once; the answer's refreshed rows (or a refusal) settle it.
+		on:set(on_next)
+		busy:set(true)
+		problem:set(nil)
+		host.call("DshPluginSetRow", { id = r.id, disabled = not on_next }):after(function(answer: any)
+			busy:set(false)
+			if type(answer) == "table" and type(answer.rows) == "table" then
+				props.answered(answer.rows)
+			else
+				on:set(not on_next)
+				problem:set(why(answer, "settings.dsh_plugins.row_failed"))
+			end
+		end, function(err: any)
+			busy:set(false)
+			on:set(not on_next)
+			problem:set(say(err))
+		end)
+	end
+	return ds.Settings.Row {
+		compact = true,
+		label = function(): string
+			local r = row()
+			return if type(r) == "table" and type(r.id) == "string" then r.id else ""
+		end,
+		description = function(): any
+			local r = row()
+			if type(r) ~= "table" then
+				return ""
+			end
+			if r.editable == false then
+				return if type(r.note) == "string" then r.note else ui.t("settings.dsh_plugins.row_locked"):get()
+			end
+			return r.title or ""
+		end,
+		detail = function(): string?
+			return problem:get()
+		end,
+		control = ds.Switch {
+			value = on,
+			compact = true,
+			label = function(): string
+				local r = row()
+				return if type(r) == "table" and type(r.id) == "string" then r.id else ""
+			end,
+			disabled = function(): boolean
+				local r = props.now:peek()
+				return (type(r) == "table" and r.editable == false) or busy:get()
+			end,
+			on_change = flip,
+		},
+	}
+end)
+
 -- A bundle's row: its name, its description under it, and at its end its
 -- version and whether it's on, in words, then a quiet Remove that asks
 -- once ("Remove <name>?") before `DshPluginRemove` runs — off while its
 -- run is on. A bundle whose client parts need a browser (`needsClient`)
 -- says so on a second quiet line, where a failed remove says why instead.
+-- Under the row, the rows its patch carries, a switch each (`PatchRow`).
 local Row = ui.component(function(props: { now: State<any>, reload: () -> () }): Node
 	local now = props.now
 	local open = ui.use_state(false)
 	local removing = ui.use_state(false)
 	local problem = ui.use_state(nil :: string?)
+	-- The bundle's patch rows, asked once as the row builds; a row write's
+	-- answer lists them again (`listed`).
+	local rows_res = ui.resource(function(): any
+		return host.call("DshPluginRows", { name = now:peek().name }):await()
+	end)
+	local listed = ui.use_state(nil :: any)
+	ui.effect(function()
+		local d = rows_res.data:get()
+		if d ~= nil then
+			listed:set(d)
+		end
+	end)
+	local rows = ui.computed(function(): { any }
+		local d = listed:get()
+		return if type(d) == "table" and type(d.rows) == "table" then d.rows else {}
+	end)
 	local function remove()
 		if removing:peek() then
 			return
@@ -192,7 +289,9 @@ local Row = ui.component(function(props: { now: State<any>, reload: () -> () }):
 			problem:set(say(err))
 		end)
 	end
-	return ds.Settings.Row {
+	return ui.column {
+		w_full = true,
+		ds.Settings.Row {
 		label = function(): string
 			return now:get().name
 		end,
@@ -255,6 +354,25 @@ local Row = ui.component(function(props: { now: State<any>, reload: () -> () }):
 					on_click = remove,
 				},
 			},
+		},
+		},
+		-- The bundle's patch rows under it, a switch each, set in a touch to
+		-- read as its own.
+		ui.column {
+			w_full = true,
+			pl = "$space.4",
+			ui.each(rows, function(_r: any, _i: number, row: State<any>): Node
+				return PatchRow {
+					now = row,
+					answered = function(next: any)
+						listed:set({ rows = next })
+					end,
+				}
+			end, {
+				key = function(r: any): any
+					return r.id
+				end,
+			}),
 		},
 	}
 end)

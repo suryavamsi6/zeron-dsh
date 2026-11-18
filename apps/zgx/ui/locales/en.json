@@ -1811,7 +1811,9 @@
       "remove_title": "Remove “{name}”?",
       "remove_body": "New DeepSeek sessions won't load it.",
       "remove_confirm": "Remove plugin",
-      "remove_failed": "Couldn't remove it."
+      "remove_failed": "Couldn't remove it.",
+      "row_locked": "This row can't be switched here.",
+      "row_failed": "Couldn't switch it."
     },
     "projects": {
       "title": "Projects",

@@ -11,12 +11,15 @@ local NAV = "#settings-nav"
 local REMOVE = `role:dialog "Remove “dsh-hello-plugin”?"`
 local BUILD = `role:dialog "Allow “dsh-hello-plugin” to run its build script?"`
 
-local function open(answer: any): any
+local function open(answer: any, rows_answer: any): any
 	local app = mount("shell_fixture.luau")
 	app:resize(1200, 900)
 	app:frames(30)
 	if answer ~= nil then
 		app:set_state("settings_stub_dsh_plugins", answer)
+	end
+	if rows_answer ~= nil then
+		app:set_state("settings_stub_dsh_plugin_rows", rows_answer)
 	end
 	app:command("shell.settings")
 	app:frames(10)
@@ -86,6 +89,17 @@ local function removed(app: any): { any }
 	local out = {}
 	for _, op in added(app) do
 		if op.op == "remove" then
+			table.insert(out, op)
+		end
+	end
+	return out
+end
+
+-- The `DshPluginSetRow` ops among them.
+local function set_rows(app: any): { any }
+	local out = {}
+	for _, op in added(app) do
+		if op.op == "set_row" then
 			table.insert(out, op)
 		end
 	end
@@ -279,4 +293,77 @@ test("DeepSeek plugins says why a remove failed, under the bundle's row", functi
 	expect(app:tree(PAGE)).to_contain("run-8")
 	expect(app:tree(PAGE)).to_contain("run-3")
 	expect(app:tree(PAGE)).never.to_contain("run-2")
+end)
+
+test("DeepSeek plugins shows a switch for each of a bundle's rows, by the row's own default", function()
+	local app = open()
+	-- dsh-hello-plugin's three rows and left-pad's one, under their bundles.
+	expect(app:has(`{PAGE} >> role:switch "hello"`)).to_be(true)
+	expect(app:has(`{PAGE} >> role:switch "side"`)).to_be(true)
+	expect(app:has(`{PAGE} >> role:switch "computed"`)).to_be(true)
+	expect(app:has(`{PAGE} >> role:switch "left-pad"`)).to_be(true)
+	-- `hello` on, `side` off — the rows' own defaults, not the bundle's.
+	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain(" checked")
+	expect(app:tree(`{PAGE} >> role:switch "side"`)).to_contain("unchecked")
+	-- Asked for each bundle's rows once, as it drew.
+	expect(asked(app, "DshPluginRows:dsh-hello-plugin")).to_be(1)
+	expect(asked(app, "DshPluginRows:left-pad")).to_be(1)
+end)
+
+test("DeepSeek plugins switching a row asks the host with its id and the new disabled", function()
+	local app = open()
+	app:click(`{PAGE} >> role:switch "hello"`)
+	app:frames(10)
+	local ops = set_rows(app)
+	expect(#ops).to_be(1)
+	expect(ops[1].value).to_be("hello")
+	expect(ops[1].disabled).to_be(true)
+	-- The refreshed rows the host answered are what's shown now.
+	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain("unchecked")
+	-- On back to off sends disabled = false.
+	app:click(`{PAGE} >> role:switch "hello"`)
+	app:frames(10)
+	ops = set_rows(app)
+	expect(#ops).to_be(2)
+	expect(ops[2].disabled).to_be(false)
+	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain(" checked")
+end)
+
+test("DeepSeek plugins dims a row that can't be switched here, saying why, and clicking it asks nothing", function()
+	local app = open()
+	local sw = `{PAGE} >> role:switch "computed"`
+	-- On (its row's `disabled` is false) but not for the hand.
+	expect(app:tree(sw)).to_contain("disabled")
+	expect(app:tree(sw)).to_contain(" checked")
+	expect(app:has(`{PAGE} >> "it carries a !!js expression, which can't be switched safely"`)).to_be(true)
+	app:click(sw)
+	app:frames(10)
+	expect(#set_rows(app)).to_be(0)
+	-- No note of its own? A plain line instead. (A mount's stub is its
+	-- own, so the answer is set before the page's rows are asked.)
+	local again = open(nil, {
+		["dsh-hello-plugin"] = { rows = { { id = "raw", disabled = false, overridden = false, editable = false } } },
+	})
+	expect(again:has(`{PAGE} >> "This row can't be switched here."`)).to_be(true)
+	expect(again:tree(`{PAGE} >> role:switch "raw"`)).to_contain("disabled")
+end)
+
+test("DeepSeek plugins a refused switch flips back to what it was and says why", function()
+	local app = open()
+	app:set_state("settings_stub_dsh_plugin_set_row", "the profile's cordis.patch.yml can't be written")
+	app:click(`{PAGE} >> role:switch "hello"`)
+	app:frames(10)
+	local ops = set_rows(app)
+	expect(#ops).to_be(1)
+	expect(ops[1].value).to_be("hello")
+	expect(ops[1].disabled).to_be(true)
+	-- On again, the refusal said under the row.
+	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain(" checked")
+	expect(app:has(`{PAGE} >> "the profile's cordis.patch.yml can't be written"`)).to_be(true)
+	-- An answer that isn't rows says the fallback line.
+	app:set_state("settings_stub_dsh_plugin_set_row", { ok = false, refusal = nil })
+	app:click(`{PAGE} >> role:switch "hello"`)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "Couldn't switch it."`)).to_be(true)
+	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain(" checked")
 end)
