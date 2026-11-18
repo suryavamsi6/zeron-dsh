@@ -163,6 +163,17 @@ do
 		end,
 	}
 end
+-- The open session on DeepSeek, as the host says its harness.
+ui.command {
+	id = "session_on_deepseek",
+	title = "The open session runs DeepSeek",
+	run = function()
+		local s = store.session:peek()
+		if s and s.id then
+			publish(s.id, { harness = "deepseek" })
+		end
+	end,
+}
 -- The open session, as if it ran on the box (a remote device that's up),
 -- or on the old laptop (one gone quiet).
 for _, d in { "box", "old" } do
@@ -472,6 +483,35 @@ ui.command {
 stub.interrupt = function(id: string)
 	note(`interrupt:{id}`)
 end
+-- A reply read aloud (noted): the call lasts the read, as the host's does —
+-- it settles on `aloud_ends`, a `StopReadAloud`, or a newer read starting.
+local aloud_end: ((any) -> ())? = nil
+local function end_aloud()
+	local done = aloud_end
+	aloud_end = nil
+	if done then
+		done(nil)
+	end
+end
+stub.read_aloud = function(text: string): any
+	note(`read_aloud:{text}`)
+	end_aloud()
+	return {
+		after = function(_self: any, ok: (any) -> (), _err: any)
+			aloud_end = ok
+		end,
+	}
+end
+stub.stop_read_aloud = function(): any
+	note("stop_read_aloud")
+	end_aloud()
+	return settled(nil)
+end
+ui.command {
+	id = "aloud_ends",
+	title = "The read aloud ends",
+	run = end_aloud,
+}
 -- A background process stopped (noted); `stop_fails` makes the next fail.
 local STOP_FAILS = ui.state("fixture_stop_fails", false)
 stub.stop_task = function(session: string, task: string): any

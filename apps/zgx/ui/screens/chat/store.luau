@@ -206,6 +206,16 @@ function M.interrupt(id: string)
 	quietly(ui.call("chat.interrupt", id))
 end
 
+-- A reply's words read aloud (screens/chat/aloud): the call itself lasts
+-- the read, settling when the sound ends — played out, stopped, or a newer
+-- read taking its place.
+function M.read_aloud(text: string): any
+	return ui.call("ReadAloud", { text = text })
+end
+function M.stop_read_aloud(): any
+	return ui.call("StopReadAloud", nil)
+end
+
 function M.approve(id: string, request: string, scope: string)
 	quietly(ui.call("chat.respond", { id = id, request = request, decision = scope }))
 end

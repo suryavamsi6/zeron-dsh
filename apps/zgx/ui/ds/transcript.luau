@@ -129,6 +129,9 @@ export type Props = {
 	-- caller's, for a message (nil: the working word). `sending`: a prompt
 	-- whose reply hasn't begun.
 	turn_state: ((m: Message, sending: boolean) -> TurnLine?)?,
+	-- A reply's read-aloud action beside its Copy (screens/chat/aloud):
+	-- the node for a message, or nil where none belongs.
+	aloud: ((m: Message, row: State<Message>) -> Node?)?,
 	-- "Jump to latest" pressed. (It has the keys, and leaves as the view
 	-- arrives: this says where they go instead of the next control's, which
 	-- may be another chat's.)
@@ -265,7 +268,12 @@ local LANE_TOP = 8
 -- holding only those, not a state per message.
 local COPIED = ui.state("transcript_copied", {} :: { [string]: boolean })
 
-local function strip(m: Message, row: State<Message>, hovered: () -> boolean): Node
+local function strip(
+	m: Message,
+	row: State<Message>,
+	hovered: () -> boolean,
+	aloud: ((m: Message, row: State<Message>) -> Node?)?
+): Node
 	local mine = m.role == "user"
 	local function set_copied(on: boolean)
 		local all = table.clone(COPIED:peek())
@@ -346,6 +354,9 @@ local function strip(m: Message, row: State<Message>, hovered: () -> boolean): N
 						},
 					}
 				),
+				-- The caller's own action, where one belongs (a DeepSeek
+				-- reply's read aloud, screens/chat/aloud).
+				if aloud then aloud(m, row) else nil,
 				-- Where plugins add a message's actions: beside Copy.
 				ui.row { hook = "chat.message.actions", gap = "$space.2", items = "center" },
 			}
@@ -635,6 +646,8 @@ type View = {
 	open_subagent: ((sub: any) -> ())?,
 	-- A message text's find (its key: `<id>:u`, `<id>:<block>`, `<id>:r`).
 	find: ((key: string) -> any)?,
+	-- The strip's read-aloud action (Props' `aloud`, carried to `strip`).
+	aloud: ((m: Message, row: State<Message>) -> Node?)?,
 }
 
 -- A reply's thought being written, for its row (ds/activity's `thought`): the
@@ -886,7 +899,7 @@ local function reply(
 					},
 				}
 			end, { exit = { opacity = 0, duration = 160 } }),
-			strip(m, row, hovered),
+			strip(m, row, hovered, view and view.aloud),
 		},
 	}
 end
@@ -1944,10 +1957,10 @@ local function Transcript(props: Props): Node
 							pictures = props.sent_pictures,
 							find = if find_for then find_for(`{m.id}:u`) else nil,
 						},
-						strip(m, state, hovered),
+						strip(m, state, hovered, props.aloud),
 						waiting_line(state, props.on_retry, props.turn_state),
 					}
-					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for }),
+					else reply(m, state, props.draft, hovered, props.compact, { turn_state = props.turn_state, view = list, offset = offset, at_end = at_end, row = outer, pictures = props.pictures, shown_pictures = props.sent_pictures, open = props.open_link, link_menu = props.link_menu, link_chip = props.link_chip, open_subagent = props.on_open_subagent, find = find_for, aloud = props.aloud }),
 			},
 		}
 	end

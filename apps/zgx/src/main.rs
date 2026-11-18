@@ -61,6 +61,7 @@ mod mermaid;
 mod plugins;
 mod previews;
 mod projects;
+mod read_aloud;
 mod relaunch;
 mod session_home;
 mod sessions;

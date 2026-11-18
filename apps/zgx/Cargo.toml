@@ -119,6 +119,11 @@ zeron-preview-label = { path = "../../crates/preview-label" }
 # updates and release channel (src/about.rs): the shipping app's crates,
 # with no engine and no GPUI in them.
 zeron-voice = { path = "../../crates/voice" }
+# An answer read aloud (src/read_aloud.rs): the engine's PCM resampled by the
+# voice path's own (`dsp`), played through cpal as the voice output does —
+# the dsp half only, its `native` feature's AudioIo being the voice feature's.
+zeron-audio = { path = "../../crates/audio", default-features = false }
+cpal = "=0.18.2"
 zeron-cli = { path = "../../crates/cli" }
 zeron-launch = { path = "../../crates/launch" }
 # `zeron://` links: a chat's (src/sessions.rs, src/links.rs) and a clicked
