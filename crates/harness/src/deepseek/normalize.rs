@@ -172,6 +172,29 @@ impl Normalizer {
                         new_string: input["new_string"].as_str().map(str::to_owned),
                     },
                     "apply_patch" => ToolCall::ApplyPatch { path: None },
+                    "web_search" => {
+                        let queries = input["queries"]
+                            .as_array()
+                            .map(|queries| {
+                                queries
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .collect::<Vec<_>>()
+                                    .join(" · ")
+                            })
+                            .unwrap_or_default();
+                        ToolCall::WebSearch {
+                            query: if queries.is_empty() {
+                                input["query"].as_str().unwrap_or_default().into()
+                            } else {
+                                queries
+                            },
+                        }
+                    }
+                    "web_fetch" => ToolCall::WebFetch {
+                        url: input["url"].as_str().unwrap_or_default().into(),
+                        prompt: None,
+                    },
                     _ if name.starts_with("mcp__") => {
                         let (server, tool) = name
                             .trim_start_matches("mcp__")
@@ -273,6 +296,39 @@ mod tests {
         assert!(matches!(&events[1], AgentEvent::TextDelta { text } if text == "a"));
         assert!(matches!(&events[2], AgentEvent::TextDelta { text } if text == "b"));
         assert!(normalizer.notification(&frame).unwrap().is_empty());
+    }
+
+    fn tool_call(name: &str, arguments: Value) -> ToolCall {
+        let mut normalizer = Normalizer::new("root".into());
+        let frame = json!({"method":"session.event","params":{"sessionId":"root","event":{"type":"tool/call","data":{"callId":"call","name":name,"arguments":arguments.to_string()}}}});
+        match normalizer.notification(&frame).unwrap().as_slice() {
+            [AgentEvent::ToolCall { call, .. }] => call.clone(),
+            other => panic!("expected one tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn web_search_joins_every_query_and_falls_back_to_a_single_one() {
+        assert!(matches!(
+            tool_call("web_search", json!({"queries":["rust async","tokio select"]})),
+            ToolCall::WebSearch { query } if query == "rust async · tokio select"
+        ));
+        assert!(matches!(
+            tool_call("web_search", json!({"query":"rust async"})),
+            ToolCall::WebSearch { query } if query == "rust async"
+        ));
+        assert!(matches!(
+            tool_call("web_search", json!({})),
+            ToolCall::WebSearch { query } if query.is_empty()
+        ));
+    }
+
+    #[test]
+    fn web_fetch_carries_the_url_without_a_prompt() {
+        assert!(matches!(
+            tool_call("web_fetch", json!({"url":"https://example.com/docs"})),
+            ToolCall::WebFetch { url, prompt: None } if url == "https://example.com/docs"
+        ));
     }
 
     #[test]
