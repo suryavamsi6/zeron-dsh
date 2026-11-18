@@ -38,10 +38,19 @@
 -- lines, each with its old and new numbers and its sign, added lines on the
 -- success's wash and removed on the danger's, in mono.
 --
+-- A web search's result lists its sources, the lines its "Sources:" opens
+-- ("- [title](url)", or a bare url): under what it shows they are a
+-- compact list of links, the title the link's words (one line, its end
+-- cut), the url's host beside it quiet, each opening where the chat's
+-- links do (ds/links). Eight at most, each url once; a result listing
+-- none ("No results found.", an error's, a fetched page's body) shows no
+-- list.
+--
 --   ToolDetail { tool = function() return tool end }
 
 local locale = require("@self/locale")
 local FoldButton = require("@self/fold_button")
+local Links = require("@self/links")
 
 local M = {}
 
@@ -52,6 +61,7 @@ export type Stat = { path: string, added: number, removed: number }
 -- What of a tool the detail reads (ds/activity's Tool has these).
 export type Tool = {
 	id: string,
+	kind: string?,
 	output: string?,
 	exit_code: number?,
 	-- `output` is the end of a longer command output, of `output_lines`
@@ -616,6 +626,88 @@ local function stats_view(stats: { Stat }): Node
 	}
 end
 
+-- A web search's source (one of its result's "Sources:" lines): its title
+-- the link's words, its url where it goes.
+export type WebSource = { title: string, url: string }
+
+-- The most sources a result lists.
+local MAX_SOURCES = 8
+
+-- The sources a web search's result `text` lists, the lines after its
+-- "Sources:" one ("- [title](url)", or a bare url where that form is
+-- missing); each url once, the first eight. (Only after "Sources:": a
+-- fetched page's body carries the same shapes and lists none.)
+function M.sources(text: string?): { WebSource }
+	local out: { WebSource } = {}
+	local seen: { [string]: boolean } = {}
+	local listed = false
+	for line in string.gmatch(text or "", "[^\n]+") do
+		if line == "Sources:" then
+			listed = true
+		elseif listed then
+			local title, url = string.match(line, "^- %[(.-)%]%((https?://[^%)]+)%)")
+			if not url then
+				url = string.match(line, "^(https?://%S+)")
+			end
+			if url and not seen[url] then
+				seen[url] = true
+				table.insert(out, { title = if title and title ~= "" then title else url, url = url })
+				if #out >= MAX_SOURCES then
+					break
+				end
+			end
+		end
+	end
+	return out
+end
+
+-- The host a url is on ("https://www.example.com/a" → "example.com"), the
+-- quiet word beside a source's title.
+local function host_of(url: string): string
+	local host = string.match(url, "^https?://([^/%?#]+)") or url
+	return (string.gsub(host, "^www%.", ""))
+end
+
+-- One source: its title the link (one line, its end cut, quiet until
+-- touched — a link among quiet text, ds/layout's), its host quiet. The
+-- click goes where the chat's links go (ds/links: the app's opener, else
+-- the system's browser), the menu is a web link's.
+local function source_row(s: WebSource): Node
+	return ui.row {
+		w_full = true,
+		h = 20,
+		gap = "$space.2",
+		items = "center",
+		class = "tool-source",
+		ui.rich {
+			ui.span {
+				s.title,
+				href = s.url,
+				on_click = function(): boolean
+					return Links.take(s.url)
+				end,
+				context_menu = Links.menu_for(s.url),
+				color = "$text.secondary",
+				underline = false,
+				underline_offset = 3,
+				hover = { underline = true, color = "$text.primary" },
+			},
+			truncate = true,
+			min_w = 0,
+			text_size = "$font.size.xs",
+			line_height = "$font.line.xs",
+		},
+		ui.text {
+			host_of(s.url),
+			literal = true,
+			shrink = 0,
+			text_size = "$font.size.xs",
+			line_height = "$font.line.xs",
+			color = "$text.tertiary",
+		},
+	}
+end
+
 -- Whether a tool has an output of its own to show: words, or a failed
 -- command's code.
 local function has_output(t: Tool): boolean
@@ -646,6 +738,25 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 			return { key = "output" }
 		end
 		return { key = "none" }
+	end)
+	-- A web search's sources, out of what its detail shows (the fetched
+	-- whole output when one is, else the output the chat keeps).
+	local sources = ui.computed(function(): { WebSource }
+		local t = now()
+		if t.kind ~= "web" then
+			return {}
+		end
+		local blobs = BLOBS:get()
+		local r = shown_ref(t, blobs)
+		local v = r and blobs[r].value
+		if type(v) == "table" then
+			if type(v.text) == "string" then
+				return M.sources(v.text)
+			elseif type(v.lines) == "table" then
+				return M.sources(table.concat(v.lines, "\n"))
+			end
+		end
+		return M.sources(t.output)
 	end)
 	-- The whole output, for a tool with nothing else to show, as the row
 	-- opens (once: what was fetched is kept by its ref, a reload too).
@@ -725,6 +836,17 @@ M.ToolDetail = ui.component(function(props: { tool: () -> Tool }): Node
 				return fetched
 			end, now)
 		end),
+		ui.show(function(): boolean
+			return #sources:get() > 0
+		end, ui.column {
+			w_full = true,
+			px = "$space.3",
+			pb = "$space.1",
+			class = "tool-sources",
+			ui.each(sources, source_row, { key = function(s: WebSource): string
+				return s.url
+			end }),
+		}),
 		ui.show(
 			function(): boolean
 				local r = affordance()
