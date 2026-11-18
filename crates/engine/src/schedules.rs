@@ -456,7 +456,7 @@ struct Inner {
     tasks: Mutex<Vec<Task>>,
     deliver: Arc<dyn Deliver>,
     /// Wakes the loop early when the store changes under it.
-    kick: tokio::sync::Notify,
+    kick: Arc<tokio::sync::Notify>,
 }
 
 /// dsh's delivery floor: at least a minute between one task's runs. Also the
@@ -483,7 +483,7 @@ impl Schedules {
                 path,
                 tasks: Mutex::new(tasks),
                 deliver,
-                kick: tokio::sync::Notify::new(),
+                kick: Arc::new(tokio::sync::Notify::new()),
             }),
         }
     }
@@ -491,17 +491,27 @@ impl Schedules {
     /// The wake loop: sleep to the earliest `nextAt` (never longer than
     /// [`POLL_CAP`]), fire what's due, repeat. No runtime, no runner — the
     /// store still answers RPCs.
+    ///
+    /// The loop holds the store weakly, as `plugins`' worker does: a strong
+    /// handle here would keep the engine alive after its window closed, so
+    /// the engine would never retire.
     pub fn start(&self) {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let this = self.clone();
+        let weak = Arc::downgrade(&self.inner);
         runtime.spawn(async move {
             loop {
-                let wait = this.tick(Utc::now());
+                let (wait, kick) = {
+                    // Upgraded for one tick only: dropped before the sleep, so
+                    // an idle runner holds nothing.
+                    let Some(inner) = weak.upgrade() else { return };
+                    let this = Schedules { inner };
+                    (this.tick(Utc::now()), this.inner.kick.clone())
+                };
                 tokio::select! {
                     _ = tokio::time::sleep(wait.min(POLL_CAP)) => {}
-                    _ = this.inner.kick.notified() => {}
+                    _ = kick.notified() => {}
                 }
             }
         });
