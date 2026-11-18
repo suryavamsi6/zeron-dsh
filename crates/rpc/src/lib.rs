@@ -116,6 +116,17 @@ pub mod methods {
     pub const DSH_PLUGINS: &str = "DshPlugins";
     pub const DSH_PLUGIN_ADD: &str = "DshPluginAdd";
     pub const DSH_PLUGIN_REMOVE: &str = "DshPluginRemove";
+    /// This device's engine-owned scheduled tasks: the list ({} -> `{tasks:
+    /// [Task]}`), one saved ({task} -> the stored task — created when `id` is
+    /// missing, its rrule validated and `nextAt` computed), one deleted ({id}
+    /// -> `{deleted}`) and one fired on demand ({id} -> `{fired}`: a single
+    /// delivery that keeps `nextAt`). dsh's schedule service is a long-lived
+    /// Host service and zeron's DeepSeek sidecar is per-run, so the engine
+    /// owns the store and the runner.
+    pub const SCHEDULES: &str = "Schedules";
+    pub const SCHEDULE_SAVE: &str = "ScheduleSave";
+    pub const SCHEDULE_DELETE: &str = "ScheduleDelete";
+    pub const SCHEDULE_RUN_NOW: &str = "ScheduleRunNow";
     /// DSH's token meter, read where it lives: the sessions it records ({} ->
     /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
     /// that carries `tokenUsage`) and one session's exact projections
@@ -798,6 +809,12 @@ pub fn local_only(method: &str) -> bool {
             | methods::DSH_PLUGINS
             | methods::DSH_PLUGIN_ADD
             | methods::DSH_PLUGIN_REMOVE
+            // Scheduled tasks fire on this device's engine, so only this
+            // device's own window reads and edits them.
+            | methods::SCHEDULES
+            | methods::SCHEDULE_SAVE
+            | methods::SCHEDULE_DELETE
+            | methods::SCHEDULE_RUN_NOW
     )
 }
 

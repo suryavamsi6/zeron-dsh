@@ -74,6 +74,7 @@ pub mod dsh_plugins;
 pub mod dsh_providers;
 pub mod dsh_usage;
 pub mod runner;
+pub mod schedules;
 pub mod wake_trace;
 pub mod wake_update;
 pub mod sessions;
@@ -202,6 +203,8 @@ pub struct EngineCore {
     pub local_import: Option<local_import::LocalImporter>,
     /// Plugins under `{data}/plugins/` (the plugins contract).
     pub plugins: plugins::Plugins,
+    /// Engine-owned scheduled tasks (`{data}/schedules.json` + the runner).
+    pub schedules: schedules::Schedules,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -462,6 +465,16 @@ impl EngineCore {
         }));
         let spaces_sync = SpacesSync::start(repos.clone(), workspace.clone(), &device_id);
         plugins.start();
+        // dsh's schedule service is a Host service; zeron's sidecar is
+        // per-run, so the engine owns the store and the runner.
+        let schedules = schedules::Schedules::open(
+            data_dir,
+            Arc::new(schedules::SessionDeliver {
+                doc_host: doc_host.clone(),
+                workspace: workspace.clone(),
+            }),
+        );
+        schedules.start();
         Ok(Self {
             sessions,
             doc_host,
@@ -482,6 +495,7 @@ impl EngineCore {
             device_id,
             local_import,
             plugins,
+            schedules,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -648,7 +662,8 @@ impl EngineCore {
         .with_remote_terminals(self.remote_terminals.clone())
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
-        .with_plugins(self.plugins.clone());
+        .with_plugins(self.plugins.clone())
+        .with_schedules(self.schedules.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
