@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { createInterface } from 'node:readline';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -62,8 +62,45 @@ async function runtime(t, options = {}) {
     clearTimeout(deadline);
     if (!options.home) await rm(home, { recursive: true, force: true });
   });
-  send({ type: 'start', dshHome: home, cwd: here, model: 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource });
+  send({ type: 'start', dshHome: home, cwd: here, model: options.model ?? 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource });
   return { home, send, next, frames, exited };
+}
+
+async function mockModel(t) {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
+    // The runtime uploads prompt images through the Files API before the
+    // messages call references their ids; a file object echoing the submitted
+    // byte count is all an upload needs back.
+    if (request.url.endsWith('/files')) {
+      const form = body.toString('latin1');
+      const start = form.indexOf('\r\n\r\n', form.indexOf('name="file"')) + 4;
+      const bytes = form.indexOf('\r\n--', start) - start;
+      requests.push({ path: request.url, bytes, key: request.headers['x-api-key'] });
+      response.writeHead(200, { 'content-type': 'application/json' });
+      response.end(JSON.stringify({ id: 'file-mock', type: 'file', filename: 'a.png',
+        mime_type: 'image/png', size_bytes: bytes, created_at: '2026-11-18T00:00:00.000Z' }));
+      return;
+    }
+    const input = JSON.parse(body.toString());
+    requests.push({ path: request.url, input, key: request.headers['x-api-key'] });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', { message: { id: 'msg-mock', type: 'message', role: 'assistant', model: input.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'SDK_RUNTIME_OK' } });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+    event('message_stop', {});
+    response.end();
+  });
+  await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
+  t.after(() => new Promise(resolveClose => { server.closeAllConnections(); server.close(resolveClose); }));
+  return { requests, baseURL: `http://127.0.0.1:${server.address().port}/anthropic` };
 }
 
 test('actual SDK initializes, preserves ordered events, and settles two turns', async t => {
@@ -89,26 +126,8 @@ test('published runtime boots mandatory policy and managed permissions without m
 });
 
 test('actual SDK and runtime complete a turn through a loopback-only mock model', async t => {
-  const requests = [];
-  const server = createServer(async (request, response) => {
-    let body = '';
-    for await (const chunk of request) body += chunk;
-    const input = JSON.parse(body);
-    requests.push({ path: request.url, input, key: request.headers['x-api-key'] });
-    response.writeHead(200, { 'content-type': 'text/event-stream' });
-    const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
-    event('message_start', { message: { id: 'msg-mock', type: 'message', role: 'assistant', model: input.model,
-      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
-    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
-    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'SDK_RUNTIME_OK' } });
-    event('content_block_stop', { index: 0 });
-    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
-    event('message_stop', {});
-    response.end();
-  });
-  await new Promise(resolveListen => server.listen(0, '127.0.0.1', resolveListen));
-  t.after(() => new Promise(resolveClose => { server.closeAllConnections(); server.close(resolveClose); }));
-  const peer = await runtime(t, { realRuntime: true, baseURL: `http://127.0.0.1:${server.address().port}/anthropic` });
+  const { requests, baseURL } = await mockModel(t);
+  const peer = await runtime(t, { realRuntime: true, baseURL });
   await peer.next('ready');
   peer.send({ type: 'prompt', prompt: 'Return the mock marker' });
   assert.equal((await peer.next('done')).finalResponse, 'SDK_RUNTIME_OK');
@@ -118,6 +137,53 @@ test('actual SDK and runtime complete a turn through a loopback-only mock model'
   assert.equal(requests[0].key, 'synthetic-not-live');
   peer.send({ type: 'stop' });
   await peer.next('stopped');
+});
+
+test('a mixed-attachment prompt sends deepseek-flash exactly the image', async t => {
+  const { requests, baseURL } = await mockModel(t);
+  const dir = await mkdtemp(join(tmpdir(), 'zeron-deepseek-attach-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+  await writeFile(join(dir, 'a.png'), png);
+  await writeFile(join(dir, 'report.pdf'), '%PDF-1.4\n');
+  const peer = await runtime(t, { realRuntime: true, baseURL });
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: 'look at these', attachments: [join(dir, 'report.pdf'), join(dir, 'a.png')] });
+  assert.equal((await peer.next('done')).finalResponse, 'SDK_RUNTIME_OK');
+  assert.equal(requests.filter(r => r.path.endsWith('/files')).length, 1);
+  const message = requests.find(r => r.path.endsWith('/messages'));
+  const blocks = message.input.messages.flatMap(m => Array.isArray(m.content) ? m.content : []);
+  const images = blocks.filter(block => block.type === 'image');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].source.file_id, 'file-mock');
+});
+
+test('a prompt carrying only a non-image attachment runs on deepseek-v4-pro', async t => {
+  const { requests, baseURL } = await mockModel(t);
+  const dir = await mkdtemp(join(tmpdir(), 'zeron-deepseek-attach-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const pdf = join(dir, 'report.pdf');
+  await writeFile(pdf, '%PDF-1.4\n');
+  const peer = await runtime(t, { realRuntime: true, baseURL, model: 'deepseek-v4-pro' });
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: 'look at this', attachments: [pdf] });
+  assert.equal((await peer.next('done')).finalResponse, 'SDK_RUNTIME_OK');
+  assert.equal(requests.length, 1);
+  const blocks = requests[0].input.messages.flatMap(m => Array.isArray(m.content) ? m.content : []);
+  assert.ok(!blocks.some(block => block.type === 'image'));
+});
+
+test('an image attachment on deepseek-v4-pro is refused', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zeron-deepseek-attach-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const png = join(dir, 'a.png');
+  await writeFile(png, Buffer.from('89504e470d0a1a0a', 'hex'));
+  const peer = await runtime(t, { model: 'deepseek-v4-pro' });
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: 'look', attachments: [png] });
+  const error = await peer.next('error');
+  assert.match(error.message, /does not support image input/);
+  assert.equal((await peer.exited).code, 1);
 });
 
 test('a resume of an unknown session surfaces session not found', async t => {

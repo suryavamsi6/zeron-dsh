@@ -195,10 +195,10 @@ async function prompt(command) {
   if (/^\s*\/(permission|权限)(?:\s|$)/u.test(command.prompt)) throw new Error('Change permissions through Zeron access controls');
   const input = [{ type: 'text', text: command.prompt }];
   for (const path of command.attachments ?? []) {
-    if (launch.model !== 'deepseek-flash') throw new Error('This DeepSeek model does not support image input');
     const extension = path.split('.').at(-1).toLowerCase();
     const mimeType = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif' }[extension];
-    if (!mimeType) throw new Error('Unsupported image attachment');
+    if (!mimeType) continue;
+    if (launch.model !== 'deepseek-flash') throw new Error('This DeepSeek model does not support image input');
     const bytes = await readFile(path);
     if (bytes.length > 20 * 1024 * 1024) throw new Error('Image attachment exceeds 20 MiB');
     input.push({ type: 'image', data: bytes.toString('base64'), mimeType });
