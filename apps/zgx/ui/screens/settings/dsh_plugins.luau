@@ -46,13 +46,19 @@ end
 -- Installing one from a spec: the field and Install beside it (Install off
 -- while the field is empty or a run is on, the typed spec kept through it),
 -- "Installing…" beside them, the answer under them. `on_added` asks the
--- list again.
+-- list again. A run refused for a build script answers the package pnpm
+-- would build (`needsBuildApproval`), which asks once — Cancel only closes
+-- it, "Allow and install" runs the spec again with `allowBuild` naming it.
 local function install_row(on_added: () -> ()): Node
 	local spec = ui.use_state("")
 	local installing = ui.use_state(false)
 	local note = ui.use_state(nil :: string?)
 	local problem = ui.use_state(nil :: string?)
-	local function install()
+	-- The package whose build script wants letting through, while its
+	-- asking is up.
+	local asking = ui.use_state(nil :: string?)
+	local ask_open = ui.use_state(false)
+	local function install(allow: string?)
 		local s = spec:peek()
 		if s == "" or installing:peek() then
 			return
@@ -60,9 +66,12 @@ local function install_row(on_added: () -> ()): Node
 		installing:set(true)
 		note:set(nil)
 		problem:set(nil)
-		host.call("DshPluginAdd", { spec = s }):after(function(answer: any)
+		host.call("DshPluginAdd", { spec = s, allowBuild = allow }):after(function(answer: any)
 			installing:set(false)
-			if type(answer) == "table" and answer.ok == true then
+			if type(answer) == "table" and type(answer.needsBuildApproval) == "string" then
+				asking:set(answer.needsBuildApproval)
+				ask_open:set(true)
+			elseif type(answer) == "table" and answer.ok == true then
 				spec:set("")
 				note:set(ui.t("settings.dsh_plugins.installed_ok"):get())
 				on_added()
@@ -92,7 +101,9 @@ local function install_row(on_added: () -> ()): Node
 					size = "sm",
 					grow = 1,
 					disabled = installing,
-					on_commit = install,
+					on_commit = function()
+						install()
+					end,
 				},
 				ds.Button {
 					ui.t("settings.dsh_plugins.install"),
@@ -100,7 +111,9 @@ local function install_row(on_added: () -> ()): Node
 					disabled = function(): boolean
 						return installing:get() or spec:get() == ""
 					end,
-					on_click = install,
+					on_click = function()
+						install()
+					end,
 				},
 				ui.show(installing, ds.Hint { ui.t("settings.dsh_plugins.installing") }),
 			},
@@ -130,6 +143,23 @@ local function install_row(on_added: () -> ()): Node
 				},
 			}),
 			ds.Hint { ui.t("settings.dsh_plugins.trust") },
+			-- (Its asking, beside the row's control: the modal stands over
+			-- the page wherever it is built.)
+			ds.Dialog {
+				open = ask_open,
+				title = (function(): string
+					return ui.t("settings.dsh_plugins.allow_build_title", { name = asking:get() or "" }):get()
+				end) :: any,
+				body = ui.t("settings.dsh_plugins.allow_build_body"),
+				tone = "danger",
+				size = "sm",
+				confirm = {
+					label = ui.t("settings.dsh_plugins.allow_build_confirm"),
+					on_click = function()
+						install(asking:peek())
+					end,
+				},
+			},
 		},
 	}
 end

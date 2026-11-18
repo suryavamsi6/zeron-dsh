@@ -9,6 +9,7 @@
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
 local REMOVE = `role:dialog "Remove “dsh-hello-plugin”?"`
+local BUILD = `role:dialog "Allow “dsh-hello-plugin” to run its build script?"`
 
 local function open(answer: any): any
 	local app = mount("shell_fixture.luau")
@@ -160,6 +161,45 @@ test("DeepSeek plugins says why an install failed, from the refusal or the log's
 	expect(app:tree(PAGE)).to_contain("run-8")
 	expect(app:tree(PAGE)).to_contain("run-3")
 	expect(app:tree(PAGE)).never.to_contain("run-2")
+end)
+
+test("DeepSeek plugins asks before a build script runs, Cancel making no call and Allow and install retrying with allowBuild", function()
+	local app = open()
+	app:set_state("settings_stub_dsh_plugin_add", {
+		ok = false,
+		exitCode = 1,
+		needsBuildApproval = "dsh-hello-plugin",
+		log = "Ignored build scripts: dsh-hello-plugin@0.1.0.",
+	})
+	app:fill(`{PAGE} >> role:textbox "Package"`, "dsh-hello-plugin")
+	app:click(`{PAGE} >> role:button "Install"`)
+	app:frames(30)
+	expect(app:has(BUILD)).to_be(true)
+	expect(app:has(`{BUILD} >> "A dependency of this plugin runs a build script at install time. Only allow it if you trust the source."`)).to_be(true)
+	expect(app:has(`{BUILD} >> role:button "Cancel"`)).to_be(true)
+	expect(app:has(`{BUILD} >> role:button "Allow and install"`)).to_be(true)
+	-- One add asked, nothing allowed yet; Cancel asks nothing of the host.
+	local ops = added(app)
+	expect(#ops).to_be(1)
+	expect(ops[1].allowBuild).to_be(nil)
+	app:click(`{BUILD} >> role:button "Cancel"`)
+	app:frames(30)
+	expect(app:has(BUILD)).to_be(false)
+	expect(#added(app)).to_be(1)
+	-- Asked again, then allowed: the retry names it in allowBuild.
+	app:click(`{PAGE} >> role:button "Install"`)
+	app:frames(30)
+	expect(app:has(BUILD)).to_be(true)
+	app:set_state("settings_stub_dsh_plugin_add", { ok = true, exitCode = 0, log = "" })
+	app:click(`{BUILD} >> role:button "Allow and install"`)
+	app:frames(10)
+	ops = added(app)
+	expect(#ops).to_be(3)
+	expect(ops[3].op).to_be("add")
+	expect(ops[3].value).to_be("dsh-hello-plugin")
+	expect(ops[3].allowBuild).to_be("dsh-hello-plugin")
+	expect(app:has(`{PAGE} >> "Installed. Applies to new sessions."`)).to_be(true)
+	expect(asked(app, "DshPlugins")).to_be(2)
 end)
 
 test("DeepSeek plugins asks once before removing a bundle, naming it", function()

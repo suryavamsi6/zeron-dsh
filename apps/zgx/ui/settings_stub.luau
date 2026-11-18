@@ -164,7 +164,8 @@ local codex_fixture = ui.state("settings_stub_codex", nil :: any)
 local codex_accounts = ui.state("settings_stub_codex_accounts", nil :: any)
 local unscoped_chatgpt = ui.state("settings_stub_chatgpt_unscoped", false)
 -- The plugin operations asked for, in order: `{ op = "add", value = "…" }`
--- or `{ op = "remove", value = "…" }`.
+-- (an add's `allowBuild` kept when the page sent one) or
+-- `{ op = "remove", value = "…" }`.
 local plugin_calls = ui.state("settings_stub_dsh_plugin_calls", {} :: { any })
 
 -- A plugin run's answer: "pending" never settles, a table is it, another
@@ -292,7 +293,7 @@ local answers: { [string]: (arg: any) -> any } = {
 		})
 	end,
 	["DshPluginAdd"] = function(arg: any)
-		plugin_calls:push({ op = "add", value = arg.spec })
+		plugin_calls:push({ op = "add", value = arg.spec, allowBuild = arg.allowBuild })
 		return plugin_run(dsh_plugin_add:peek())
 	end,
 	["DshPluginRemove"] = function(arg: any)
