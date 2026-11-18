@@ -1,10 +1,11 @@
 //! The provider page's host actions: the routes the gateway on this device
-//! reports, the keys it keeps, and the ChatGPT sign-in's three steps.
+//! reports, the keys it keeps, the ChatGPT sign-in's three steps, and the dsh
+//! bundles it installs.
 //!
 //! `ui.call` is a host action, not an engine RPC — asking it for `DshProviders`
 //! answers "no host action named 'DshProviders'" — so each of these is one
-//! action over one `Dsh*` method (`crates/engine/src/dsh_gateway.rs`), under
-//! the name the page calls.
+//! action over one `Dsh*` method (`crates/engine/src/dsh_gateway.rs`, and
+//! `dsh_plugins.rs` for the bundles), under the name the page calls.
 
 use serde_json::{Value as Json, json};
 use zgx_script::{ScriptHost, Value};
@@ -28,6 +29,25 @@ pub fn install(host: &ScriptHost) {
         async move {
             let params = json!({ "ref": key_ref, "value": value });
             answer(engine::get().call("DshSetCredential", params).await)
+        }
+    });
+    // The dsh bundles in this computer's `sdk` profile, and the two
+    // operations that change it (`crates/engine/src/dsh_plugins.rs`): the
+    // list is a read of the profile's manifests, the two writes run
+    // `dsh plugin` one at a time.
+    host.async_action("DshPlugins", |_| async {
+        answer(engine::get().call("DshPlugins", json!({})).await)
+    });
+    host.async_action("DshPluginAdd", |args| {
+        let spec = args.field("spec").map(text).unwrap_or_default();
+        async move {
+            answer(engine::get().call("DshPluginAdd", json!({ "spec": spec })).await)
+        }
+    });
+    host.async_action("DshPluginRemove", |args| {
+        let name = args.field("name").map(text).unwrap_or_default();
+        async move {
+            answer(engine::get().call("DshPluginRemove", json!({ "name": name })).await)
         }
     });
     // The page's write: `{ ns, ops }` straight through, since the gateway
