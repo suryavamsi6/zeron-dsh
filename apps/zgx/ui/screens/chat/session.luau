@@ -23,6 +23,8 @@ local FileLinks = require("@app/screens/chat/file_links")
 local LinkChips = require("@app/screens/chat/link_chips")
 local LinkMenu = require("@app/screens/chat/link_menu")
 local Find = require("@app/screens/chat/find")
+-- A settled reply's words read aloud (its action beside Copy).
+local Aloud = require("@app/screens/chat/aloud")
 local boundary = require("@app/screens/shell/boundary")
 
 -- The pictures replies show, read from the open chat's folder on its device.
@@ -341,6 +343,11 @@ local function Session(id: Id?): Node
 							end),
 							-- ⌘F's find (screens/chat/find): its matches marked.
 							find = Find.marks(),
+							-- A reply read aloud, where the chat's agent
+							-- offers it (screens/chat/aloud).
+							aloud = Aloud.for_session(function(): any
+								return store.session:get()
+							end),
 						}
 					end),
 					Find.Bar(),

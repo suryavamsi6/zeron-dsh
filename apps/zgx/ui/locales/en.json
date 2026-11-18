@@ -2980,6 +2980,11 @@
     "get_started": "Get started"
   },
   "chat": {
+    "aloud": {
+      "read": "Read aloud",
+      "stop": "Stop reading",
+      "failed": "Couldn't read this reply aloud"
+    },
     "init": {
       "couldnt_show": "{what} couldn't be shown",
       "home": "The new chat page",

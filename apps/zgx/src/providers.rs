@@ -12,6 +12,7 @@ use zgx_script::{ScriptHost, Value};
 
 use crate::auth::text;
 use crate::engine;
+use crate::read_aloud;
 
 pub fn install(host: &ScriptHost) {
     host.async_action("DshProviders", |_| async {
@@ -56,6 +57,29 @@ pub fn install(host: &ScriptHost) {
         let params: Json = serde_json::from_str(&args.to_json())
             .map_err(|error| error.to_string())?;
         answer(engine::get().call("DshMutateSettings", params).await)
+    });
+    // A DeepSeek answer read aloud (ui/screens/chat/aloud.luau): the
+    // engine's `ReadAloud` turns its words into 24 kHz PCM, played here
+    // (src/read_aloud.rs). The call lasts the read itself: it answers when
+    // the sound ends — its words played out, a `StopReadAloud`, or a newer
+    // read taking its place — so the button can stay Stop reading until then.
+    host.async_action("ReadAloud", |args| {
+        let ticket = read_aloud::ticket();
+        let text = args.field("text").map(text).unwrap_or_default();
+        async move {
+            let reply = engine::get()
+                .call("ReadAloud", json!({ "text": text }))
+                .await?;
+            if let Some(play) = read_aloud::play(&reply, ticket)? {
+                play.done().await;
+                read_aloud::release(&play);
+            }
+            Ok(Value::Nil)
+        }
+    });
+    host.async_action("StopReadAloud", |_| async {
+        read_aloud::stop();
+        Ok(Value::Nil)
     });
     // The routes' models, for the Providers page's Models section: the
     // engine's own list, which already carries each model's route.

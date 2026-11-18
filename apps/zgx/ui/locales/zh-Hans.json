@@ -2980,6 +2980,11 @@
     "get_started": "开始使用"
   },
   "chat": {
+    "aloud": {
+      "read": "朗读",
+      "stop": "停止朗读",
+      "failed": "无法朗读此回复"
+    },
     "init": {
       "couldnt_show": "无法显示{what}",
       "home": "新建对话页面",
