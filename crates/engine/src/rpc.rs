@@ -929,6 +929,8 @@ pub struct EngineRpc {
     viewport_focus: crate::desktop_notify::ViewportFocus,
     /// The plugins service (absent in bare test assemblies).
     plugins: Option<crate::plugins::Plugins>,
+    /// The engine-owned schedule service (absent in bare test assemblies).
+    schedules: Option<crate::schedules::Schedules>,
     /// DSH's own settings and account service, started on first use.
     dsh_gateway: std::sync::Arc<
         std::sync::OnceLock<std::sync::Arc<zeron_harness::deepseek::gateway::Gateway>>,
@@ -1031,6 +1033,7 @@ impl EngineRpc {
             credentials: None,
             viewport_focus: Default::default(),
             plugins: None,
+            schedules: None,
             dsh_gateway: Default::default(),
             engine_info,
         }
@@ -1087,6 +1090,12 @@ impl EngineRpc {
     /// Attach the plugins service (the Plugin* methods).
     pub fn with_plugins(mut self, plugins: crate::plugins::Plugins) -> Self {
         self.plugins = Some(plugins);
+        self
+    }
+
+    /// Attach the schedule service (Schedules / ScheduleSave / …).
+    pub fn with_schedules(mut self, schedules: crate::schedules::Schedules) -> Self {
+        self.schedules = Some(schedules);
         self
     }
 
@@ -3322,6 +3331,21 @@ impl RpcService for EngineRpc {
             }
             let harness = zeron_harness::deepseek::DeepSeekHarness::new();
             let value = crate::dsh_plugins::call(&harness, method, &params).await?;
+            return Ok(RpcReply::Value(value));
+        }
+        // Engine-owned scheduled tasks: the store and its runner live here
+        // (the DeepSeek sidecar is per-run), so only this device's own IPC
+        // reads or edits them.
+        if crate::schedules::handles(method) {
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: schedules are managed from this device's own window"
+                )));
+            }
+            let Some(schedules) = self.schedules.clone() else {
+                return Err(RpcError::Failed(format!("{method}: no schedule service")));
+            };
+            let value = crate::schedules::call(&schedules, method, &params)?;
             return Ok(RpcReply::Value(value));
         }
         // An answer read aloud spends this device's DeepSeek key: it never
