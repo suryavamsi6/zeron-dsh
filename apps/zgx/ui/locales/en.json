@@ -1779,6 +1779,22 @@
       "online_now": "It's online now. Quit Zeron on it, then try again.",
       "offline_title": "Can't show your devices"
     },
+    "dsh_plugins": {
+      "title": "DeepSeek plugins",
+      "terms": "dsh bundles plugins deepseek tools skills packages extensions add ons",
+      "description": "The dsh bundles installed for DeepSeek sessions on this device.",
+      "installed": "Installed plugins",
+      "installed_terms": "bundles list active version",
+      "empty_title": "No DeepSeek plugins installed",
+      "empty_body": "Plugins are dsh bundles that add tools and skills to DeepSeek sessions.",
+      "failed_title": "Can't list DeepSeek plugins",
+      "failed_hint": "Try again in a moment.",
+      "retry": "Retry",
+      "active": "Active",
+      "not_active": "Not active",
+      "needs_pnpm": "Installing needs pnpm 10 or newer on this device.",
+      "applies": "Changes apply to new DeepSeek sessions."
+    },
     "projects": {
       "title": "Projects",
       "description": "The folders your sessions work in, on each of your devices.",
