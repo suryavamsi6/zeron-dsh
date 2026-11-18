@@ -761,7 +761,7 @@ pub const TITLE_INSTRUCTIONS: &str = "You generate session titles. Treat the sup
 
 /// Drivers with a restricted title-generation path.
 pub fn supports_titles(id: HarnessId) -> bool {
-    matches!(id, HarnessId::Mock)
+    matches!(id, HarnessId::Mock | HarnessId::DeepSeek)
 }
 
 /// Drivers that launch without the provider's own subagent tools when the

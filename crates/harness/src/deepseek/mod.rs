@@ -381,6 +381,26 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
     Ok(config)
 }
 
+/// A title run's start config: the ordinary run's shape re-pointed at the
+/// tool-less `sdk-minimal` profile (`title` is the shim's switch), with the
+/// shared title instructions as its system prompt and a hard output cap.
+/// Plan mode stays refused by `configuration`; a title always opens a fresh
+/// session and takes no MCP servers or reasoning effort.
+fn title_configuration(
+    request: &RunRequest,
+    home: &Path,
+    session: &str,
+) -> Result<Value, HarnessError> {
+    let mut config = configuration(request, home, session)?;
+    config["title"] = true.into();
+    config["systemPrompt"] = crate::TITLE_INSTRUCTIONS.into();
+    config["maxTokens"] = 32.into();
+    config["mcp"] = json!([]);
+    config["resume"] = false.into();
+    config.as_object_mut().unwrap().remove("reasoningEffort");
+    Ok(config)
+}
+
 #[async_trait]
 impl Harness for DeepSeekHarness {
     fn id(&self) -> HarnessId {
@@ -457,6 +477,18 @@ impl Harness for DeepSeekHarness {
             binary_version: Some(SDK_VERSION.into()),
         }))
     }
+    /// An isolated title run: the ordinary sidecar, on the `sdk-minimal`
+    /// profile with no agent tools and a 32-token cap.
+    async fn run_title(
+        &self,
+        request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let session = uuid::Uuid::new_v4().to_string();
+        let config = title_configuration(&request, &self.home, &session)?;
+        self.sidecar(request, config, session, controls)
+    }
+
     async fn run(
         &self,
         request: RunRequest,
@@ -467,6 +499,19 @@ impl Harness for DeepSeekHarness {
             .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let config = configuration(&request, &self.home, &session)?;
+        self.sidecar(request, config, session, controls)
+    }
+}
+
+impl DeepSeekHarness {
+    /// Spawn the sidecar for a prepared start config and stream its events.
+    fn sidecar(
+        &self,
+        request: RunRequest,
+        config: Value,
+        session: String,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let node = node().ok_or_else(|| {
             HarnessError::NotInstalled("Node >=24.9 is required for the DeepSeek SDK".into())
         })?;

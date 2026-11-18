@@ -103,7 +103,26 @@ async function start(config) {
   await writeFile(environmentPath, config.environmentSource, { mode: 0o600 });
   const { runtimeEnvironment } = await import(pathToFileURL(environmentPath).href);
   const environment = { ...runtimeEnvironment(process.env), DSH_PERMISSION_MODE: config.sandbox };
-  let patch = [
+  // A title run boots the standalone `sdk-minimal` profile: none of the `sdk`
+  // profile's zeron-policy, credentials, plugin, web, or MCP rows exist there
+  // to patch, so its per-run patch only switches off the agent tools the
+  // profile does have, and the title instructions ride in as the persona.
+  const title = config.title === true;
+  if (title) {
+    if (typeof config.systemPrompt !== 'string' || !config.systemPrompt.trim()) throw new Error('A title run needs a system prompt');
+    environment.DSH_SYSTEM_PROMPT = config.systemPrompt;
+  }
+  let patch = title ? [
+    { id: 'tool-fs', disabled: true },
+    { id: 'tool-working-directory', disabled: true },
+    { id: 'terminal-bash', disabled: true },
+    { id: 'terminal-pwsh', disabled: true },
+    // `terminal-*` are only the PTY backends; the model-facing `bash` tool is
+    // `persistent-*`, which stays advertised (and then fails) unless the tool
+    // plugins themselves are off.
+    { id: 'persistent-bash', disabled: true },
+    { id: 'persistent-pwsh', disabled: true },
+  ] : [
     // A shared home is the store the gateway writes, watched so a settings
     // change reaches a session already running; a fenced run gets its own file
     // and the account and pi-ai routes stay off.
@@ -132,7 +151,7 @@ async function start(config) {
   ];
   let yaml = patch.map(row => `- ${JSON.stringify(row)}`).join('\n') + '\n';
   const names = new Set();
-  for (const [index, mcp] of (config.mcp ?? []).entries()) {
+  for (const [index, mcp] of (title ? [] : (config.mcp ?? [])).entries()) {
     if (!/^[A-Za-z0-9_-]{1,32}$/.test(mcp.name) || names.has(mcp.name)) throw new Error('Invalid or duplicate MCP server name');
     if (!mcp.command) throw new Error('An MCP server needs a command');
     names.add(mcp.name);
@@ -148,13 +167,14 @@ async function start(config) {
   // The gateway's route registrations (the Providers page's writes) land in
   // the `web` profile; this run's is `sdk`, so a route configured there has
   // no adapter here ("no adapter registered for provider"). Carry the pi-ai
-  // entry across: the credential store is shared, the settings are not.
-  yaml += await gatewayRoutes(config.dshHome);
+  // entry across: the credential store is shared, the settings are not. A
+  // title run keeps its tool switches as the whole patch.
+  if (!title) yaml += await gatewayRoutes(config.dshHome);
   const patchPath = join(runtimeDirectory, 'cordis.patch.yml');
   await writeFile(patchPath, yaml, { mode: 0o600 });
   for (const [key, value] of Object.entries(environment)) if (/key|token|secret/i.test(key) && value) secrets.add(value);
   harness = new DeepSeekHarness({
-    profile: 'sdk', dshHome: config.dshHome, cwd: config.cwd, processCwd: config.cwd,
+    profile: title ? 'sdk-minimal' : 'sdk', dshHome: config.dshHome, cwd: config.cwd, processCwd: config.cwd,
     provider, model: config.model,
     ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
     ...(config.maxTokens === undefined ? {} : { maxTokens: config.maxTokens }),
@@ -177,8 +197,13 @@ async function start(config) {
     for await (const notification of notifications) send({ type: 'notification', ...notification });
   })();
   void notificationTask.catch(error => { if (!stopped) void fail(error); });
-  const permission = await session.run('/permission zeron-managed');
-  if (permission.finishReason === 'error') throw new Error('Unable to enforce DeepSeek session permissions');
+  // `sdk-minimal` carries no commands service or permission presets, so a
+  // title run has nothing to enforce: the text would reach the model as a
+  // prompt instead of routing to `/permission`.
+  if (!title) {
+    const permission = await session.run('/permission zeron-managed');
+    if (permission.finishReason === 'error') throw new Error('Unable to enforce DeepSeek session permissions');
+  }
   send({ type: 'ready', sessionId: session.id });
 }
 

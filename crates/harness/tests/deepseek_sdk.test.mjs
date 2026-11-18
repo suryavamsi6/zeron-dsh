@@ -62,7 +62,8 @@ async function runtime(t, options = {}) {
     clearTimeout(deadline);
     if (!options.home) await rm(home, { recursive: true, force: true });
   });
-  send({ type: 'start', dshHome: home, cwd: here, model: options.model ?? 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource });
+  send({ type: 'start', dshHome: home, cwd: here, model: options.model ?? 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource,
+    ...(options.title ? { title: true, systemPrompt: options.systemPrompt, maxTokens: options.maxTokens } : {}) });
   return { home, send, next, frames, exited };
 }
 
@@ -135,6 +136,22 @@ test('actual SDK and runtime complete a turn through a loopback-only mock model'
   assert.equal(requests[0].path, '/anthropic/v1/messages');
   assert.equal(requests[0].input.model, 'deepseek-flash');
   assert.equal(requests[0].key, 'synthetic-not-live');
+  peer.send({ type: 'stop' });
+  await peer.next('stopped');
+});
+
+test('a title run boots sdk-minimal with no tools, the title system prompt, and the token cap', async t => {
+  const { requests, baseURL } = await mockModel(t);
+  const peer = await runtime(t, { realRuntime: true, baseURL, title: true, systemPrompt: 'TITLE_SYS', maxTokens: 32 });
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: 'Title this session' });
+  assert.equal((await peer.next('done')).finishReason, 'completed');
+  const messages = requests.filter(r => r.path.endsWith('/messages'));
+  assert.equal(messages.length, 1);
+  assert.ok(!messages[0].input.tools?.length, `title run offered tools: ${JSON.stringify(messages[0].input.tools)}`);
+  const system = typeof messages[0].input.system === 'string' ? messages[0].input.system : JSON.stringify(messages[0].input.system);
+  assert.match(system, /TITLE_SYS/);
+  assert.equal(messages[0].input.max_tokens, 32);
   peer.send({ type: 'stop' });
   await peer.next('stopped');
 });
