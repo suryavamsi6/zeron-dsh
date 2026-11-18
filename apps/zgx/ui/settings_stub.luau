@@ -38,6 +38,10 @@ local keys_mode = ui.state("settings_stub_keys", "some")
 -- What `DshPlugins` answers: nil, the two bundles below, or what a test
 -- sets (`{ bundles = …, pnpm = … }`).
 local dsh_plugins_answer = ui.state("settings_stub_dsh_plugins", nil :: any)
+-- What `DshPluginAdd` answers: nil (installed), "pending" (never settles),
+-- another string (the run refused that way), or a table a test sets
+-- (`{ ok = false, refusal = …, log = … }`).
+local dsh_plugin_add = ui.state("settings_stub_dsh_plugin_add", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -273,6 +277,15 @@ local answers: { [string]: (arg: any) -> any } = {
 	end,
 	["DshPluginAdd"] = function(arg: any)
 		plugin_calls:push({ op = "add", value = arg.spec })
+		local over = dsh_plugin_add:peek()
+		if over == "pending" then
+			-- (Still on its way: never settles.)
+			return { done = false, after = function() end }
+		elseif type(over) == "table" then
+			return settled(over)
+		elseif type(over) == "string" then
+			return settled(nil, over)
+		end
 		return settled({ ok = true, exitCode = 0, log = "", refusal = nil })
 	end,
 	["DshPluginRemove"] = function(arg: any)

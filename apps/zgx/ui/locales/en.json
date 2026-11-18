@@ -1793,7 +1793,17 @@
       "active": "Active",
       "not_active": "Not active",
       "needs_pnpm": "Installing needs pnpm 10 or newer on this device.",
-      "applies": "Changes apply to new DeepSeek sessions."
+      "applies": "Changes apply to new DeepSeek sessions.",
+      "add": "Install a plugin",
+      "add_terms": "install add npm github spec path tgz package new",
+      "package": "Package",
+      "how": "An npm name, github:owner/repo#sha, or an absolute path to a folder or .tgz.",
+      "install": "Install",
+      "installing": "Installing…",
+      "installed_ok": "Installed. Applies to new sessions.",
+      "install_failed": "Couldn't install it.",
+      "trust": "Installing runs the package's code on this device. Only install packages you trust.",
+      "needs_client": "Part of this plugin needs DSH Web."
     },
     "projects": {
       "title": "Projects",
