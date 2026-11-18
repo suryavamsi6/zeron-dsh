@@ -83,6 +83,14 @@ local WHERE = { "checkout", "device", "project", "branch" }
 -- Those a session takes only with a message sent (shared.picks keeps them
 -- meanwhile); the rest change it as they're picked.
 local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = true, options = true }
+-- The models that take no picture, by the catalog's value: DeepSeek V4
+-- Pro is text-only where V4.1 Flash takes images (the harness's
+-- `static_models`, crates/harness/src/deepseek/mod.rs); its sidecar
+-- refuses one on another ("This DeepSeek model does not support image
+-- input"), so a picture carried on one is said about before it's sent.
+local NO_IMAGES = { ["deepseek-v4-pro"] = true }
+-- The line above the composer then, Send's accessible description too.
+local NO_IMAGES_LINE = "DeepSeek V4 Pro can't read images. Switch to V4.1 Flash or remove the image."
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
 -- An agent's default model: the row its catalog marks, else its first
@@ -556,6 +564,19 @@ local function Composer(): Node
 			own_notice:set(nil)
 		end
 	end)
+	-- The model picked can't take a picture the draft carries: a send
+	-- would fail in the sidecar, so it's said and held back first.
+	local function image_blocked(): boolean
+		if not NO_IMAGES[model:get() or ""] then
+			return false
+		end
+		for _, item in shared.cargo:get() do
+			if item.kind == "image" then
+				return true
+			end
+		end
+		return false
+	end
 	local notice = ui.computed(function(): any
 		local mine = own_notice:get()
 		if mine then
@@ -566,6 +587,10 @@ local function Composer(): Node
 				return said
 			end
 			return mine
+		end
+		-- A picture the model can't read: said while it stays.
+		if image_blocked() then
+			return { tone = "warning", text = NO_IMAGES_LINE }
 		end
 		-- A new chat that can't start where it's set to: why.
 		local why = where.blocked:get()
@@ -859,6 +884,11 @@ local function Composer(): Node
 		if zeron then
 			shared.text:set("")
 			ZeronCommands.run(zeron, session_id:peek())
+			return
+		end
+		-- A picture the model can't read never goes: the draft stays, the
+		-- line above saying why.
+		if image_blocked() then
 			return
 		end
 		local typed, carried = shared.take()
@@ -1176,6 +1206,17 @@ local function Composer(): Node
 	end, function(): boolean
 		return question:get() ~= nil or approval:get() ~= nil or route.current:get().name == "settings" or route.current:get().name == "plugin"
 	end, "main")
+	-- A send the model can't take (a picture it can't read): Send stays
+	-- still and the draft is kept whole, a tap or a key alike — ahead of
+	-- what sends do to the field (an edit saved and a command of Zeron's
+	-- own are no send to it, so they go on).
+	local dictation_send = dictation.before_send
+	dictation.before_send = function(): boolean
+		if image_blocked() and not editing:peek() and ZeronCommands.of_text(shared.text:peek(), (mention_lists:peek() or {})["/"] or {}) == nil then
+			return true
+		end
+		return dictation_send()
+	end
 
 	local composer_sizes = ui.state("chat_composer_sizes", nil :: ds.ComposerSizes?)
 	local function composer(): Node
