@@ -1793,7 +1793,17 @@
       "active": "已启用",
       "not_active": "未启用",
       "needs_pnpm": "在此设备上安装需要 pnpm 10 或更高版本。",
-      "applies": "更改将应用于新的 DeepSeek 会话。"
+      "applies": "更改将应用于新的 DeepSeek 会话。",
+      "add": "安装插件",
+      "add_terms": "安装 添加 npm github 路径 包 install add package",
+      "package": "包名",
+      "how": "npm 包名、github:owner/repo#sha，或指向文件夹或 .tgz 的绝对路径。",
+      "install": "安装",
+      "installing": "正在安装…",
+      "installed_ok": "已安装。将应用于新会话。",
+      "install_failed": "无法安装。",
+      "trust": "安装会在本设备上运行该包的代码。请仅安装你信任的包。",
+      "needs_client": "此插件的部分内容需要 DSH Web。"
     },
     "projects": {
       "title": "项目",
