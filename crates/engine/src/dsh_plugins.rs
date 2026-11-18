@@ -67,6 +67,7 @@ fn list(home: &Path) -> Result<Value, RpcError> {
                 "name": bundle.name,
                 "spec": bundle.spec,
                 "active": bundle.active,
+                "needsClient": bundle.needs_client,
                 "version": bundle.version,
                 "enginesDsh": bundle.engines_dsh,
                 "description": bundle.description,

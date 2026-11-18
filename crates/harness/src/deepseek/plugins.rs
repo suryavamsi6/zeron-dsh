@@ -32,6 +32,8 @@ pub struct InstalledBundle {
     pub spec: String,
     /// Listed in the profile's `dsh.profile.bundles`, so dsh loads it.
     pub active: bool,
+    /// Some part of it renders in a browser, which zgx cannot host.
+    pub needs_client: bool,
     pub version: Option<String>,
     pub engines_dsh: Option<String>,
     pub description: Option<String>,
@@ -85,6 +87,7 @@ pub fn installed_bundles(home: &Path) -> Result<Vec<InstalledBundle>, HarnessErr
                 name: name.clone(),
                 spec: spec.as_str().unwrap_or_default().to_owned(),
                 active: active.contains(&name.as_str()),
+                needs_client: needs_client(&dir, name, &manifest),
                 version: text(&manifest, "version"),
                 engines_dsh: text(&manifest["engines"], "dsh"),
                 description: text(&manifest, "description"),
@@ -93,6 +96,43 @@ pub fn installed_bundles(home: &Path) -> Result<Vec<InstalledBundle>, HarnessErr
         .collect();
     bundles.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(bundles)
+}
+
+/// Whether some part of the bundle renders in a browser: its own manifest
+/// declares `dsh.client`, or a package its patch file inserts does. Missing
+/// or unreadable files read as no — this describes what is installed, so it
+/// can never fail.
+fn needs_client(dir: &Path, name: &str, manifest: &Value) -> bool {
+    if manifest["dsh"]["client"].is_object() {
+        return true;
+    }
+    let Some(patch) = manifest["dsh"]["bundle"]["patch"].as_str() else {
+        return false;
+    };
+    let Ok(patch) = std::fs::read_to_string(dir.join("node_modules").join(name).join(patch))
+    else {
+        return false;
+    };
+    patch_rows(&patch).any(|row| {
+        row != name
+            && read_json(&dir.join("node_modules").join(row).join("package.json"))
+                .ok()
+                .flatten()
+                .is_some_and(|manifest| manifest["dsh"]["client"].is_object())
+    })
+}
+
+/// The package names a patch file's rows name. A patch is YAML, but the
+/// rows that matter here are flat `name:` entries, so a line scan — not a
+/// YAML dependency — is enough: a trimmed `name:` or `- name:` line
+/// contributes its value, quotes stripped.
+fn patch_rows(patch: &str) -> impl Iterator<Item = &str> {
+    patch.lines().filter_map(|line| {
+        let line = line.trim();
+        let line = line.strip_prefix('-').map(str::trim).unwrap_or(line);
+        line.strip_prefix("name:")
+            .map(|name| name.trim().trim_matches(['\'', '"']))
+    })
 }
 
 /// What to do to the `sdk` profile: install a bundle, or remove one.
@@ -381,6 +421,16 @@ mod tests {
         );
     }
 
+    fn patch(home: &Path, name: &str, contents: &str) {
+        write(
+            &profile_dir(home)
+                .join("node_modules")
+                .join(name)
+                .join("cordis.patch.yml"),
+            contents,
+        );
+    }
+
     #[test]
     fn a_home_without_a_profile_has_no_bundles() {
         let dir = tempfile::tempdir().unwrap();
@@ -412,6 +462,7 @@ mod tests {
                 name: "dsh-hello-plugin".into(),
                 spec: "file:/abs/path".into(),
                 active: true,
+                needs_client: false,
                 version: Some("1.2.3".into()),
                 engines_dsh: Some(">=0.2".into()),
                 description: Some("Says hello".into()),
@@ -434,9 +485,103 @@ mod tests {
         assert!(bundles[0].active);
         assert_eq!(bundles[1].spec, "^2.0.0");
         assert!(!bundles[1].active);
+        assert!(!bundles[1].needs_client);
         assert_eq!(bundles[1].version, None);
         assert_eq!(bundles[1].engines_dsh, None);
         assert_eq!(bundles[1].description, None);
+    }
+
+    #[test]
+    fn a_manifest_with_dsh_client_needs_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        profile(
+            dir.path(),
+            r#"{"dependencies":{"dsh-voice":"^1.0","dsh-plain":"^1.0"},
+                "dsh":{"profile":{"bundles":["dsh-voice","dsh-plain"]}}}"#,
+        );
+        bundle(
+            dir.path(),
+            "dsh-voice",
+            r#"{"name":"dsh-voice","dsh":{"client":{"platform":"web"}}}"#,
+        );
+        // `dsh.client` that is not an object does not count.
+        bundle(
+            dir.path(),
+            "dsh-plain",
+            r#"{"name":"dsh-plain","dsh":{"client":true}}"#,
+        );
+        let bundles = installed_bundles(dir.path()).unwrap();
+        assert!(!bundles[0].needs_client);
+        assert!(bundles[1].needs_client);
+    }
+
+    #[test]
+    fn a_patch_row_with_dsh_client_needs_a_client() {
+        let dir = tempfile::tempdir().unwrap();
+        profile(
+            dir.path(),
+            r#"{"dependencies":{"dsh-voice-bundle":"^1.0"},
+                "dsh":{"profile":{"bundles":["dsh-voice-bundle"]}}}"#,
+        );
+        bundle(
+            dir.path(),
+            "dsh-voice-bundle",
+            r#"{"name":"dsh-voice-bundle",
+                "dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        );
+        patch(
+            dir.path(),
+            "dsh-voice-bundle",
+            "- insert:\n    - id: ui\n      name: '@scope/dsh-voice-ui'\n",
+        );
+        bundle(
+            dir.path(),
+            "@scope/dsh-voice-ui",
+            r#"{"name":"@scope/dsh-voice-ui","dsh":{"client":{"platform":"web"}}}"#,
+        );
+        let bundles = installed_bundles(dir.path()).unwrap();
+        assert!(bundles[0].needs_client);
+    }
+
+    #[test]
+    fn a_bundle_that_patches_itself_in_needs_no_client() {
+        let dir = tempfile::tempdir().unwrap();
+        profile(
+            dir.path(),
+            r#"{"dependencies":{"dsh-hello-plugin":"file:/abs/path"},
+                "dsh":{"profile":{"bundles":["dsh-hello-plugin"]}}}"#,
+        );
+        bundle(
+            dir.path(),
+            "dsh-hello-plugin",
+            r#"{"name":"dsh-hello-plugin",
+                "dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        );
+        patch(
+            dir.path(),
+            "dsh-hello-plugin",
+            "- insert:\n    - id: hello\n      name: 'dsh-hello-plugin'\n",
+        );
+        let bundles = installed_bundles(dir.path()).unwrap();
+        assert!(!bundles[0].needs_client);
+    }
+
+    #[test]
+    fn a_missing_patch_file_needs_no_client() {
+        let dir = tempfile::tempdir().unwrap();
+        profile(
+            dir.path(),
+            r#"{"dependencies":{"dsh-hello-plugin":"file:/abs/path"},
+                "dsh":{"profile":{"bundles":["dsh-hello-plugin"]}}}"#,
+        );
+        bundle(
+            dir.path(),
+            "dsh-hello-plugin",
+            r#"{"name":"dsh-hello-plugin",
+                "dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}"#,
+        );
+        let bundles = installed_bundles(dir.path()).unwrap();
+        assert!(!bundles[0].needs_client);
     }
 
     #[test]
