@@ -108,6 +108,14 @@ pub mod methods {
     pub const DSH_CANCEL_SIGN_IN: &str = "DshCancelSignIn";
     pub const DSH_SIGN_OUT: &str = "DshSignOut";
     pub const DSH_DISCOVER_MODELS: &str = "DshDiscoverModels";
+    /// The dsh bundles installed in this device's `sdk` profile ({} ->
+    /// `{bundles: [{name, spec, active, version, enginesDsh, description}],
+    /// pnpm}`), one installed ({spec} -> `{ok, exitCode, log, refusal}`) and
+    /// one removed ({name} -> the same). The profile is this device's own
+    /// pnpm project, so only its own window manages it.
+    pub const DSH_PLUGINS: &str = "DshPlugins";
+    pub const DSH_PLUGIN_ADD: &str = "DshPluginAdd";
+    pub const DSH_PLUGIN_REMOVE: &str = "DshPluginRemove";
     /// DSH's token meter, read where it lives: the sessions it records ({} ->
     /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
     /// that carries `tokenUsage`) and one session's exact projections
@@ -786,6 +794,10 @@ pub fn local_only(method: &str) -> bool {
             | methods::SET_BUILTIN_PLUGINS
             | methods::POST_NOTIFICATION
             | methods::EXPORT_PLUGIN
+            // dsh bundles: this device's own pnpm profile, never a peer's.
+            | methods::DSH_PLUGINS
+            | methods::DSH_PLUGIN_ADD
+            | methods::DSH_PLUGIN_REMOVE
     )
 }
 

@@ -70,6 +70,7 @@ pub mod repos;
 pub mod rpc;
 pub mod run_journal;
 pub mod dsh_gateway;
+pub mod dsh_plugins;
 pub mod dsh_providers;
 pub mod dsh_usage;
 pub mod runner;

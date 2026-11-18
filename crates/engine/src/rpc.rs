@@ -3312,6 +3312,18 @@ impl RpcService for EngineRpc {
         if crate::dsh_gateway::handles(method) {
             return self.provider_gateway(method, params).await;
         }
+        // The dsh bundles in this device's `sdk` profile: its own pnpm
+        // project, so only its own window manages it.
+        if crate::dsh_plugins::handles(method) {
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: DeepSeek plugins are managed from this device's own window"
+                )));
+            }
+            let harness = zeron_harness::deepseek::DeepSeekHarness::new();
+            let value = crate::dsh_plugins::call(&harness, method, &params).await?;
+            return Ok(RpcReply::Value(value));
+        }
         // Device-addressed routing: forward calls that target another device over its
         // relay. The target compares the id to its own, so forwards cannot loop.
         if forwardable(method)
