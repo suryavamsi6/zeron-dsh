@@ -109,7 +109,28 @@ fn only_verified_official_models_and_efforts_are_accepted() {
         configuration(&request, dir.path(), "session").unwrap()["reasoningEffort"],
         "max"
     );
-    assert!(!crate::supports_titles(HarnessId::DeepSeek));
+    assert!(crate::supports_titles(HarnessId::DeepSeek));
+}
+
+#[test]
+fn a_title_run_takes_a_tool_less_minimal_config_and_refuses_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    request
+        .env
+        .insert("DEEPSEEK_API_KEY".into(), "synthetic-deepseek".into());
+    let config = title_configuration(&request, dir.path(), "session").unwrap();
+    assert_eq!(config["title"], true);
+    assert_eq!(config["systemPrompt"], crate::TITLE_INSTRUCTIONS);
+    assert_eq!(config["maxTokens"], 32);
+    assert_eq!(config["mcp"], json!([]));
+    assert_eq!(config["resume"], false);
+    assert!(config.get("reasoningEffort").is_none());
+    request.plan = true;
+    assert!(matches!(
+        title_configuration(&request, dir.path(), "session"),
+        Err(HarnessError::Protocol(_))
+    ));
 }
 
 #[test]
