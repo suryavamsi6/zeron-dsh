@@ -5,8 +5,10 @@
 -- it (tests/settings_in_place.test.luau).
 --
 -- What was asked, in order, is `settings_stub_calls` (a state, "name" or
--- "name:detail" each). `ui.command`s change the data as the edge would on
--- its own, or make the next change fail:
+-- "name:detail" each), and the plugin operations in
+-- `settings_stub_dsh_plugin_calls` (a state, `{ op, value }` each).
+-- `ui.command`s change the data as the edge would on its own, or make the
+-- next change fail:
 --   settings_stub.sign_in          signed in as Ada, in org_1 (else signed out)
 --   settings_stub.restoring        the engine hasn't answered yet
 --   settings_stub.signed_out       the engine says signed out
@@ -152,6 +154,9 @@ local chatgpt_accounts = ui.state("settings_stub_chatgpt_accounts", nil :: any)
 local codex_fixture = ui.state("settings_stub_codex", nil :: any)
 local codex_accounts = ui.state("settings_stub_codex_accounts", nil :: any)
 local unscoped_chatgpt = ui.state("settings_stub_chatgpt_unscoped", false)
+-- The plugin operations asked for, in order: `{ op = "add", value = "…" }`
+-- or `{ op = "remove", value = "…" }`.
+local plugin_calls = ui.state("settings_stub_dsh_plugin_calls", {} :: { any })
 
 local answers: { [string]: (arg: any) -> any } = {
 	-- The provider page's gateway calls (crates/engine/src/dsh_gateway.rs):
@@ -239,6 +244,33 @@ local answers: { [string]: (arg: any) -> any } = {
 			return failed("no ops")
 		end
 		return settled(nil)
+	end,
+	-- The dsh bundles in this computer's `sdk` profile, and the two
+	-- operations that change it (crates/engine/src/dsh_plugins.rs): one
+	-- active bundle with a description, one inactive without.
+	["DshPlugins"] = function()
+		return settled({
+			bundles = {
+				{
+					name = "dsh-hello-plugin",
+					spec = "^0.1.0",
+					active = true,
+					version = "0.1.0",
+					enginesDsh = ">=0.2.0 <0.3.0",
+					description = "Says hello",
+				},
+				{ name = "left-pad", spec = "^1.3.0", active = false, version = "1.3.0" },
+			},
+			pnpm = true,
+		})
+	end,
+	["DshPluginAdd"] = function(arg: any)
+		plugin_calls:push({ op = "add", value = arg.spec })
+		return settled({ ok = true, exitCode = 0, log = "", refusal = nil })
+	end,
+	["DshPluginRemove"] = function(arg: any)
+		plugin_calls:push({ op = "remove", value = arg.name })
+		return settled({ ok = true, exitCode = 0, log = "", refusal = nil })
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })
