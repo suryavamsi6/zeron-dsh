@@ -24,12 +24,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: '24'
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 10
       - name: Install the pinned official SDK
         run: npm ci --prefix crates/harness/src/deepseek --ignore-scripts --no-audit --no-fund
       - name: Mock-backed SDK contract
         env:
           ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek
-        run: node --test crates/harness/tests/deepseek_sdk.test.mjs
+        run: node --test crates/harness/tests/deepseek_sdk.test.mjs crates/harness/tests/deepseek_plugins.test.mjs
       - name: Record the pass
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
