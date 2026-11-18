@@ -76,6 +76,27 @@ MCP servers from `RunRequest::mcp`/`extra_mcp` are composed as
 `@deepseek-ai/dsh-mcp-client` stdio entries (`failOnStartupError: true`). Only those
 supplied by the host are mounted; no ambient MCP configuration is inherited.
 
+## dsh plugins
+
+The `sdk` profile is a plain pnpm project at `<harness home>/profiles/sdk`: its
+`dependencies` are the installed bundles and `dsh.profile.bundles` names the ones
+dsh loads, so listing (Settings → DeepSeek plugins) reads two manifests per
+bundle — no pnpm, no dsh, no writes. A bundle is reported `needsClient` when its
+own manifest, or a package its patch file inserts, declares `dsh.client`: some
+part of it renders in a browser, which zgx cannot host.
+
+Adds and removes run dsh's own `plugin` subcommand —
+`dsh plugin --profile sdk add|remove <spec>` on the pinned runtime — one at a
+time, since the profile is a single `node_modules`. They need pnpm 10 or newer
+on PATH (the spec is validated before any process exists), and a bundle whose
+`engines.dsh` refuses the bundled version reports the refusal. Changes land on
+sessions begun after; the agent's own `tool-plugin-manager` stays patched off,
+so a session cannot change the profile it runs on. dsh's
+[publishing guide](https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/docs/user/develop/basic/publish.md)
+and
+[plugin-management reference](https://github.com/deepseek-ai/deepseek-harness/blob/39163dd30f703a79079e2d2446545cff3c453738/apps/cli/reference/README.md#plugin-management)
+cover the bundle format and the subcommand.
+
 ## Sessions, interruption, and steering
 
 - `RunRequest::resume` resumes through `session/resume`; a fresh run mints a session id
@@ -91,8 +112,11 @@ supplied by the host are mounted; no ambient MCP configuration is inherited.
   events. Assistant text and reasoning are replayed from the persisted
   `assistant/message` stream records in order (not live token deltas); tool calls,
   results, subagent traffic, usage, and turn ends are normalized from the same events.
-- Titles are not supported (`supports_titles(DeepSeek) == false`): the SDK exposes no
-  restricted title profile, so a title request fails instead of running the coding agent.
+- Titles run on the standalone `sdk-minimal` profile, not `sdk`: `run_title`
+  re-points the start config (`title`) so the shim's whole patch is the tool
+  switches that disable every agent tool the minimal profile carries, with the
+  shared title instructions as its system prompt and a 32-token cap. A title
+  run takes no MCP servers, no resume, and no reasoning effort.
 
 ## Verification
 
