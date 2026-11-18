@@ -1,12 +1,14 @@
 -- Settings → DeepSeek plugins (screens/settings/dsh_plugins): the dsh
--- bundles installed for DeepSeek sessions, and installing one from a spec.
--- On the shell in ui/shell_fixture.luau, `DshPlugins` and `DshPluginAdd`
--- answered by ui/settings_stub.luau (`settings_stub_dsh_plugins`,
--- `settings_stub_dsh_plugin_add`; the ops asked for are in
--- `settings_stub_dsh_plugin_calls`).
+-- bundles installed for DeepSeek sessions, installing one from a spec, and
+-- removing one after asking once. On the shell in ui/shell_fixture.luau,
+-- `DshPlugins`, `DshPluginAdd` and `DshPluginRemove` answered by
+-- ui/settings_stub.luau (`settings_stub_dsh_plugins`,
+-- `settings_stub_dsh_plugin_add`, `settings_stub_dsh_plugin_remove`; the
+-- ops asked for are in `settings_stub_dsh_plugin_calls`).
 
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
+local REMOVE = `role:dialog "Remove “dsh-hello-plugin”?"`
 
 local function open(answer: any): any
 	local app = mount("shell_fixture.luau")
@@ -78,6 +80,17 @@ local function added(app: any): { any }
 	return (app:state("settings_stub_dsh_plugin_calls") :: any) or {}
 end
 
+-- The `DshPluginRemove` ops among them.
+local function removed(app: any): { any }
+	local out = {}
+	for _, op in added(app) do
+		if op.op == "remove" then
+			table.insert(out, op)
+		end
+	end
+	return out
+end
+
 test("DeepSeek plugins says on a bundle's row when it needs DSH Web", function()
 	local app = open({
 		bundles = {
@@ -143,6 +156,85 @@ test("DeepSeek plugins says why an install failed, from the refusal or the log's
 		log = "run-1\nrun-2\nrun-3\nrun-4\nrun-5\nrun-6\nrun-7\nrun-8",
 	})
 	app:click(`{PAGE} >> role:button "Install"`)
+	app:frames(10)
+	expect(app:tree(PAGE)).to_contain("run-8")
+	expect(app:tree(PAGE)).to_contain("run-3")
+	expect(app:tree(PAGE)).never.to_contain("run-2")
+end)
+
+test("DeepSeek plugins asks once before removing a bundle, naming it", function()
+	local app = open()
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	expect(app:has(REMOVE)).to_be(true)
+	expect(app:has(`{REMOVE} >> "New DeepSeek sessions won't load it."`)).to_be(true)
+	expect(app:has(`{REMOVE} >> role:button "Cancel"`)).to_be(true)
+	expect(app:has(`{REMOVE} >> role:button "Remove plugin"`)).to_be(true)
+	-- Asked about, not yet run.
+	expect(#removed(app)).to_be(0)
+end)
+
+test("DeepSeek plugins cancels a remove on Escape, asking nothing of the host", function()
+	local app = open()
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	expect(app:has(REMOVE)).to_be(true)
+	app:key("Escape")
+	app:frames(10)
+	expect(#removed(app)).to_be(0)
+	expect(asked(app, "DshPlugins")).to_be(1)
+end)
+
+test("DeepSeek plugins removes a bundle on Remove plugin and asks the list again", function()
+	local app = open()
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	app:click(`{REMOVE} >> role:button "Remove plugin"`)
+	app:frames(10)
+	local ops = removed(app)
+	expect(#ops).to_be(1)
+	expect(ops[1].value).to_be("dsh-hello-plugin")
+	expect(asked(app, "DshPlugins")).to_be(2)
+end)
+
+test("DeepSeek plugins keeps a bundle's Remove off while its remove runs", function()
+	local app = open()
+	app:set_state("settings_stub_dsh_plugin_remove", "pending")
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	app:click(`{REMOVE} >> role:button "Remove plugin"`)
+	app:frames(10)
+	expect(#removed(app)).to_be(1)
+	expect(app:tree(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)).to_contain("disabled")
+	-- The other bundle's is still on.
+	expect(app:tree(`{PAGE} >> role:button "Remove left-pad"`)).never.to_contain("disabled")
+end)
+
+test("DeepSeek plugins says why a remove failed, under the bundle's row", function()
+	local app = open()
+	app:set_state("settings_stub_dsh_plugin_remove", {
+		ok = false,
+		exitCode = 1,
+		refusal = "This plugin is in use by a running session.",
+		log = "line one\nline two",
+	})
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	app:click(`{REMOVE} >> role:button "Remove plugin"`)
+	app:frames(10)
+	-- The refusal said under the row, not the log; the list not asked again.
+	expect(app:tree(PAGE)).to_contain("This plugin is in use by a running session.")
+	expect(app:tree(PAGE)).never.to_contain("line two")
+	expect(asked(app, "DshPlugins")).to_be(1)
+	-- With no refusal, the run's last six log lines instead.
+	app:set_state("settings_stub_dsh_plugin_remove", {
+		ok = false,
+		exitCode = 1,
+		log = "run-1\nrun-2\nrun-3\nrun-4\nrun-5\nrun-6\nrun-7\nrun-8",
+	})
+	app:click(`{PAGE} >> role:button "Remove dsh-hello-plugin"`)
+	app:frames(30)
+	app:click(`{REMOVE} >> role:button "Remove plugin"`)
 	app:frames(10)
 	expect(app:tree(PAGE)).to_contain("run-8")
 	expect(app:tree(PAGE)).to_contain("run-3")
