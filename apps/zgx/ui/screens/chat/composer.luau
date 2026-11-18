@@ -89,8 +89,6 @@ local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = tru
 -- refuses one on another ("This DeepSeek model does not support image
 -- input"), so a picture carried on one is said about before it's sent.
 local NO_IMAGES = { ["deepseek-v4-pro"] = true }
--- The line above the composer then, Send's accessible description too.
-local NO_IMAGES_LINE = "DeepSeek V4 Pro can't read images. Switch to V4.1 Flash or remove the image."
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
 -- An agent's default model: the row its catalog marks, else its first
@@ -740,7 +738,7 @@ local function Composer(): Node
 		end
 		-- A picture the model can't read: said while it stays.
 		if image_blocked() then
-			return { tone = "warning", text = NO_IMAGES_LINE }
+			return { tone = "warning", text = ui.t("chat.composer.no_images"):get() }
 		end
 		-- A new chat that can't start where it's set to: why.
 		local why = where.blocked:get()
