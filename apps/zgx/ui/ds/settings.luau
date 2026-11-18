@@ -69,6 +69,9 @@ export type PageProps = {
 	-- is about). Short of room, it goes under the title either way.
 	trail: Node?,
 	trail_top: boolean?,
+	-- A narrower measure for a page with compact cards.
+	measure: number?,
+	compact: boolean?,
 	-- Something that stands beside the page's groups (a profile's card, a
 	-- preview of what the fields make): a column of `aside_w` at the right,
 	-- its top on the first group's; `aside_top`, over the groups instead,
@@ -134,7 +137,7 @@ function M.Page(props: PageProps): Node
 	return ui.column {
 		w_full = true,
 		-- (A theme number, read as it is built: max_w takes points.)
-		max_w = ui.theme.get("zeron.settings.measure") :: number?,
+		max_w = props.measure or (ui.theme.get("zeron.settings.measure") :: number?),
 		gap = "$space.6",
 		ui.row {
 			-- Inset to the rows' text, as a section's title is: the page's
@@ -154,7 +157,7 @@ function M.Page(props: PageProps): Node
 				gap = "$space.1",
 				ui.text { props.title, heading = 1, text_size = "$font.size.xl", line_height = "$font.line.xl", weight = "$font.weight.semibold", color = "$text.primary" },
 				if props.description
-					then ui.text { props.description, text_size = "$font.size.md", line_height = 20, color = "$text.secondary", wrap = true }
+					then ui.text { props.description, text_size = if props.compact then "$font.size.sm" else "$font.size.md", line_height = if props.compact then "$font.line.sm" else 20, color = "$text.secondary", wrap = true }
 					else nil,
 			},
 			if props.trail and props.trail_top
@@ -387,6 +390,8 @@ function M.truncated_row_h(lead: number?): number
 end
 
 export type RowProps = {
+	-- Compact provider-card rows retain the same controls at a smaller density.
+	compact: boolean?,
 	label: string | Message | () -> string,
 	description: (string | Message | () -> string)?,
 	icon: Icon.Name?,
@@ -428,6 +433,10 @@ export type RowProps = {
 }
 
 function M.Row(props: RowProps): Node
+	local label_size = if props.compact then "$font.size.sm" else "$font.size.md"
+	local label_line = if props.compact then "$font.line.sm" else "$font.line.md"
+	local detail_size = if props.compact then "$font.size.xs" else "$font.size.sm"
+	local detail_line = if props.compact then "$font.line.xs" else "$font.line.sm"
 	local text = ui.column {
 		grow = 1,
 		min_w = 0,
@@ -441,8 +450,8 @@ function M.Row(props: RowProps): Node
 					props.label,
 					truncate = props.truncate,
 					grow = if props.truncate then 1 else nil,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
+					text_size = label_size,
+					line_height = label_line,
 					weight = "$font.weight.medium",
 					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
 				}
@@ -454,15 +463,15 @@ function M.Row(props: RowProps): Node
 					grow = if props.badge then nil else 1,
 					shrink = 1,
 					min_w = 0,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
+					text_size = label_size,
+					line_height = label_line,
 					weight = "$font.weight.medium",
 					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
 				}
 				else ui.text {
 					props.label,
-					text_size = "$font.size.md",
-					line_height = "$font.line.md",
+					text_size = label_size,
+					line_height = label_line,
 					weight = "$font.weight.medium",
 					color = if props.danger then "$zeron.tone.danger.ink" else "$text.primary",
 					wrap = true,
@@ -470,22 +479,22 @@ function M.Row(props: RowProps): Node
 			props.badge,
 		},
 		if props.byline and props.truncate
-			then FadeText { props.byline, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+			then FadeText { props.byline, min_w = 0, text_size = detail_size, line_height = detail_line, color = "$text.tertiary" }
 			elseif props.byline
-			then ui.text { props.byline, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.byline, text_size = detail_size, line_height = detail_line, color = "$text.tertiary", wrap = true }
 			else nil,
 		if props.description and props.private_description
 			then PrivateText {
 				props.description,
 				truncate = props.truncate,
-				text_size = "$font.size.sm",
-				line_height = "$font.line.sm",
+				text_size = detail_size,
+				line_height = detail_line,
 				color = "$text.tertiary",
 			}
 			elseif props.description and props.truncate
-			then FadeText { props.description, min_w = 0, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
+			then FadeText { props.description, min_w = 0, text_size = detail_size, line_height = detail_line, color = "$text.tertiary" }
 			elseif props.description
-			then ui.text { props.description, text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary", wrap = true }
+			then ui.text { props.description, text_size = detail_size, line_height = detail_line, color = "$text.tertiary", wrap = true }
 			else nil,
 		if props.detail
 			then ui.show(function(): boolean
@@ -501,8 +510,8 @@ function M.Row(props: RowProps): Node
 					end,
 					grow = 1,
 					min_w = 0,
-					text_size = "$font.size.sm",
-					line_height = "$font.line.sm",
+					text_size = detail_size,
+					line_height = detail_line,
 					color = "$text.tertiary",
 					wrap = true,
 				},
@@ -531,7 +540,7 @@ function M.Row(props: RowProps): Node
 			items = "center",
 			shrink = 0,
 			color = "$text.tertiary",
-			if props.value then ui.text { props.value, text_size = "$font.size.md", color = "$text.secondary" } else nil,
+			if props.value then ui.text { props.value, text_size = label_size, color = "$text.secondary" } else nil,
 			-- The chevron's stroke ends at 15/24 of its box (the icon's own
 			-- drawing), so the box is moved out by the rest: its ink, not its
 			-- box, sits on the edge the row's other controls end on.
@@ -543,9 +552,9 @@ function M.Row(props: RowProps): Node
 	end
 	local row: { [any]: any } = {
 		w_full = true,
-		min_h = "$zeron.settings.row",
-		px = "$space.4",
-		py = "$space.3",
+		min_h = if props.compact then ui.raw(if props.on_click then 49 else 53, "compact provider card row") else "$zeron.settings.row",
+		px = if props.compact then ui.raw(15, "compact provider inset") else "$space.4",
+		py = if props.compact then "$space.2" else "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",
 		disabled = props.disabled,
 		opacity = if props.disabled
@@ -597,7 +606,7 @@ function M.Row(props: RowProps): Node
 			grow = 1,
 			basis = 0,
 			min_w = if keeps_trail then 0 else MIN_TEXT,
-			gap = "$space.3",
+			gap = if props.compact then ui.raw(10, "compact provider lead gap") else "$space.3",
 			items = "center",
 			lead,
 			text,

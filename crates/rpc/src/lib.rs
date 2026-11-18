@@ -123,7 +123,19 @@ pub mod methods {
     /// provider, so it is Zeron's surface rather than DSH's.
     pub const DSH_CHATGPT_START: &str = "DshChatgptStart";
     pub const DSH_CHATGPT_CANCEL: &str = "DshChatgptCancel";
+    pub const DSH_CHATGPT_SELECT: &str = "DshChatgptSelect";
+    pub const DSH_CHATGPT_ACCOUNTS: &str = "DshChatgptAccounts";
+    pub const DSH_CHATGPT_USE_RESET: &str = "DshChatgptUseReset";
+    pub const DSH_CHATGPT_REMOVE: &str = "DshChatgptRemoveAccount";
     pub const DSH_CHATGPT_STATUS: &str = "DshChatgptStatus";
+    /// Sign in to an OAuth-capable provider reported by the DSH gateway
+    /// (`provider`, plus method for start; promptId/value for respond).
+    pub const DSH_PROVIDER_AUTH_STATUS: &str = "DshProviderAuthStatus";
+    pub const DSH_PROVIDER_AUTH_START: &str = "DshProviderAuthStart";
+    pub const DSH_PROVIDER_AUTH_CANCEL: &str = "DshProviderAuthCancel";
+    pub const DSH_PROVIDER_AUTH_RESPOND: &str = "DshProviderAuthRespond";
+    pub const DSH_PROVIDER_AUTH_SELECT: &str = "DshProviderAuthSelect";
+    pub const DSH_PROVIDER_AUTH_REMOVE: &str = "DshProviderAuthRemove";
     pub const LIST_SKILLS: &str = "ListSkills";
     pub const LIST_COMMANDS: &str = "ListCommands";
     pub const QUEUE_COMMAND: &str = "QueueCommand";

@@ -147,6 +147,11 @@ end
 -- Which key refs the stub has stored, and the ChatGPT sign-in's state.
 local keys: { [string]: boolean } = {}
 local chatgpt = { running = false, authorized = false }
+local chatgpt_fixture = ui.state("settings_stub_chatgpt", nil :: any)
+local chatgpt_accounts = ui.state("settings_stub_chatgpt_accounts", nil :: any)
+local codex_fixture = ui.state("settings_stub_codex", nil :: any)
+local codex_accounts = ui.state("settings_stub_codex_accounts", nil :: any)
+local unscoped_chatgpt = ui.state("settings_stub_chatgpt_unscoped", false)
 
 local answers: { [string]: (arg: any) -> any } = {
 	-- The provider page's gateway calls (crates/engine/src/dsh_gateway.rs):
@@ -158,6 +163,12 @@ local answers: { [string]: (arg: any) -> any } = {
 				provider = "deepseek-official",
 				displayName = "DeepSeek",
 				settingsNs = "llm-deepseek",
+			},
+			{
+				provider = "deepseek",
+				displayName = "DeepSeek",
+				settingsNs = "llm-pi-ai",
+				nativeAuth = { env = { "DEEPSEEK_API_KEY" }, oauth = false },
 			},
 			{
 				provider = "opencode-go",
@@ -172,7 +183,7 @@ local answers: { [string]: (arg: any) -> any } = {
 				nativeAuth = { env = {}, oauth = true },
 			},
 			-- The catalog names these by their route id; the page renames
-			-- them (and hides the Codex duplicate).
+			-- them while keeping the separate Codex route.
 			{
 				provider = "openai-codex",
 				displayName = "openai-codex",
@@ -229,6 +240,23 @@ local answers: { [string]: (arg: any) -> any } = {
 		end
 		return settled(nil)
 	end,
+	["DshChatgptAccounts"] = function(arg: any)
+		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })
+	end,
+	["DshChatgptSelect"] = function(arg: any)
+		local next = {}
+		local store = if arg.provider == "openai-codex" then codex_accounts else chatgpt_accounts
+		for _, a in store:peek() or {} do
+			local copy = table.clone(a)
+			copy.active = a.id == arg.accountId
+			table.insert(next, copy)
+		end
+		store:set(next)
+		return settled({})
+	end,
+	["DshChatgptUseReset"] = function(_arg: any)
+		return settled({ outcome = "nothing_to_reset" })
+	end,
 	["DshChatgptStart"] = function()
 		if refuse:peek() then
 			return failed("refused")
@@ -236,8 +264,11 @@ local answers: { [string]: (arg: any) -> any } = {
 		chatgpt.running = true
 		return settled({ url = "https://auth.openai.com/authorize?probe=1", instructions = "" })
 	end,
-	["DshChatgptStatus"] = function()
-		return settled({ authorized = chatgpt.authorized, running = chatgpt.running, url = nil })
+	["DshChatgptStatus"] = function(arg: any)
+		local fixture = if arg.provider == "openai-codex" then codex_fixture else chatgpt_fixture
+		local status = table.clone(fixture:peek() or { authorized = false, running = chatgpt.running, url = nil })
+		status.provider = if unscoped_chatgpt:peek() then nil else arg.provider
+		return settled(status)
 	end,
 	["DshChatgptCancel"] = function()
 		chatgpt.running = false

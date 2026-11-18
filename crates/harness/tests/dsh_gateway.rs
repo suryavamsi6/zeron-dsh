@@ -386,3 +386,31 @@ async fn a_declared_route_appears_in_the_catalog_and_survives_a_restart() {
     );
     gateway.shutdown().await;
 }
+
+#[tokio::test]
+#[ignore = "starts a real dsh web service from the pinned SDK"]
+async fn chatgpt_account_remotes_bind_on_the_gateway() {
+    let Some(sdk) = sdk_root() else { return };
+    let home = tempfile::tempdir().unwrap();
+    let gateway = Gateway::new(&sdk, home.path());
+    let accounts = gateway.call("zeron-chatgpt/accounts", serde_json::json!({})).await.unwrap();
+    assert_eq!(accounts["provider"], "openai");
+    assert_eq!(accounts["accounts"], serde_json::json!([]));
+    let status = gateway.call("zeron-chatgpt/status", serde_json::json!({"provider": "openai-codex"})).await.unwrap();
+    assert_eq!(status["provider"], "openai-codex");
+    assert_eq!(status["authorized"], false);
+    let codex = gateway.call("zeron-chatgpt/accounts", serde_json::json!({"provider": "openai-codex"})).await.unwrap();
+    assert_eq!(codex["provider"], "openai-codex");
+    assert_eq!(codex["accounts"], serde_json::json!([]));
+    let select = gateway.call("zeron-chatgpt/select", serde_json::json!({ "accountId": "missing" })).await.unwrap_err().to_string();
+    assert!(select.contains("ChatGPT account was not found"), "{select}");
+    let reset = gateway.call("zeron-chatgpt/useReset", serde_json::json!({
+        "accountId": "missing", "creditId": "missing", "idempotencyKey": "synthetic", "provider": "openai-codex"
+    })).await.unwrap_err().to_string();
+    assert!(reset.contains("Account or reset is unavailable"), "{reset}");
+    let started = gateway.call("zeron-chatgpt/start", serde_json::json!({"provider": "openai-codex"})).await.unwrap();
+    assert!(started["url"].as_str().unwrap().starts_with("https://auth.openai.com/oauth/authorize?"));
+    let cancel = gateway.call("zeron-chatgpt/cancel", serde_json::json!({"provider": "openai-codex"})).await.unwrap();
+    assert_eq!(cancel["cancelled"], true);
+    gateway.shutdown().await;
+}

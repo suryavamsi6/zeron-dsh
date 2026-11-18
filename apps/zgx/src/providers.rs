@@ -47,14 +47,57 @@ pub fn install(host: &ScriptHost) {
             .unwrap_or_else(|| "deepseek".to_string());
         answer(engine::get().call("ListModels", json!({ "harness": harness })).await)
     });
-    host.async_action("DshChatgptStart", |_| async {
-        answer(engine::get().call("DshChatgptStart", json!({})).await)
+    host.async_action("DshChatgptStart", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptStart", params).await)
     });
-    host.async_action("DshChatgptStatus", |_| async {
-        answer(engine::get().call("DshChatgptStatus", json!({})).await)
+    host.async_action("DshChatgptStatus", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptStatus", params).await)
     });
-    host.async_action("DshChatgptCancel", |_| async {
-        answer(engine::get().call("DshChatgptCancel", json!({})).await)
+    host.async_action("DshChatgptSelect", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptSelect", params).await)
+    });
+    host.async_action("DshChatgptAccounts", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptAccounts", params).await)
+    });
+    host.async_action("DshChatgptRemoveAccount", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptRemoveAccount", params).await)
+    });
+    host.async_action("DshChatgptUseReset", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptUseReset", params).await)
+    });
+    host.async_action("DshChatgptCancel", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshChatgptCancel", params).await)
+    });
+    host.async_action("DshProviderAuthStatus", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthStatus", params).await)
+    });
+    host.async_action("DshProviderAuthStart", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthStart", params).await)
+    });
+    host.async_action("DshProviderAuthCancel", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthCancel", params).await)
+    });
+    host.async_action("DshProviderAuthRespond", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthRespond", params).await)
+    });
+    host.async_action("DshProviderAuthSelect", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthSelect", params).await)
+    });
+    host.async_action("DshProviderAuthRemove", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshProviderAuthRemove", params).await)
     });
 }
 
