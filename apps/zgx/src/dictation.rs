@@ -511,6 +511,9 @@ mod tests {
         s.poll();
         // The first slot, at once (what came before listening isn't in it).
         assert_eq!(s.take_levels(), Some(vec![0.0]));
+        // The slot clock started in that poll; time the rest from here so a
+        // slow runner's overshoot can be checked against the clock below.
+        let since = Instant::now();
         // Within the slot nothing is published again, and the loop waits
         // for the next slot rather than its usual beat.
         level.set(0.1);
@@ -520,8 +523,15 @@ mod tests {
         assert!(wait <= Duration::from_millis(61) && wait > Duration::ZERO, "{wait:?}");
         std::thread::sleep(meter::STEP);
         s.poll();
+        let elapsed = since.elapsed();
         let bars = s.take_levels().unwrap();
-        assert_eq!(bars.len(), 2);
+        // A slow runner can overshoot the slot, and the meter then fills every
+        // slot that came due: the count follows the elapsed time.
+        assert!(bars.len() >= 2, "{bars:?}");
+        assert!(
+            bars.len() as u128 <= elapsed.as_millis() / meter::STEP.as_millis() + 2,
+            "{bars:?} after {elapsed:?}"
+        );
         assert_eq!(bars[0], meter::normalize(0.1));
         // Finalizing holds them: no more slots.
         events.borrow_mut().push_back(Event::Finalizing);

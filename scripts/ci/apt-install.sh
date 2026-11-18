@@ -4,7 +4,9 @@
 #   usage: APT_DEB_DIR=~/apt-debs [APT_RECOMMENDS=1] apt-install.sh pkg...
 # Hosted-runner apt mirrors occasionally stall for minutes (observed 7-14 min
 # for a ~400 MB install); a bounded download retry + actions/cache of the .debs
-# makes the common case ~20 s and the bad case bounded.
+# makes the common case ~20 s and the bad case bounded: 6 attempts of 300 s,
+# each retry preceded by a backoff and a fresh 120 s index update, so at worst
+# 120 + 6*300 + 5*120 + 150 s = ~45 min (the job's timeout is 120 min).
 set -uo pipefail
 dir=${APT_DEB_DIR:-$HOME/apt-debs}
 mkdir -p "$dir/partial"
@@ -21,21 +23,36 @@ APT=(-y -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::Languages
      -o "Dir::Cache::archives=$dir" -o APT::Sandbox::User=root -o DPkg::Lock::Timeout=120)
 [ "${APT_RECOMMENDS:-0}" = 1 ] || APT+=(--no-install-recommends)
 
+# Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
+update() {
+  sudo timeout 120 apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
+    -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-" 2>&1 | ts
+}
+
 log "cached debs: $(ls "$dir"/*.deb 2>/dev/null | wc -l)"
 log "update"
-# Only Ubuntu packages are needed; unrelated runner repositories can be out of sync.
-sudo timeout 120 apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=15 \
-  -o Dir::Etc::sourcelist="sources.list.d/ubuntu.sources" -o Dir::Etc::sourceparts="-" 2>&1 | ts
+update
 
 ok=0
-for attempt in 1 2 3 4; do
+for attempt in 1 2 3 4 5 6; do
   log "download attempt $attempt"
-  sudo timeout 150 apt-get install "${APT[@]}" --download-only "$@" 2>&1 | ts
+  sudo timeout 300 apt-get install "${APT[@]}" --download-only "$@" 2>&1 | ts
   if [ "${PIPESTATUS[0]}" = 0 ]; then ok=1; break; fi
+  if [ "$attempt" -lt 6 ]; then
+    log "download attempt $attempt failed; retrying in $((attempt * 10))s"
+    sleep $((attempt * 10))
+    log "update"
+    update
+  fi
 done
 [ "$ok" = 1 ] || { log "download failed"; exit 1; }
 log "install"
 sudo apt-get install "${APT[@]}" -qq "$@" 2>&1 | ts
 rc=${PIPESTATUS[0]}
+if [ "$rc" != 0 ]; then
+  log "install failed rc=$rc; retrying"
+  sudo apt-get install "${APT[@]}" -qq "$@" 2>&1 | ts
+  rc=${PIPESTATUS[0]}
+fi
 log "done rc=$rc"
 exit "$rc"
