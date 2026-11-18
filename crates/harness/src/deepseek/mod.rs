@@ -1,4 +1,5 @@
 pub mod gateway;
+pub mod plugins;
 mod normalize;
 #[cfg(test)]
 mod tests;
