@@ -7,7 +7,9 @@
 -- in place; a read to its result; an older doc's edit to its diff at once;
 -- a command the chat kept the end of to those ten lines, then all of them
 -- from the device that ran it (a quiet "Loading…" while they come, a plain
--- line when that device is offline, too old, or didn't keep them).
+-- line when that device is offline, too old, or didn't keep them); a web
+-- search to its result's sources, each a link (its title and its host), one
+-- finding none and a failed one to no list.
 -- What was fetched is kept: opened again, or the work made again as a
 -- reload makes it, nothing is fetched twice.
 
@@ -17,7 +19,7 @@ local function work(): any
 	app:frames(10)
 	expect(app:error()).to_be_nil()
 	-- (Settled work folds to its line: open it.)
-	app:click('role:button "Read 1 file · ran 6 commands · edited 2 files · 1 failed"')
+	app:click('role:button "Read 1 file · ran 6 commands · edited 2 files · searched the web 4 times · 1 failed"')
 	app:frames(30)
 	return app
 end
@@ -136,6 +138,40 @@ test("a read opens to its result; an older doc's edit to its diff at once", func
 	open_row(app, "Edited old.txt")
 	expect(app:has('.tool-diff >> ~"after"')).to_be(true)
 	expect(fetched(app)).to_be(0)
+end)
+
+test("a web search opens to its result's sources as links, each its title and its host, a url once", function()
+	local app = work()
+	open_row(app, "Searched the web zeron dsh web_search")
+	expect(app:has('.tool-output >> ~"Sources:"')).to_be(true)
+	expect(app:count(".tool-sources >> .tool-source")).to_be(3)
+	expect(app:has('.tool-sources >> ~"Zeron documentation"')).to_be(true)
+	expect(app:has('.tool-sources >> ~"zeron.sh"')).to_be(true)
+	expect(app:has('.tool-sources >> ~"github.com"')).to_be(true)
+	expect(app:has('.tool-sources >> ~"blog.example.com"')).to_be(true)
+	-- A source opens where the chat's links do (the system's: the fixture
+	-- sets no opener of its own).
+	app:click('role:link "deepseek-ai/dsh on GitHub"')
+	app:frames(5)
+	expect(app:state("links_last")).to_be("system:https://github.com/deepseek-ai/dsh")
+	expect(app:opened()[1]).to_be("https://github.com/deepseek-ai/dsh")
+end)
+
+test("a web search finding none, and a failed one, show no sources", function()
+	local app = work()
+	open_row(app, "Searched the web nothing anywhere")
+	expect(app:has('.tool-output >> ~"No results found."')).to_be(true)
+	expect(app:has(".tool-sources")).to_be(false)
+	open_row(app, "Searched the web flaky search")
+	expect(app:has('.tool-output >> ~"Error: the search provider timed out"')).to_be(true)
+	expect(app:has(".tool-sources")).to_be(false)
+end)
+
+test("a fetched page's body links are no search's sources: its text alone shows", function()
+	local app = work()
+	open_row(app, "Fetched https://a.example")
+	expect(app:has('.tool-output >> ~"a link in the body"')).to_be(true)
+	expect(app:has(".tool-sources")).to_be(false)
 end)
 
 test("what was fetched is kept: the work made again (as a reload makes it) fetches nothing twice", function()
