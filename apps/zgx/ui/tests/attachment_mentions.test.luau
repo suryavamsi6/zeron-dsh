@@ -70,10 +70,12 @@ local function settle(app: any)
 	app:frames(30)
 end
 
-local function chat(): any
+-- (s1 where a picture must go: its DeepSeek Flash reads one, s2's V4
+-- Pro won't take it.)
+local function chat(id: string?): any
 	local app = mount("chat_fixture.luau")
 	app:resize(1000, 800)
-	app:command("go_s2")
+	app:command(`go_{id or "s2"}`)
 	settle(app)
 	return app
 end
@@ -92,7 +94,7 @@ local function sent(app: any): string
 end
 
 test("a picture with a screenshot's name, mentioned, goes as Image N, up as Image N.png, and its chip shows", function()
-	local app = chat()
+	local app = chat("s1")
 	app:command("attach_odd")
 	settle(app)
 	app:type(BOX, "what is ")
@@ -101,7 +103,7 @@ test("a picture with a screenshot's name, mentioned, goes as Image N, up as Imag
 	settle(app)
 	expect(app:wait('~"what is"', { timeout_ms = 2000 })).to_be(true)
 	local calls = app:state("calls")
-	expect(calls).to_contain("send:s2:what is [Image 1](zeron-image:1)")
+	expect(calls).to_contain("send:s1:what is [Image 1](zeron-image:1)")
 	expect(calls).to_contain("attname:Image 1.png")
 	-- The sent message: the chip, its label.
 	local tree = app:tree("#transcript")
@@ -110,7 +112,7 @@ test("a picture with a screenshot's name, mentioned, goes as Image N, up as Imag
 end)
 
 test("files with odd names go as their escaped links, each by its own number, and show as their chips", function()
-	local app = chat()
+	local app = chat("s1")
 	app:command("attach_odd")
 	settle(app)
 	mention(app, "notes")
@@ -125,7 +127,7 @@ test("files with odd names go as their escaped links, each by its own number, an
 end)
 
 test("two files of one name are two numbers, each its own", function()
-	local app = chat()
+	local app = chat("s1")
 	app:command("attach_odd")
 	settle(app)
 	app:type(BOX, "@same")
