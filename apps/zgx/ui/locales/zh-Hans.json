@@ -1803,7 +1803,12 @@
       "installed_ok": "已安装。将应用于新会话。",
       "install_failed": "无法安装。",
       "trust": "安装会在本设备上运行该包的代码。请仅安装你信任的包。",
-      "needs_client": "此插件的部分内容需要 DSH Web。"
+      "needs_client": "此插件的部分内容需要 DSH Web。",
+      "remove_named": "移除 {name}",
+      "remove_title": "移除“{name}”？",
+      "remove_body": "新的 DeepSeek 会话将不会加载它。",
+      "remove_confirm": "移除插件",
+      "remove_failed": "无法移除。"
     },
     "projects": {
       "title": "项目",
