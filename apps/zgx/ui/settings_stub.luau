@@ -35,6 +35,9 @@ local step_up_word = ui.state("settings_stub_step_up_word", "ok")
 -- The account's signing keys: "some" (this computer's, one new on another
 -- device, one revoked; listed out of order) or "none".
 local keys_mode = ui.state("settings_stub_keys", "some")
+-- What `DshPlugins` answers: nil, the two bundles below, or what a test
+-- sets (`{ bundles = …, pnpm = … }`).
+local dsh_plugins_answer = ui.state("settings_stub_dsh_plugins", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -249,6 +252,10 @@ local answers: { [string]: (arg: any) -> any } = {
 	-- operations that change it (crates/engine/src/dsh_plugins.rs): one
 	-- active bundle with a description, one inactive without.
 	["DshPlugins"] = function()
+		local over = dsh_plugins_answer:peek()
+		if over ~= nil then
+			return settled(over)
+		end
 		return settled({
 			bundles = {
 				{

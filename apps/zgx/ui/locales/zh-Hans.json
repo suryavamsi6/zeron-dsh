@@ -1779,6 +1779,22 @@
       "online_now": "它当前在线。请在该设备上退出 Zeron 后重试。",
       "offline_title": "无法显示你的设备"
     },
+    "dsh_plugins": {
+      "title": "DeepSeek 插件",
+      "terms": "dsh 包 插件 deepseek 工具 技能 扩展",
+      "description": "此设备上为 DeepSeek 会话安装的 dsh 包。",
+      "installed": "已安装的插件",
+      "installed_terms": "包 列表 启用 版本",
+      "empty_title": "未安装 DeepSeek 插件",
+      "empty_body": "插件是为 DeepSeek 会话添加工具和技能的 dsh 包。",
+      "failed_title": "无法列出 DeepSeek 插件",
+      "failed_hint": "稍后重试。",
+      "retry": "重试",
+      "active": "已启用",
+      "not_active": "未启用",
+      "needs_pnpm": "在此设备上安装需要 pnpm 10 或更高版本。",
+      "applies": "更改将应用于新的 DeepSeek 会话。"
+    },
     "projects": {
       "title": "项目",
       "description": "你的会话所在的文件夹，按设备列出。",
