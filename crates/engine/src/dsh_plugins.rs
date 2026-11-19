@@ -33,10 +33,11 @@ pub fn handles(method: &str) -> bool {
             | methods::DSH_PLUGIN_REMOVE
             | methods::DSH_PLUGIN_ROWS
             | methods::DSH_PLUGIN_SET_ROW
+            | methods::DSH_PLUGIN_INDEX
     )
 }
 
-/// Answer one of the five methods.
+/// Answer one of the six methods.
 pub async fn call(
     harness: &DeepSeekHarness,
     method: &str,
@@ -63,6 +64,14 @@ pub async fn call(
             let rows = rows_owning(harness.home(), id)
                 .map_err(|error| RpcError::Failed(error.to_string()))?;
             Ok(json!({ "rows": rows_json(rows) }))
+        }
+        methods::DSH_PLUGIN_INDEX => {
+            let (url, locale) = crate::dsh_plugin_index::params(params)?;
+            // A network read, not a profile write: it runs beside the
+            // install lock, which serialises `dsh plugin` runs only.
+            crate::dsh_plugin_index::index(url, locale)
+                .await
+                .map_err(|error| RpcError::Failed(error.to_string()))
         }
         methods::DSH_PLUGIN_ADD | methods::DSH_PLUGIN_REMOVE => {
             let op = plugin_op(method, params)?;
@@ -212,13 +221,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_five_plugin_methods_are_handled_and_providers_is_not() {
+    fn the_six_plugin_methods_are_handled_and_providers_is_not() {
         for method in [
             methods::DSH_PLUGINS,
             methods::DSH_PLUGIN_ADD,
             methods::DSH_PLUGIN_REMOVE,
             methods::DSH_PLUGIN_ROWS,
             methods::DSH_PLUGIN_SET_ROW,
+            methods::DSH_PLUGIN_INDEX,
         ] {
             assert!(handles(method), "{method}");
         }

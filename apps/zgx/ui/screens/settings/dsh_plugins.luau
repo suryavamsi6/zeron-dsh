@@ -19,8 +19,13 @@ local search = require("@app/screens/settings/search")
 local M = { ID = "dsh-plugins", TITLE = "DeepSeek plugins" }
 search.index(M.ID, ui.t("settings.dsh_plugins.title"), ui.t("settings.dsh_plugins.terms"), {
 	{ key = "add", title = ui.t("settings.dsh_plugins.add"), terms = ui.t("settings.dsh_plugins.add_terms") },
+	{ key = "discover", title = ui.t("settings.dsh_plugins.discover"), terms = ui.t("settings.dsh_plugins.discover_terms") },
 	{ key = "plugins", title = ui.t("settings.dsh_plugins.installed"), terms = ui.t("settings.dsh_plugins.installed_terms") },
 })
+
+-- The locale the app shows (`screens/language`): an index's own words
+-- follow it, so a fetch asks for its entries in it.
+local shown = ui.shared("zeron.locale", "en")
 
 -- What went wrong asking the host, in words.
 local function say(err: any): string
@@ -47,6 +52,25 @@ local function why(answer: any, generic: string): string
 	return ui.t(generic):get()
 end
 
+-- One `DshPluginAdd` run for `spec` (a name, a name@version, a URL): its
+-- answer dispatched to `h` — `h.asked(package)` when a build script wants
+-- letting through (`needsBuildApproval`, the package pnpm would build),
+-- `h.done()` on ok, `h.failed(words)` on anything else. `allow` names the
+-- package the asking let through, for the retry.
+local function install_call(spec: string, allow: string?, h: { asked: (string) -> (), done: () -> (), failed: (string) -> () })
+	host.call("DshPluginAdd", { spec = spec, allowBuild = allow }):after(function(answer: any)
+		if type(answer) == "table" and type(answer.needsBuildApproval) == "string" then
+			h.asked(answer.needsBuildApproval)
+		elseif type(answer) == "table" and answer.ok == true then
+			h.done()
+		else
+			h.failed(why(answer, "settings.dsh_plugins.install_failed"))
+		end
+	end, function(err: any)
+		h.failed(say(err))
+	end)
+end
+
 -- Installing one from a spec: the field and Install beside it (Install off
 -- while the field is empty or a run is on, the typed spec kept through it),
 -- "Installing…" beside them, the answer under them. `on_added` asks the
@@ -70,22 +94,23 @@ local function install_row(on_added: () -> ()): Node
 		installing:set(true)
 		note:set(nil)
 		problem:set(nil)
-		host.call("DshPluginAdd", { spec = s, allowBuild = allow }):after(function(answer: any)
-			installing:set(false)
-			if type(answer) == "table" and type(answer.needsBuildApproval) == "string" then
-				asking:set(answer.needsBuildApproval)
+		install_call(s, allow, {
+			asked = function(name: string)
+				installing:set(false)
+				asking:set(name)
 				ask_open:set(true)
-			elseif type(answer) == "table" and answer.ok == true then
+			end,
+			done = function()
+				installing:set(false)
 				spec:set("")
 				note:set(ui.t("settings.dsh_plugins.installed_ok"):get())
 				on_added()
-			else
-				problem:set(why(answer, "settings.dsh_plugins.install_failed"))
-			end
-		end, function(err: any)
-			installing:set(false)
-			problem:set(say(err))
-		end)
+			end,
+			failed = function(words: string)
+				installing:set(false)
+				problem:set(words)
+			end,
+		})
 	end
 	return ds.Settings.Row {
 		label = ui.t("settings.dsh_plugins.package"),

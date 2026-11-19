@@ -58,6 +58,14 @@ pub fn install(host: &ScriptHost) {
             answer(engine::get().call("DshPluginRemove", json!({ "name": name })).await)
         }
     });
+    // A plugin index's entries for the page's Discover section
+    // (`crates/engine/src/dsh_plugin_index.rs`): the url through whole,
+    // the page's locale with it for the index's own words.
+    host.async_action("DshPluginIndex", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string())?;
+        answer(engine::get().call("DshPluginIndex", params).await)
+    });
     // A bundle's patch rows, and a row's switch written into the
     // profile's cordis.patch.yml. Args pass through whole: the engine
     // names what it takes, and a field added there reaches it.

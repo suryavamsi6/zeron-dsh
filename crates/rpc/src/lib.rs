@@ -115,13 +115,17 @@ pub mod methods {
     /// profile's overrides folded in ({name} -> `{rows: [{id, title,
     /// disabled, overridden, editable, note}]}`), and a row's on/off written
     /// to the profile's cordis.patch.yml ({id, disabled} -> the refreshed
-    /// rows). The profile is this device's own pnpm project, so only its own
-    /// window manages it.
+    /// rows), and a plugin index's entries fetched and checked for what to
+    /// install ({url, locale?} -> `{title, plugins: [{name, title, author,
+    /// version, source, installable, note}]}`). The profile is this
+    /// device's own pnpm project, and the index is fetched from this
+    /// device, so only its own window manages them.
     pub const DSH_PLUGINS: &str = "DshPlugins";
     pub const DSH_PLUGIN_ADD: &str = "DshPluginAdd";
     pub const DSH_PLUGIN_REMOVE: &str = "DshPluginRemove";
     pub const DSH_PLUGIN_ROWS: &str = "DshPluginRows";
     pub const DSH_PLUGIN_SET_ROW: &str = "DshPluginSetRow";
+    pub const DSH_PLUGIN_INDEX: &str = "DshPluginIndex";
     /// This device's engine-owned scheduled tasks: the list ({} -> `{tasks:
     /// [Task]}`), one saved ({task} -> the stored task — created when `id` is
     /// missing, its rrule validated and `nextAt` computed), one deleted ({id}
@@ -822,6 +826,7 @@ pub fn local_only(method: &str) -> bool {
             | methods::DSH_PLUGIN_REMOVE
             | methods::DSH_PLUGIN_ROWS
             | methods::DSH_PLUGIN_SET_ROW
+            | methods::DSH_PLUGIN_INDEX
             // Scheduled tasks fire on this device's engine, so only this
             // device's own window reads and edits them.
             | methods::SCHEDULES
@@ -1165,6 +1170,7 @@ mod tests {
             methods::DSH_PLUGIN_REMOVE,
             methods::DSH_PLUGIN_ROWS,
             methods::DSH_PLUGIN_SET_ROW,
+            methods::DSH_PLUGIN_INDEX,
         ] {
             assert!(local_only(method), "{method}");
         }
