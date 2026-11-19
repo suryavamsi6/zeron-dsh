@@ -76,6 +76,7 @@ pub mod dsh_plugins;
 pub mod dsh_providers;
 pub mod dsh_usage;
 pub mod runner;
+pub mod schedule_mcp;
 pub mod schedules;
 pub mod wake_trace;
 pub mod wake_update;

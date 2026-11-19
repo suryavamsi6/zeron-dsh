@@ -137,6 +137,13 @@ pub mod methods {
     pub const SCHEDULE_SAVE: &str = "ScheduleSave";
     pub const SCHEDULE_DELETE: &str = "ScheduleDelete";
     pub const SCHEDULE_RUN_NOW: &str = "ScheduleRunNow";
+    /// A chat's DeepSeek schedule bridge: its stdin carries JSON-RPC/MCP
+    /// frames, this method answers them in-process against the engine's own
+    /// schedule store ({the inbound MCP request frame} -> `{response}: the
+    /// reply frame, or null when the frame was a notification). The engine
+    /// binds the caller's chat as the session identity — the bridge never
+    /// trusts a session, cwd, or agent kind the model sends.
+    pub const SCHEDULE_MCP: &str = "ScheduleMcp";
     /// DSH's token meter, read where it lives: the sessions it records ({} ->
     /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
     /// that carries `tokenUsage`) and one session's exact projections
@@ -904,6 +911,9 @@ pub fn agent_allowed(method: &str) -> bool {
             | methods::PUBLISH_IMAGE
             // Saying what the calling chat's agent waits on.
             | methods::AWAIT_BACKGROUND
+            // The calling chat's schedule bridge: the four dsh-style schedule
+            // tools, served by this engine's own store.
+            | methods::SCHEDULE_MCP
             // Plugins: authoring, installing (lands waiting for the person),
             // checking for updates, exporting (to Zeron's plugin-exports
             // folder only: the engine refuses an agent's `to`), and their

@@ -2858,6 +2858,20 @@ impl Inner {
         })
     }
 
+    /// This chat's DeepSeek schedule bridge: the same `zeron mcp` child as
+    /// the host server's, marked [`schedule_mcp::SCHEDULE_MCP_ENV`] — its
+    /// stdin pipes the dsh-style schedule tools into this engine's own store
+    /// over IPC (`ScheduleMcp`), which binds the caller's session, cwd and
+    /// subagent status from its handshake, never from what it sends.
+    fn schedule_mcp(&self, chat_id: &str) -> Option<zeron_proto::McpServer> {
+        let mut server = self.zeron_mcp(chat_id, false, false)?;
+        server.name = crate::schedule_mcp::SERVER_NAME.to_owned();
+        server
+            .env
+            .insert(crate::schedule_mcp::SCHEDULE_MCP_ENV.to_owned(), "1".to_owned());
+        Some(server)
+    }
+
     fn workspace(&self) -> Option<crate::workspace_host::WorkspaceHost> {
         self.doc_host().and_then(|host| host.workspace().cloned())
     }
@@ -4124,6 +4138,15 @@ async fn drive_run(
         .get()
         .map(crate::plugins::Plugins::native_mcp_servers)
         .unwrap_or_default();
+    // A DeepSeek run also gets the chat's schedule bridge: the dsh-style
+    // schedule tools, answered by this engine's own store (the one
+    // Settings → Automation lists) through the same IPC the zeron mcp
+    // server dials.
+    if harness_id == HarnessId::DeepSeek
+        && let Some(server) = inner.schedule_mcp(&chat_id)
+    {
+        request.extra_mcp.push(server);
+    }
     // A revived turn the resumed session already holds: the provider gets
     // the continuation, while the transcript, preview and title keep the
     // user's own message (and the retries carry the revival on).

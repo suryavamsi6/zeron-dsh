@@ -72,5 +72,14 @@ pub fn run_mcp() -> anyhow::Result<()> {
     // The engine's IPC bearer lives in its data dir (the injected
     // ZERON_IPC_TOKEN_FILE wins when present).
     config.data_dir.get_or_insert_with(paths::data_dir);
+    // The engine marks a chat's DeepSeek schedule bridge with
+    // ZERON_SCHEDULE_MCP: the same `zeron mcp` child shape, narrowed to the
+    // schedule tools — stdin frames relayed to the engine's own store.
+    if std::env::var_os(zeron_engine::schedule_mcp::SCHEDULE_MCP_ENV).is_some() {
+        return runtime.block_on(zeron_engine::schedule_mcp::serve_stdio(
+            config.ipc_port,
+            config.data_dir,
+        ));
+    }
     runtime.block_on(zeron_mcp::run(config))
 }

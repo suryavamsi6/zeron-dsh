@@ -694,6 +694,16 @@ impl Schedules {
     }
 }
 
+/// The schedule_mcp view of a task's rule: its fixed UTC offset in seconds
+/// (for rendering `scheduledAtLocal`) and its next occurrence after `now`
+/// — `None` once the rule is spent, which is how a stored `active: false`
+/// task reads as "ended" rather than "paused". `None` on a rule the store
+/// would never have saved (defensive).
+pub(crate) fn rule_view(rrule: &str, now: DateTime<Utc>) -> Option<(i64, Option<DateTime<Utc>>)> {
+    let rule = parse_rrule(rrule).ok()?;
+    Some((rule.zone.local_minus_utc() as i64, rule.next_after(now)))
+}
+
 fn to_dur(ms: i64) -> Duration {
     Duration::from_millis(ms.max(0) as u64)
 }
