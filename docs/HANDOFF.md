@@ -108,6 +108,31 @@ per run, so the engine owns schedules. Follow-ups:
 - SUR-117: zgx Automation tasks page
 - SUR-118: `schedule_*` tools exposed through an engine MCP in `extra_mcp`
 
+### SUR-125: upstream sync cadence
+
+`zeron-dsh` is a fork of `zeronsh/zeron`; parity is kept by merging `upstream/main` in,
+never by rebasing.
+
+- **Check:** after every merged PR, `git fetch upstream && git rev-list --count origin/main..upstream/main`.
+  Record the literal count and the time it was measured in `/workspace/CHECKPOINT.md`; never carry a
+  previous value forward. Scribe owns this check.
+- **Sync when** 100+ commits behind, or at a milestone boundary, whichever comes first.
+  300+ behind: stop feature work and sync first.
+- **How:** one branch `dsuryavamsi/sur-125-upstream-sync-<tag>`, `upstream/main` merged in,
+  conflicts resolved, one PR.
+- **Merge commit, never squash** — the single exception to the squash rule. A squash drops upstream
+  ancestry, so the next sync re-diffs the same commits and re-conflicts on the same files.
+- **No rebase or force-push of `main`:** the fork commits are published and PR-linked, and rewriting
+  them breaks those references.
+- **Resolutions:** upstream wins for shared app behaviour; fork-only work stays (the dsh provider
+  cull, zgx dsh pages, plugin runtime, docs). Files deliberately deleted stay deleted.
+- **Round boundary:** a round targets the upstream tag it started against. Upstream keeps moving
+  while a sync is in review, so commits that arrive mid-round are the *next* round rather than an
+  extension of the current one. Round 1 closed at 0.3.10 (`d6fad8238`) in PR #43; `17d777fa0`
+  (RollText, Grok approval) is round 2.
+- **Gate:** `CI result` green on the sync PR, release-profile failures triaged rather than re-run
+  away, and `git merge-base --is-ancestor <round target> main` true afterwards.
+
 ### SUR-97: Captains on dsh (desk findings, dsh 0.2.2-rc.3)
 
 | | Capability | dsh support |
