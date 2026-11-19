@@ -332,9 +332,12 @@ end)
 -- index beside it (off while it's empty or a fetch is on), then what the
 -- address answered — its title over the entries it names, each one's
 -- words, the version recommended for this device and an Install (off,
--- its note saying why, on one that can't be installed here). A fetch
--- asks in the app's locale (`shown`); an address that answers no index
--- says why under the field, the field and Load kept for another ask.
+-- its note saying why, on one that can't be installed here). The ask is
+-- explicit: Enter in the field or Load, one fetch each — the field
+-- doesn't ask on commit, so the click that leaves it can't fetch the
+-- address a second time. A fetch asks in the app's locale (`shown`); an
+-- address that answers no index says why under the field, the field and
+-- Load kept for another ask.
 local function discover(reload_installed: () -> ()): Node
 	local url = ui.use_state("")
 	local busy = ui.use_state(false)
@@ -386,8 +389,15 @@ local function discover(reload_installed: () -> ()): Node
 							size = "sm",
 							grow = 1,
 							disabled = busy,
-							on_commit = function()
-								load()
+							-- Enter asks, as Load does. `on_commit` would ask
+							-- on leaving the field changed too — the click on
+							-- Load itself leaves it, fetching one address twice.
+							on_key = function(e: any): boolean?
+								if e.key == "Enter" then
+									load()
+									return true
+								end
+								return nil
 							end,
 						},
 						ds.Button {
