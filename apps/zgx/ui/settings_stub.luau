@@ -69,6 +69,9 @@ local schedule_save = ui.state("settings_stub_schedule_save", nil :: any)
 local schedule_delete = ui.state("settings_stub_schedule_delete", nil :: any)
 local schedule_run = ui.state("settings_stub_schedule_run", nil :: any)
 local schedule_calls = ui.state("settings_stub_schedule_calls", {} :: { any })
+-- What `McpServers` answers: nil (the two servers the `McpServers`
+-- answer below carries), or a `{ servers = … }` a test sets.
+local mcp_servers_answer = ui.state("settings_stub_mcp_servers", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -571,6 +574,33 @@ local answers: { [string]: (arg: any) -> any } = {
 			t.target.session = `chat_{id}_run`
 		end
 		return settled({ fired = true, session = if type(t.target) == "table" then t.target.session else nil })
+	end,
+	-- The person's MCP servers: each a program run beside the sessions'
+	-- agents (`{name, command, args, env}`). Their env's values are as
+	-- secret as the engine keeps them — the page is to show the names
+	-- only, so each value here is markedly itself, for a test to find
+	-- nowhere.
+	["McpServers"] = function()
+		local over = mcp_servers_answer:peek()
+		if over ~= nil then
+			return settled(over)
+		end
+		return settled({
+			servers = {
+				{
+					name = "filesystem",
+					command = "npx",
+					args = { "-y", "@modelcontextprotocol/server-filesystem", "/work/notes" },
+					env = { NOTES_ROOT = "filesystem-env-value-should-not-render" },
+				},
+				{
+					name = "github",
+					command = "uvx",
+					args = { "mcp-server-github" },
+					env = { GITHUB_TOKEN = "github-token-value-should-not-render" },
+				},
+			},
+		})
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })
