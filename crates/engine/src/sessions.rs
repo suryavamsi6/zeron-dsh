@@ -7079,6 +7079,9 @@ mod tests {
             )
             .unwrap();
         journal.note_shutdown_interrupt("legacy", 42);
+        // 0.3.9 buffers appends and writes them later; what recovery must not
+        // change is the file on disk, so settle the journal first.
+        journal.flush("legacy");
         let path = dir.path().join("journals/legacy.jsonl");
         let before = std::fs::read(&path).unwrap();
         let sessions = SessionsEngine::new(
