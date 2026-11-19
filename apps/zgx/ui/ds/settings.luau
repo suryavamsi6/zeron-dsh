@@ -552,7 +552,7 @@ function M.Row(props: RowProps): Node
 	end
 	local row: { [any]: any } = {
 		w_full = true,
-		min_h = if props.compact then ui.raw(if props.on_click then 49 else 53, "compact provider card row") else "$zeron.settings.row",
+		min_h = if props.compact then ui.raw(if props.on_click then 49 else 53, "compact provider card row") else nil,
 		px = if props.compact then ui.raw(15, "compact provider inset") else "$space.4",
 		py = if props.compact then "$space.2" else "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",

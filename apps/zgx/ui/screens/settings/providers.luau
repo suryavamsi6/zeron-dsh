@@ -865,11 +865,9 @@ function M.body(): Node
 		-- loads again); the refs' saved state beside it, rows writing
 		-- theirs when a key lands.
 		local res = ui.resource(load)
-		-- The accounts section's data, asked as the page opens (the visit
-		-- hook alone misses a page restored straight into view).
-		ui.effect(function()
-			agents.load()
-		end)
+		-- (The agents are asked once a visit by whoever hosts the body:
+		-- `M.view` for Settings, the setup step for its own — so a hot
+		-- reload builds the section again without asking again.)
 		local creds = ui.use_state({} :: any)
 		ui.effect(function()
 			local d = res.data:get()

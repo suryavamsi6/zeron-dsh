@@ -6,11 +6,14 @@
 #                                    src/plugins/*_tests.rs among them), the
 #                                    known ones skipped by exact name, and the
 #                                    `rust-macos:` ones on the macOS runner only
+#                                    known ones skipped by exact name
+#   scripts/ci/test-zgx.sh tests     cargo test --test '*' (apps/zgx/tests/*.rs,
+#                                    the app's integration tests), every binary
+#                                    run however others fail (--no-fail-fast),
+#                                    the known ones skipped by exact name
 #   scripts/ci/test-zgx.sh ui [zgx]  zgx test ui (the Luau UI tests), with the
 #                                    zgx CLI given or on PATH; fails on any FAIL
 #                                    not listed, and names listed ones that pass
-#
-# apps/zgx/tests/*.rs (the app's integration tests) aren't run here.
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 known="$root/scripts/ci/zgx-known-failures.txt"
@@ -33,6 +36,12 @@ case "${1:-}" in
     # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
     # calls unbound.)
     exec cargo test --locked --bin zeron-zgx -- --exact ${skips[@]+"${skips[@]}"}
+    ;;
+  tests)
+    skips=()
+    while IFS= read -r name; do skips+=(--skip "$name"); done < <(listed tests)
+    cd "$root/apps/zgx"
+    exec cargo test --locked --no-fail-fast --test '*' -- --exact ${skips[@]+"${skips[@]}"}
     ;;
   ui)
     zgx="${2:-zgx}"
@@ -63,7 +72,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "usage: $0 rust | ui [zgx]" >&2
+    echo "usage: $0 rust | tests | ui [zgx]" >&2
     exit 2
     ;;
 esac

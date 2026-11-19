@@ -11,10 +11,7 @@ name: release
 # `curl -fsSL https://zeron.sh/install.sh | sh`), bumping latest.txt.
 #
 # Every shipped Zeron installs these (crates/update at v0.2.138 reads the same
-# names, checksums and `--version` answers), so a release can move to the old
-# app (apps/zeron, the jobs below) and back: the `app` input of a run by hand,
-# or the repository variable STABLE_APP=gpui for a tag. That's the way back
-# if the zgx app has to be withdrawn: a newer version of the old app.
+# names, checksums and `--version` answers).
 #
 # Trigger: push a tag `v<version>` matching the workspace version in
 # Cargo.toml (bump it in the same commit), or run manually via
@@ -25,13 +22,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      app:
-        description: Which app to build.
-        type: choice
-        options: [zgx, gpui]
-        default: zgx
       platforms:
-        description: Which to build (the zgx app).
+        description: Which to build.
         type: string
         default: macos linux windows
 
@@ -43,31 +35,22 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
-      app: ${{ steps.version.outputs.app }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: version (the workspace's; a tag's must be it) and app
+      - name: version (the workspace's; a tag's must be it)
         id: version
-        env:
-          APP: ${{ inputs.app || vars.STABLE_APP || 'zgx' }}
         run: |
           workspace="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
           if [ "$GITHUB_EVENT_NAME" = push ] && [ "${GITHUB_REF_NAME#v}" != "$workspace" ]; then
             echo "tag $GITHUB_REF_NAME isn't the workspace's v$workspace"; exit 1
           fi
-          case "$APP" in
-            zgx|gpui) ;;
-            *) echo "app '$APP' is neither zgx nor gpui"; exit 1 ;;
-          esac
           echo "version=$workspace" >>"$GITHUB_OUTPUT"
-          echo "app=$APP" >>"$GITHUB_OUTPUT"
 
   deepseek-compatibility:
     uses: ./.github/workflows/deepseek-compatibility.yml
 
   zgx:
     needs: version
-    if: needs.version.outputs.app == 'zgx'
     uses: ./.github/workflows/zgx-build.yml
     secrets: inherit
     with:
@@ -234,17 +217,11 @@ jobs:
           done
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
-        env:
-          APP: ${{ needs.version.outputs.app }}
         run: |
-          # The zgx app needs macOS 13 (Ghostty's floor); the old app's 12. A
-          # Mac below it is held on the release it has, and told why
-          # (crates/update `offer`, in every Zeron since 0.2.136).
-          if [ "$APP" = zgx ]; then
-            manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
-          else
-            manifest=$(jq -n --arg version "$VERSION" '{version: $version, files: {}}')
-          fi
+          # The app needs macOS 13 (Ghostty's floor). A Mac below it is held on
+          # the release it has, and told why (crates/update `offer`, in every
+          # Zeron since 0.2.136).
+          manifest=$(jq -n --arg version "$VERSION" '{version: $version, minimumMacOS: "13.0", files: {}}')
           for f in dist/*; do
             sha=$(sha256sum "$f" | cut -d' ' -f1)
             manifest=$(jq --arg name "$(basename "$f")" --arg sha "$sha" \
@@ -262,8 +239,6 @@ jobs:
           # after a failed R2 upload gets past this step.
           overwrite_files: false
       - name: upload to R2 (zeron.sh/releases/*)
-        env:
-          APP: ${{ needs.version.outputs.app }}
         if: env.CLOUDFLARE_API_TOKEN != ''
         run: |
           # The Cloudflare API returns the odd 502; retry each object.
@@ -288,22 +263,21 @@ jobs:
           put "manifest-$VERSION.json" manifest.json
           printf '%s' "$VERSION" > latest.txt
           put latest.txt latest.txt
-          # The beta channel carries every release of the zgx app: a beta
+          # The beta channel carries every release: a beta
           # download (the website's) gets each stable release too, unless a
           # newer beta is already there, and stays on beta (crates/update
           # `follows_channels`). The same files under beta/, the manifest last.
-          if [ "$APP" = zgx ]; then
-            # Read from the bucket itself, not a cache; on any doubt, leave it.
-            beta=""
-            if npx wrangler@4 r2 object get comet-native-releases/beta/manifest.json --file beta-current.json --remote; then
-              beta="$(jq -r '.version // empty' beta-current.json)"
-            fi
-            if [ -z "$beta" ]; then
-              # Loudly: claim-only betas reach stable through this copy alone.
-              # Re-run the job once the bucket answers.
-              echo "::error::couldn't read the beta channel's manifest, so this release isn't in the beta channel"
-              exit 1
-            elif python3 - "$VERSION" "$beta" <<'PY'
+          # Read from the bucket itself, not a cache; on any doubt, leave it.
+          beta=""
+          if npx wrangler@4 r2 object get comet-native-releases/beta/manifest.json --file beta-current.json --remote; then
+            beta="$(jq -r '.version // empty' beta-current.json)"
+          fi
+          if [ -z "$beta" ]; then
+            # Loudly: claim-only betas reach stable through this copy alone.
+            # Re-run the job once the bucket answers.
+            echo "::error::couldn't read the beta channel's manifest, so this release isn't in the beta channel"
+            exit 1
+          elif python3 - "$VERSION" "$beta" <<'PY'
           import re, sys
           def key(v):
               m = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)(?:-beta\.(\d+))?", v.strip())
@@ -315,13 +289,12 @@ jobs:
           new, old = key(sys.argv[1]), key(sys.argv[2])
           sys.exit(0 if new and (old is None or new > old) else 1)
           PY
-            then
-              for f in dist/*; do
-                put "beta/$(basename "$f")" "$f"
-              done
-              put "beta/manifest-$VERSION.json" manifest.json
-              put beta/manifest.json manifest.json
-            else
-              echo "the beta channel's $beta is newer than $VERSION: left as it is"
-            fi
+          then
+            for f in dist/*; do
+              put "beta/$(basename "$f")" "$f"
+            done
+            put "beta/manifest-$VERSION.json" manifest.json
+            put beta/manifest.json manifest.json
+          else
+            echo "the beta channel's $beta is newer than $VERSION: left as it is"
           fi

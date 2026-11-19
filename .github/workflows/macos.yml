@@ -9,6 +9,9 @@ on:
         description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
         type: string
         default: ''
+      native:
+        type: boolean
+        default: true
       ios:
         type: boolean
         default: true

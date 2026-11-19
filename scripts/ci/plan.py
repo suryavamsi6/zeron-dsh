@@ -15,7 +15,8 @@ environment (see main()); outputs are written to $GITHUB_OUTPUT:
   skip         JSON object, suite -> jobs that already passed on the same
                inputs and are skipped (Windows and voice skip single jobs; the
                other suites only run or skip as a whole)
-  flags        JSON object, suite -> optional steps to run
+  flags        JSON object, suite -> optional steps to run (fast tier: only
+               for their own files; FLAG_PATHS, none at present)
   pr           the pull request number (pull requests only), for the admit job name
 
 Reuse. A selected suite whose inputs (scripts/ci/reuse.py) are unchanged since
@@ -144,8 +145,8 @@ FAST_PATHS: dict[str, list[str]] = {
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
 # On the full tier everything runs.
 JOB_PATHS: dict[tuple[str, str], list[str]] = {
-    # Release build, packaging, installer and startup probes (`tests` already
-    # compiles the app).
+    # Release build, packaging, installer and CLI start-up probes (`tests`
+    # already compiles the binary).
     ("windows", "app"): CARGO + ["apps/zeron/**", "dist/windows/**", "scripts/test-windows-*.ps1",
                                  "scripts/package-windows.ps1", ".github/actions/windows-ci-setup/**",
                                  ".github/workflows/windows.yml", "crates/update/**"],
@@ -154,7 +155,8 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
                                    "crates/client/**", ".github/workflows/macos.yml"],
 }
-# Fast tier: optional steps (flags passed to the suite workflow, and part of its fingerprint).
+# Fast tier: optional steps (flags passed to the suite workflow, and part of its
+# fingerprint), (suite, flag) -> the files that turn them on. None at present.
 FLAG_PATHS: dict[tuple[str, str], list[str]] = {}
 
 # A version bump (workspace version in Cargo.toml and the workspace packages'
