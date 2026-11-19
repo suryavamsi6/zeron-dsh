@@ -25,6 +25,7 @@ local profile = require("@app/screens/settings/profile")
 local providers = require("@app/screens/settings/providers")
 local dsh_plugins = require("@app/screens/settings/dsh_plugins")
 local schedules = require("@app/screens/settings/schedules")
+local mcp = require("@app/screens/settings/mcp")
 local devices = require("@app/screens/settings/devices")
 local projects_page = require("@app/screens/settings/projects")
 local files = require("@app/screens/settings/files")
@@ -85,6 +86,18 @@ add(schedules, "calendar", "Devices")
 add(devices, "laptop", "Devices")
 add(projects_page, "folder-with-files", "Devices")
 add(members, "users-group-rounded", "Organization")
+-- The person's MCP servers, under Zeron's own heading just ahead of
+-- About: the list fills the window's room as it is, so anywhere higher
+-- it would push Billing out of view (the Cloud group draws ahead of
+-- Zeron's).
+settings.add {
+	id = mcp.ID,
+	title = mcp.TITLE,
+	icon = "remote-server",
+	group = "Zeron",
+	view = mcp.view,
+	before = "about",
+}
 -- Last, under Zeron's own heading (the shipping app's About and its
 -- updates, in its app menu): after everything, Archived too.
 settings.add {
