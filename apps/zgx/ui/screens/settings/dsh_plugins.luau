@@ -1,6 +1,7 @@
 -- Settings → DeepSeek plugins: the dsh bundles installed for DeepSeek
 -- sessions on this device (the engine's `DshPlugins`, crates/engine/src/
--- dsh_plugins.rs), installing one from a spec (`DshPluginAdd`), and
+-- dsh_plugins.rs), installing one from a spec (`DshPluginAdd`) or from an
+-- index's entries (`DshPluginIndex` answering them for an address), and
 -- removing one (`DshPluginRemove`, asked once by name first), both run by
 -- `dsh plugin` on the device. Under each bundle the rows its patch adds
 -- (`DshPluginRows`), a Switch each — the override is the profile's
@@ -69,6 +70,31 @@ local function install_call(spec: string, allow: string?, h: { asked: (string) -
 	end, function(err: any)
 		h.failed(say(err))
 	end)
+end
+
+-- What a run says went wrong, in a sunken box under its control: the
+-- words kept whole in the log's ink.
+local function problem_box(problem: State<string?>): Node
+	return ui.show(function(): boolean
+		return problem:get() ~= nil
+	end, ui.div {
+		w_full = true,
+		rounded = "$radius.md",
+		bg = "$surface.sunken",
+		px = "$space.3",
+		py = "$space.2",
+		ui.text {
+			function(): string
+				return problem:get() or ""
+			end,
+			literal = true,
+			wrap = true,
+			font = "$font.mono",
+			text_size = "$font.size.xs",
+			line_height = "$font.line.xs",
+			color = "$text.secondary",
+		},
+	})
 end
 
 -- Installing one from a spec: the field and Install beside it (Install off
@@ -151,26 +177,7 @@ local function install_row(on_added: () -> ()): Node
 			end, ds.Hint { function(): string
 				return note:get() or ""
 			end }),
-			ui.show(function(): boolean
-				return problem:get() ~= nil
-			end, ui.div {
-				w_full = true,
-				rounded = "$radius.md",
-				bg = "$surface.sunken",
-				px = "$space.3",
-				py = "$space.2",
-				ui.text {
-					function(): string
-						return problem:get() or ""
-					end,
-					literal = true,
-					wrap = true,
-					font = "$font.mono",
-					text_size = "$font.size.xs",
-					line_height = "$font.line.xs",
-					color = "$text.secondary",
-				},
-			}),
+			problem_box(problem),
 			ds.Hint { ui.t("settings.dsh_plugins.trust") },
 			-- (Its asking, beside the row's control: the modal stands over
 			-- the page wherever it is built.)
@@ -190,6 +197,248 @@ local function install_row(on_added: () -> ()): Node
 				},
 			},
 		},
+	}
+end
+
+-- One of an index's entries: its title (its name when it has none), who
+-- wrote it and its line under it, the recommended version's badge, and
+-- Install — off when the index says it can't be installed here, the
+-- entry's `note` on the row saying why (a git source's is added by its
+-- URL, one no listed version fits that none does). Installing asks
+-- `DshPluginAdd` for `{name}@{version}` through `install_call` (the same
+-- build-script asking a typed spec gets); the answer under the row, the
+-- installed list asked again on ok.
+local IndexRow = ui.component(function(props: { now: State<any>, installed: () -> () }): Node
+	local now = props.now
+	local busy = ui.use_state(false)
+	local note = ui.use_state(nil :: string?)
+	local problem = ui.use_state(nil :: string?)
+	-- The package whose build script wants letting through, while its
+	-- asking is up.
+	local asking = ui.use_state(nil :: string?)
+	local ask_open = ui.use_state(false)
+	local function title(): string
+		local e = now:get()
+		if type(e) == "table" then
+			if type(e.title) == "string" and e.title ~= "" then
+				return e.title
+			elseif type(e.name) == "string" then
+				return e.name
+			end
+		end
+		return ""
+	end
+	local function install(allow: string?)
+		local e = now:peek()
+		if type(e) ~= "table" or e.installable ~= true or busy:peek() then
+			return
+		end
+		if type(e.name) ~= "string" or type(e.version) ~= "string" then
+			return
+		end
+		busy:set(true)
+		note:set(nil)
+		problem:set(nil)
+		install_call(`{e.name}@{e.version}`, allow, {
+			asked = function(name: string)
+				busy:set(false)
+				asking:set(name)
+				ask_open:set(true)
+			end,
+			done = function()
+				busy:set(false)
+				note:set(ui.t("settings.dsh_plugins.installed_ok"):get())
+				props.installed()
+			end,
+			failed = function(words: string)
+				busy:set(false)
+				problem:set(words)
+			end,
+		})
+	end
+	return ds.Settings.Row {
+		label = function(): string
+			return title()
+		end,
+		byline = function(): string?
+			local e = now:get()
+			return if type(e) == "table" and type(e.author) == "string" then e.author else nil
+		end,
+		description = function(): string
+			local e = now:get()
+			return if type(e) == "table" and type(e.description) == "string" then e.description else ""
+		end,
+		detail = function(): string?
+			if problem:get() ~= nil then
+				return problem:get()
+			end
+			if note:get() ~= nil then
+				return note:get()
+			end
+			local e = now:get()
+			return if type(e) == "table" and type(e.note) == "string" then e.note else nil
+		end,
+		truncate = true,
+		control = ui.row {
+			gap = "$space.3",
+			items = "center",
+			ui.show(function(): boolean
+				local e = now:get()
+				return type(e) == "table" and type(e.version) == "string"
+			end, ds.Badge {
+				function(): string
+					return now:get().version
+				end,
+				tone = "neutral",
+				tabular = true,
+			}),
+			ds.Button {
+				ui.t("settings.dsh_plugins.install"),
+				label = function(): string
+					return ui.t("settings.dsh_plugins.install_named", { name = title() }):get()
+				end,
+				size = "sm",
+				busy = busy,
+				disabled = function(): boolean
+					local e = now:get()
+					return not (type(e) == "table" and e.installable == true)
+				end,
+				on_click = function()
+					install()
+				end,
+			},
+			-- (Its asking, beside the row's control: the modal stands over
+			-- the page wherever it is built.)
+			ds.Dialog {
+				open = ask_open,
+				title = (function(): string
+					return ui.t("settings.dsh_plugins.allow_build_title", { name = asking:get() or "" }):get()
+				end) :: any,
+				body = ui.t("settings.dsh_plugins.allow_build_body"),
+				tone = "danger",
+				size = "sm",
+				confirm = {
+					label = ui.t("settings.dsh_plugins.allow_build_confirm"),
+					on_click = function()
+						install(asking:peek())
+					end,
+				},
+			},
+		},
+	}
+end)
+
+-- An index at an address (`DshPluginIndex`): its URL's field and Load
+-- index beside it (off while it's empty or a fetch is on), then what the
+-- address answered — its title over the entries it names, each one's
+-- words, the version recommended for this device and an Install (off,
+-- its note saying why, on one that can't be installed here). A fetch
+-- asks in the app's locale (`shown`); an address that answers no index
+-- says why under the field, the field and Load kept for another ask.
+local function discover(reload_installed: () -> ()): Node
+	local url = ui.use_state("")
+	local busy = ui.use_state(false)
+	local index = ui.use_state(nil :: any)
+	local problem = ui.use_state(nil :: string?)
+	local entries = ui.computed(function(): { any }
+		local d = index:get()
+		return if type(d) == "table" and type(d.plugins) == "table" then d.plugins else {}
+	end)
+	local function load()
+		local u = url:peek()
+		if u == "" or busy:peek() then
+			return
+		end
+		busy:set(true)
+		index:set(nil)
+		problem:set(nil)
+		host.call("DshPluginIndex", { url = u, locale = shown:peek() }):after(function(answer: any)
+			busy:set(false)
+			if type(answer) == "table" and type(answer.plugins) == "table" then
+				index:set(answer)
+			else
+				problem:set(why(answer, "settings.dsh_plugins.index_failed"))
+			end
+		end, function(err: any)
+			busy:set(false)
+			problem:set(say(err))
+		end)
+	end
+	return ds.Settings.Section {
+		title = ui.t("settings.dsh_plugins.discover"),
+		description = ui.t("settings.dsh_plugins.discover_how"),
+		ds.Settings.Group {
+			ds.Settings.Row {
+				label = ui.t("settings.dsh_plugins.index_url"),
+				description = ui.t("settings.dsh_plugins.index_url_how"),
+				stacked = true,
+				control = ui.column {
+					w_full = true,
+					gap = "$space.2",
+					ui.row {
+						w_full = true,
+						gap = "$space.2",
+						items = "center",
+						ds.TextField {
+							value = url,
+							name = ui.t("settings.dsh_plugins.index_url"),
+							placeholder = "https://example.net/index.json",
+							size = "sm",
+							grow = 1,
+							disabled = busy,
+							on_commit = function()
+								load()
+							end,
+						},
+						ds.Button {
+							ui.t("settings.dsh_plugins.index_load"),
+							size = "sm",
+							disabled = function(): boolean
+								return busy:get() or url:get() == ""
+							end,
+							on_click = function()
+								load()
+							end,
+						},
+						ui.show(busy, ds.Hint { ui.t("settings.dsh_plugins.index_loading") }),
+					},
+					problem_box(problem),
+				},
+			},
+		},
+		ui.show(function(): boolean
+			return index:get() ~= nil
+		end, ui.column {
+			w_full = true,
+			gap = "$space.2",
+			ui.show(function(): boolean
+				local d = index:get()
+				return type(d) == "table" and type(d.title) == "string" and d.title ~= ""
+			end, ui.row {
+				w_full = true,
+				px = ds.Settings.inset(),
+				ds.Hint {
+					function(): string
+						return ui.t("settings.dsh_plugins.index_from", { title = index:get().title }):get()
+					end,
+				},
+			}),
+			ui.show(function(): boolean
+				return #entries:get() == 0
+			end, ds.EmptyState {
+				icon = "plug-circle",
+				size = "sm",
+				title = ui.t("settings.dsh_plugins.index_empty"),
+			}),
+			ds.Settings.Each(entries, function(_e: any, _i: number, now: State<any>): Node
+				return IndexRow { now = now, installed = reload_installed }
+			end, {
+				key = function(e: any): any
+					return e.name
+				end,
+				wash = true,
+			}),
+		}),
 	}
 end
 
@@ -425,6 +674,7 @@ function M.view(): Node
 				install_row(res.reload),
 			},
 		}),
+		search.anchor("discover", discover(res.reload)),
 		search.anchor("plugins", ds.Settings.Section {
 			ui.presence(kind, function(k: string): Node
 				if k == "loading" then

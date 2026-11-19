@@ -175,6 +175,13 @@ fn push(body: &mut Vec<u8>, chunk: &[u8]) -> Result<(), IndexError> {
 
 /// The body as the index document; anything else is not an index.
 fn parse(body: &[u8]) -> Result<PluginIndex, IndexError> {
+    // An object alone: serde would also read the fields positionally
+    // from a JSON array, and an array of entries is no index.
+    if !body.trim_ascii().starts_with(b"{") {
+        return Err(IndexError(
+            "that address didn't answer a plugin index (not a JSON object)".into(),
+        ));
+    }
     serde_json::from_slice(body)
         .map_err(|error| IndexError(format!("that address didn't answer a plugin index ({error})")))
 }
@@ -495,8 +502,8 @@ mod tests {
 
     #[test]
     fn an_entry_whose_engines_dsh_matches_nothing_is_incompatible() {
-        let plugins = plugins(&parse(FIXTURE.as_bytes()).unwrap(), "en");
-        let broken = &plugins[2];
+        let listed = plugins(&parse(FIXTURE.as_bytes()).unwrap(), "en");
+        let broken = &listed[2];
         assert_eq!(broken["name"], "dsh-plugin-broken");
         assert_eq!(broken["version"], Value::Null);
         assert_eq!(broken["source"], Value::Null);
@@ -508,10 +515,10 @@ mod tests {
         );
         // An entry listing no versions is incompatible the same way.
         let index = parse(br#"{"plugins": [{"name": "empty"}]}"#).unwrap();
-        let plugins = plugins(&index, "en");
-        assert_eq!(plugins[0]["installable"], false);
-        assert_eq!(plugins[0]["version"], Value::Null);
-        assert!(plugins[0]["note"].as_str().unwrap().contains("no versions"));
+        let empty = plugins(&index, "en");
+        assert_eq!(empty[0]["installable"], false);
+        assert_eq!(empty[0]["version"], Value::Null);
+        assert!(empty[0]["note"].as_str().unwrap().contains("no versions"));
     }
 
     #[test]
@@ -583,8 +590,8 @@ mod tests {
 
     #[test]
     fn params_needs_a_url_and_defaults_the_locale() {
-        for params in [json!({}), json!({ "url": 7 }), json!({ "url": "  " })] {
-            assert!(matches!(params(&params), Err(RpcError::BadParams(_))), "{params}");
+        for bad in [json!({}), json!({ "url": 7 }), json!({ "url": "  " })] {
+            assert!(matches!(params(&bad), Err(RpcError::BadParams(_))), "{bad}");
         }
         assert_eq!(
             params(&json!({ "url": "https://index.invalid/i.json" })).unwrap(),
