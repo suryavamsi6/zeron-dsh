@@ -3348,6 +3348,38 @@ impl RpcService for EngineRpc {
             let value = crate::schedules::call(&schedules, method, &params)?;
             return Ok(RpcReply::Value(value));
         }
+        // A chat's DeepSeek schedule bridge forwards each of its stdin MCP
+        // frames to this method; the engine binds the caller's session, cwd
+        // and subagent status from the IPC handshake (its `x-zeron-chat`,
+        // which a run's environment pins) plus the chat's row — never from
+        // anything the model or the bridge process sends.
+        if method == methods::SCHEDULE_MCP {
+            let zeron_rpc::Caller::Agent { chat: Some(chat_id) } = zeron_rpc::caller() else {
+                return Err(RpcError::Failed(
+                    "ScheduleMcp answers a chat's agent bridge — it binds that chat's session"
+                        .into(),
+                ));
+            };
+            let Some(schedules) = self.schedules.clone() else {
+                return Err(RpcError::Failed(format!("{method}: no schedule service")));
+            };
+            let chat = self.workspace.chat(&chat_id).ok().flatten();
+            let binding = crate::schedule_mcp::Binding {
+                session: chat_id,
+                cwd: chat
+                    .as_ref()
+                    .and_then(|chat| chat.cwd.clone())
+                    .unwrap_or_default(),
+                subagent: chat
+                    .as_ref()
+                    .is_some_and(|chat| chat.child_kind == Some(zeron_proto::ChildKind::Subagent)),
+            };
+            let response =
+                crate::schedule_mcp::ScheduleMcp::new(schedules, binding).handle(&params);
+            return Ok(RpcReply::Value(serde_json::json!({
+                "response": response.unwrap_or(serde_json::Value::Null)
+            })));
+        }
         // An answer read aloud spends this device's DeepSeek key: it never
         // leaves the engine, so only this device's own window may ask.
         if method == methods::READ_ALOUD {
