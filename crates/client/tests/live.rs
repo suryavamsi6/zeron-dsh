@@ -915,21 +915,35 @@ async fn a_launch_with_no_network_dials_nothing_until_the_network_comes_back() {
 async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
     let edge = MockEdge::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let start = Instant::now();
+    // Building the client (opening its docs store and registry replica, starting
+    // its tasks) runs on this thread and is not the gate's wait: time the report
+    // itself, so a busy runner can't charge its own startup to the first path
+    // report. It was measured at 59 ms on an idle 16-core machine.
+    let building = Instant::now();
     let client = phone(&edge, dir.path());
+    let built = building.elapsed();
+    let start = Instant::now();
     client.set_network_online(true);
     while edge.connections() == 0 {
         assert!(start.elapsed() < Duration::from_secs(2), "never dialed");
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
     let reported = start.elapsed();
-    assert!(reported < Duration::from_millis(150), "an online launch waited {reported:?}");
+    // Well inside the 1 s first-report patience: a launch paced by the patience
+    // instead of the report would land near a second. Not tighter because the
+    // dial itself (the first use of the HTTP stack) is included; the gate's own
+    // promptness is pinned deterministically by the paused-time tests in
+    // `live::path_gate`.
+    assert!(
+        reported < Duration::from_millis(500),
+        "an online launch waited {reported:?} after the report (built in {built:?})"
+    );
     client.shutdown();
 
     let edge = MockEdge::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let start = Instant::now();
     let client = phone(&edge, dir.path());
+    let start = Instant::now();
     while edge.connections() == 0 {
         assert!(start.elapsed() < Duration::from_secs(2), "never dialed without a report");
         tokio::time::sleep(Duration::from_millis(2)).await;
@@ -939,7 +953,9 @@ async fn an_online_launch_dials_as_soon_as_the_network_is_reported() {
         unreported < Duration::from_millis(1400),
         "a platform that never reports waited {unreported:?}"
     );
-    eprintln!("first dial: reported online {reported:?}, never reported {unreported:?}");
+    eprintln!(
+        "first dial: reported online {reported:?} (client built in {built:?}), never reported {unreported:?}"
+    );
     client.shutdown();
 }
 

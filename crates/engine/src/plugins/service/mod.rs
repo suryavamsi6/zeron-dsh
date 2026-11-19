@@ -244,6 +244,16 @@ struct Timer {
     due: Instant,
 }
 
+/// Who is asking [`Services::ensure`] for the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Need {
+    /// A caller (a method, a tool, a timer): the VM serves and stays running.
+    Serve,
+    /// The scan's loader, learning a new version's timers. A VM it starts is
+    /// kept only if it registered timers (or a caller started one first).
+    Learn,
+}
+
 impl Slot {
     fn note(&self, line: String) {
         let mut log = lock(&self.log);
@@ -343,45 +353,36 @@ impl Services {
             };
             self.supervise(&slot);
             if load {
-                self.load_beside(slot, plan);
+                // Its pass is the background `learn`; nothing waits on it.
+                let _ = self.load_beside(slot, plan);
             }
         }
     }
 
     /// Load `plan`'s VM in the background: the running one (if any) serves
     /// until it has loaded.
-    fn load_beside(&self, slot: Arc<Slot>, plan: Plan) {
-        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
-            return;
-        };
+    fn load_beside(&self, slot: Arc<Slot>, plan: Plan) -> Option<tokio::task::JoinHandle<()>> {
+        let runtime = tokio::runtime::Handle::try_current().ok()?;
         let this = self.clone();
-        runtime.spawn(async move {
-            let swap = {
-                let mut st = lock(&slot.state);
-                let swap = st.running.is_some();
-                st.swapping = swap;
-                swap
-            };
-            let loaded = this.ensure(&slot, &plan, false).await;
-            let mut st = lock(&slot.state);
-            st.swapping = false;
-            // Only learning its timers (nothing ran before, nothing's in
-            // flight): with none, it stops again at once.
-            if let Ok(running) = loaded
-                && !swap
-                && running.described.timers.is_empty()
-                && !running.vm.status().busy()
-                && st.running.as_ref().is_some_and(|r| r.vm.same(&running.vm))
-            {
-                st.running = None;
-                running.vm.stop();
-            }
-        });
+        Some(runtime.spawn(async move { this.learn(slot, plan).await }))
     }
 
-    /// The running VM for `plan`, started if need be. A caller (`serve_old`)
-    /// is served by the old version while a new one loads; the loader isn't.
-    async fn ensure(&self, slot: &Arc<Slot>, plan: &Plan, serve_old: bool) -> Result<Running, Refusal> {
+    /// What a version first seen needs: learn what it serves and its timers,
+    /// and leave nothing running when it has none. A service a caller starts
+    /// while this loads is left alone (see `ensure`'s `learned_unused`).
+    async fn learn(&self, slot: Arc<Slot>, plan: Plan) {
+        {
+            let mut st = lock(&slot.state);
+            let swap = st.running.is_some();
+            st.swapping = swap;
+        }
+        let _ = self.ensure(&slot, &plan, Need::Learn).await;
+        lock(&slot.state).swapping = false;
+    }
+
+    /// The running VM for `plan`, started if need be. A caller is served by the
+    /// old version while a new one loads; the loader isn't.
+    async fn ensure(&self, slot: &Arc<Slot>, plan: &Plan, need: Need) -> Result<Running, Refusal> {
         let usable = |st: &SlotState, swapping_ok: bool| -> Option<Running> {
             st.running
                 .as_ref()
@@ -393,7 +394,7 @@ impl Services {
         };
         {
             let st = lock(&slot.state);
-            if let Some(running) = usable(&st, serve_old) {
+            if let Some(running) = usable(&st, need == Need::Serve) {
                 return Ok(running);
             }
             if let Some((_, why)) = st.failed.as_ref().filter(|(hash, _)| *hash == plan.hash) {
@@ -473,7 +474,7 @@ impl Services {
             vm,
             described: described.clone(),
         };
-        let old = {
+        let (old, learned_unused) = {
             let mut st = lock(&slot.state);
             st.starts += 1;
             st.failed = None;
@@ -497,13 +498,30 @@ impl Services {
                 })
                 .collect();
             st.timers = timers;
-            st.running.replace(running.clone())
+            // The loader starts a version once to learn its timers. With none,
+            // and nothing running before it, it stops the VM here, before it is
+            // published: no caller is ever handed a VM the loader is about to
+            // stop, and a VM a caller started was never the loader's to stop.
+            let learned_unused = need == Need::Learn
+                && described.timers.is_empty()
+                && !running.vm.status().busy()
+                && st.running.is_none()
+                && !st.swapping;
+            let old = if learned_unused {
+                None
+            } else {
+                st.running.replace(running.clone())
+            };
+            (old, learned_unused)
         };
         slot.note(format!("started ({} {})", plan.name, plan.version));
         hooks.listeners(&plan.plugin, &described.listeners);
         // The old version finishes its calls in flight, then stops.
         if let Some(old) = old {
             old.vm.stop();
+        }
+        if learned_unused {
+            running.vm.stop();
         }
         self.supervise(slot);
         Ok(running)
@@ -535,7 +553,7 @@ impl Services {
             Refusal::new(reason::UNKNOWN_METHOD, format!("{}'s service has no {what} {name}", plan.name))
         };
         for attempt in 0..2 {
-            let running = self.ensure(&slot, plan, true).await?;
+            let running = self.ensure(&slot, plan, Need::Serve).await?;
             let safe = match kind {
                 Kind::Method => *running.described.methods.get(name).ok_or_else(unknown)?,
                 Kind::Tool if !running.described.tools.iter().any(|t| t == name) => return Err(unknown()),
@@ -585,7 +603,7 @@ impl Services {
     /// The tools `plan`'s service answers (starting it if need be).
     pub async fn tools(&self, plan: &Plan) -> Result<Vec<String>, Refusal> {
         let slot = self.slot(&plan.plugin);
-        Ok(self.ensure(&slot, plan, true).await?.described.tools)
+        Ok(self.ensure(&slot, plan, Need::Serve).await?.described.tools)
     }
 
     /// One looker per slot: stops it when idle, fires its timers.
