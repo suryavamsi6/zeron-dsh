@@ -166,6 +166,41 @@ async fn an_update_swaps_after_the_new_version_loads() {
     assert_eq!(slow.await.unwrap().unwrap(), json!("slow v1"));
 }
 
+/// Loading burns time first, so the scan's loader is still loading when a
+/// caller's first use arrives: the interleaving a loaded CI runner hit.
+const SLOW_LOAD: &str = r#"
+local zeron = require("./zeron")("svc")
+local n = 0
+for i = 1, 3000000 do
+	n = (n + i) % 1000003
+end
+zeron.serve("version", function() return "v1" end)
+"#;
+
+/// A version's first load only learns what it serves (and its timers). It must
+/// never stop a service a call started while it was loading: on CI that left
+/// `PluginStatus` saying running false for a service whose call had just
+/// answered, with one start and one `started` line in its log (SUR-122).
+#[tokio::test]
+async fn a_loader_does_not_stop_a_service_a_caller_started() {
+    let r = rig(Config::default());
+    let plan = r.plan("1.0.0", SLOW_LOAD, &["service"]);
+    // The scan's loader, as `sync` starts it for a version it hasn't seen; the
+    // test keeps its task so it can wait for the pass to end.
+    let loader = r
+        .services
+        .load_beside(r.services.slot("svc"), plan.clone())
+        .expect("a runtime");
+    // A caller's first use gets in while that load is running: it takes the
+    // start lock, and the loader waits behind it and finds its VM.
+    let tools = r.services.tools(&plan).await.expect("tools");
+    assert!(tools.is_empty(), "the service has no tools: {tools:?}");
+    // The loader's pass ends here. The caller's VM is not its to stop.
+    loader.await.unwrap();
+    assert!(r.running(), "the loader stopped the VM the caller started");
+    assert_eq!(r.starts(), 1, "one VM served the caller and the loader");
+}
+
 #[tokio::test]
 async fn a_broken_update_fails_calls_with_why() {
     let r = rig(Config::default());
