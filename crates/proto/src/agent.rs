@@ -158,10 +158,18 @@ impl HarnessId {
     }
 
     /// Whether this build can actually run `self`: DeepSeek everywhere, Mock
-    /// only in debug builds (tests). Decode still accepts the legacy ids so an
-    /// old row reads back as what it was.
+    /// only with the `mock-harness` feature. Decode still accepts the legacy
+    /// ids so an old row reads back as what it was.
+    ///
+    /// Mock is a test harness, but neither `cfg!(debug_assertions)` (the
+    /// previous gate) nor `cfg!(test)` works as its gate: assertions are off in
+    /// `--release`, and `cfg!(test)` is off in a consumer's integration-test
+    /// binaries, which is exactly where Mock has to run. So the gate is the
+    /// `mock-harness` feature, which a consumer enables from its
+    /// `[dev-dependencies]`: test targets get it, shipped binaries do not.
     pub fn can_run(self) -> bool {
-        self == HarnessId::DeepSeek || (cfg!(debug_assertions) && self == HarnessId::Mock)
+        self == HarnessId::DeepSeek
+            || (cfg!(feature = "mock-harness") && self == HarnessId::Mock)
     }
 
     /// The wire slug (`claude-code`, `codex`, ...) — what serde writes.
