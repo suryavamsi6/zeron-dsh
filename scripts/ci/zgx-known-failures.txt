@@ -26,6 +26,7 @@ rust-macos: transcript_paint_tests::a_long_chat_opened_and_scrolled_draws_what_a
 rust-macos: transcript_paint_tests::a_long_chat_come_back_to_mid_scroll_draws_what_a_whole_repaint_draws
 rust-macos: transcript_paint_tests::a_long_chat_of_other_chats_messages_opened_and_scrolled_draws_what_a_whole_repaint_draws
 rust-macos: transcript_paint_tests::rows_that_come_whole_after_they_show_stay_apart_and_drawn
+rust-macos: transcript_paint_tests::a_long_thread_opened_and_scrolled_draws_what_a_whole_repaint_draws
 
 # A canvas animating in view runs its script 10 times in the runner's half
 # second, and the test wants more than 10: its frames come too slowly there.
