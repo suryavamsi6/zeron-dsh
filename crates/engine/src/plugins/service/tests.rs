@@ -181,6 +181,11 @@ zeron.serve("version", function() return "v1" end)
 /// never stop a service a call started while it was loading: on CI that left
 /// `PluginStatus` saying running false for a service whose call had just
 /// answered, with one start and one `started` line in its log (SUR-122).
+///
+/// The default current-thread runtime is part of the arrangement: the caller's
+/// future is polled first, so it takes the start lock while the loader's task is
+/// still pending. On a multi-thread runtime the loader can win that race and
+/// start and stop its own VM first, which is not the interleaving under test.
 #[tokio::test]
 async fn a_loader_does_not_stop_a_service_a_caller_started() {
     let r = rig(Config::default());
