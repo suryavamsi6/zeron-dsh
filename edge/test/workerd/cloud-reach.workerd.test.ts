@@ -181,7 +181,7 @@ describe("only the person sets a reach", () => {
     const started = await call("POST", `/cloud/${u.orgId}/sessions`, runner, {
       chatId: child,
       parentChatId: main.chatId,
-      config: { harness: "codex" },
+      config: { harness: "deepseek" },
       reach: "devices"
     });
     expect(started.status, await started.clone().text()).toBe(200);

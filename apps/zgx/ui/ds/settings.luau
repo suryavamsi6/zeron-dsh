@@ -555,8 +555,8 @@ function M.Row(props: RowProps): Node
 		-- (No `min_h`: a row is its content's height, 42 for one line, as it
 		-- has always drawn; `"$zeron.settings.row"` here, which zgx once
 		-- ignored, would hold it at 52.)
-		px = "$space.4",
-		py = "$space.3",
+		px = if props.compact then ui.raw(15, "compact provider inset") else "$space.4",
+		py = if props.compact then "$space.2" else "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",
 		disabled = props.disabled,
 		opacity = if props.disabled

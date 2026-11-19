@@ -346,6 +346,11 @@ local function Session(id: Id?): Node
 						end),
 						-- ⌘F's find (screens/chat/find): its matches marked.
 						find = Find.marks(),
+						-- A reply read aloud, where the chat's agent
+						-- offers it (screens/chat/aloud).
+						aloud = Aloud.for_session(function(): any
+							return store.session:get()
+						end),
 					},
 					Find.Bar(),
 				},

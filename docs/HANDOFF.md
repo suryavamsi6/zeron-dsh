@@ -84,6 +84,22 @@ Captains (SUR-97, plugin-first).
 
 ## Decisions
 
+### SUR-125: upstream parity is a repeating sync, not a one-off
+
+`upstream` is `https://github.com/zeronsh/zeron`. After every merged PR, check drift with
+`git fetch upstream && git rev-list --count origin/main..upstream/main`. Sync when **100+
+commits behind**, or at every milestone boundary, whichever comes first; at **300+ behind**,
+stop feature work and sync first. One branch `dsuryavamsi/sur-125-upstream-sync-<tag>`, one PR.
+The sync PR is the **one type merged with a merge commit, not squash**: squashing would drop
+upstream ancestry and every later sync would re-diff and re-conflict the same commits. Never
+rebase or force-push `main`. Resolution rule: upstream wins for shared app behaviour; fork-only
+work stays (dsh provider culling, zgx dsh pages, plugin runtime, docs); files we deliberately
+deleted stay deleted. Gate: `CI result` green on the sync PR, release-profile failures triaged,
+and `git merge-base --is-ancestor upstream/main main` true afterwards.
+
+Round 1 is the current PR (#43): merge of upstream `e393c4a84` (0.3.9 + 169 commits) into
+`main` `2bb0d54a`; it is a merge commit, not a squash.
+
 ### SUR-58: scheduled tasks are owned by the engine
 
 dsh's schedule service lives in a long-lived Host process, but our sidecar is started once
