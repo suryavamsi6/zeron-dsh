@@ -171,6 +171,25 @@ pub fn install(host: &ScriptHost) {
         let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
         answer(engine::get().call("DshProviderAuthRemove", params).await)
     });
+    // The engine's scheduled tasks (crates/engine/src/schedules.rs), for
+    // Settings → Automation tasks: the list, and a task saved (`{task}`, an
+    // empty `id` creating), deleted (`{id}`) or fired once now (`{id}`).
+    // Args pass through whole: the engine names what each takes.
+    host.async_action("Schedules", |_| async {
+        answer(engine::get().call("Schedules", json!({})).await)
+    });
+    host.async_action("ScheduleSave", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("ScheduleSave", params).await)
+    });
+    host.async_action("ScheduleDelete", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("ScheduleDelete", params).await)
+    });
+    host.async_action("ScheduleRunNow", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
+        answer(engine::get().call("ScheduleRunNow", params).await)
+    });
 }
 
 /// The engine's answer as a script value: its JSON, or the words it refused

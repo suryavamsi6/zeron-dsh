@@ -57,6 +57,18 @@ local dsh_plugin_set_row = ui.state("settings_stub_dsh_plugin_set_row", nil :: a
 -- way — a malformed index's words are one), or a table a test sets
 -- (`{title, plugins}`).
 local dsh_plugin_index = ui.state("settings_stub_dsh_plugin_index", nil :: any)
+-- What `Schedules` answers: nil (the `task_store` below), or a
+-- `{ tasks = … }` a test sets. Each write's answer is its own state:
+-- `settings_stub_schedule_save`, `_delete` and `_run` take nil (the op
+-- lands as the engine's would), "pending" (never settles), another
+-- string (refused that way — the engine's words for a rule with no run
+-- ahead), or a table (its answer). The ops asked for, in order, are in
+-- `settings_stub_schedule_calls` (`{ op = "save"|"delete"|"run", … }`).
+local schedule_tasks = ui.state("settings_stub_schedule_tasks", nil :: any)
+local schedule_save = ui.state("settings_stub_schedule_save", nil :: any)
+local schedule_delete = ui.state("settings_stub_schedule_delete", nil :: any)
+local schedule_run = ui.state("settings_stub_schedule_run", nil :: any)
+local schedule_calls = ui.state("settings_stub_schedule_calls", {} :: { any })
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -214,6 +226,48 @@ local function plugin_run(over: any): any
 		return settled(nil, over)
 	end
 	return settled({ ok = true, exitCode = 0, log = "", refusal = nil })
+end
+
+-- The engine's scheduled tasks (crates/engine/src/schedules.rs), epoch
+-- ms as it keeps them: one active daily in the chat open, one paused
+-- weekly making a new chat once (its `session` the one it made).
+local TASK_NOW = math.floor(os.time() * 1000)
+local task_store: { any } = {
+	{
+		id = "task_daily",
+		title = "Standup summary",
+		prompt = "Summarize what landed yesterday.",
+		rrule = "DTSTART:20261101T090000Z\nRRULE:FREQ=DAILY;BYHOUR=9;BYMINUTE=0",
+		target = { kind = "session", session = "a1" },
+		active = true,
+		nextAt = TASK_NOW + 26 * 3600 * 1000,
+		lastRunAt = TASK_NOW - 22 * 3600 * 1000,
+		updatedAt = TASK_NOW - 24 * 3600 * 1000,
+	},
+	{
+		id = "task_paused",
+		title = "Weekly digest",
+		prompt = "Write the week's notes.",
+		rrule = "DTSTART:20261102T073000Z\nRRULE:FREQ=WEEKLY;BYDAY=MO;BYHOUR=7;BYMINUTE=30",
+		target = { kind = "new_once", cwd = "/work/atlas", session = "a2" },
+		active = false,
+		nextAt = nil,
+		lastRunAt = TASK_NOW - 7 * 86400 * 1000,
+		updatedAt = TASK_NOW - 8 * 86400 * 1000,
+	},
+}
+
+-- A schedule op's override answer, as `plugin_run` does a plugin's:
+-- nil means it lands.
+local function schedule_over(over: any): any
+	if over == "pending" then
+		return { done = false, after = function() end }
+	elseif type(over) == "table" then
+		return settled(over)
+	elseif type(over) == "string" then
+		return settled(nil, over)
+	end
+	return nil
 end
 
 local answers: { [string]: (arg: any) -> any } = {
@@ -440,6 +494,83 @@ local answers: { [string]: (arg: any) -> any } = {
 			end
 		end
 		return settled({ rows = {} })
+	end,
+	-- The scheduled tasks (crates/engine/src/schedules.rs): `Schedules`
+	-- lists `task_store` (or a test's own), `ScheduleSave` replaces by
+	-- `id` — an empty one creating — recomputing `nextAt` (none while
+	-- paused) and `updatedAt` as the engine does, `ScheduleDelete`
+	-- answers `{deleted}`, `ScheduleRunNow` fires it once (its rule and
+	-- pause as they were; a `new_once`/`new` target's `session` becomes
+	-- the chat it made).
+	["Schedules"] = function()
+		local over = schedule_tasks:peek()
+		if over ~= nil then
+			return settled(over)
+		end
+		local out = {}
+		for _, t in task_store do
+			table.insert(out, table.clone(t))
+		end
+		return settled({ tasks = out })
+	end,
+	["ScheduleSave"] = function(arg: any)
+		local t = if type(arg) == "table" then arg.task else nil
+		schedule_calls:push({ op = "save", task = t })
+		local over = schedule_over(schedule_save:peek())
+		if over ~= nil then
+			return over
+		end
+		if type(t) ~= "table" or type(t.title) ~= "string" or type(t.prompt) ~= "string" or type(t.rrule) ~= "string" or type(t.target) ~= "table" then
+			return settled(nil, "ScheduleSave: a task needs its title, prompt, rrule and target")
+		end
+		local saved = table.clone(t)
+		saved.updatedAt = TASK_NOW
+		saved.nextAt = if saved.active ~= false then TASK_NOW + 3600 * 1000 else nil
+		if type(saved.id) == "string" and saved.id ~= "" then
+			for i, x in task_store do
+				if x.id == saved.id then
+					task_store[i] = saved
+					return settled(saved)
+				end
+			end
+			task_store[#task_store + 1] = saved
+			return settled(saved)
+		end
+		saved.id = `task_{#task_store + 1}`
+		task_store[#task_store + 1] = saved
+		return settled(saved)
+	end,
+	["ScheduleDelete"] = function(arg: any)
+		local id = if type(arg) == "table" then arg.id else nil
+		schedule_calls:push({ op = "delete", id = id })
+		local over = schedule_over(schedule_delete:peek())
+		if over ~= nil then
+			return over
+		end
+		local at = find(task_store, id)
+		if at then
+			table.remove(task_store, at)
+			return settled({ deleted = true })
+		end
+		return settled({ deleted = false })
+	end,
+	["ScheduleRunNow"] = function(arg: any)
+		local id = if type(arg) == "table" then arg.id else nil
+		schedule_calls:push({ op = "run", id = id })
+		local over = schedule_over(schedule_run:peek())
+		if over ~= nil then
+			return over
+		end
+		local at = if type(id) == "string" then find(task_store, id) else nil
+		if not at then
+			return settled(nil, `ScheduleRunNow: no such schedule: {id}`)
+		end
+		local t = task_store[at]
+		t.lastRunAt = TASK_NOW
+		if type(t.target) == "table" and (t.target.kind == "new_once" or t.target.kind == "new") then
+			t.target.session = `chat_{id}_run`
+		end
+		return settled({ fired = true, session = if type(t.target) == "table" then t.target.session else nil })
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })
