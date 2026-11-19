@@ -52,6 +52,11 @@ local dsh_plugin_rows = ui.state("settings_stub_dsh_plugin_rows", nil :: any)
 -- and the owning bundle's refreshed rows answer), "pending" (never
 -- settles), another string (refused that way), or a table a test sets.
 local dsh_plugin_set_row = ui.state("settings_stub_dsh_plugin_set_row", nil :: any)
+-- What `DshPluginIndex` answers: nil (the four-entry index below),
+-- "pending" (never settles), another string (the fetch refused that
+-- way — a malformed index's words are one), or a table a test sets
+-- (`{title, plugins}`).
+local dsh_plugin_index = ui.state("settings_stub_dsh_plugin_index", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -328,6 +333,67 @@ local answers: { [string]: (arg: any) -> any } = {
 	["DshPluginRemove"] = function(arg: any)
 		plugin_calls:push({ op = "remove", value = arg.name })
 		return plugin_run(dsh_plugin_remove:peek())
+	end,
+	-- A plugin index's entries for the page's Discover section, as
+	-- crates/engine/src/dsh_plugin_index.rs reports them (`{title,
+	-- plugins}`): an npm entry at its recommended version, a git-sourced
+	-- one it can't install, one no listed version is compatible for, and
+	-- one whose engines.dsh couldn't be read.
+	["DshPluginIndex"] = function(_arg: any)
+		local over = dsh_plugin_index:peek()
+		if over == "pending" then
+			-- (Still on its way: never settles.)
+			return { done = false, after = function() end }
+		elseif type(over) == "table" then
+			return settled(over)
+		elseif type(over) == "string" then
+			return settled(nil, over)
+		end
+		return settled({
+			title = "Team plugins",
+			plugins = {
+				{
+					name = "dsh-plugin-foo",
+					title = "Foo tools",
+					description = "Foo's own tools",
+					author = "Ada Dev",
+					version = "1.1.0",
+					source = "npm",
+					installable = true,
+					note = nil,
+				},
+				{
+					name = "dsh-plugin-bar",
+					title = "dsh-plugin-bar",
+					description = nil,
+					author = "Grace",
+					version = "0.4.0",
+					source = "git",
+					installable = false,
+					note = "Installs from a git repository — add it by its URL.",
+				},
+				{
+					name = "dsh-plugin-broken",
+					title = "Broken",
+					description = nil,
+					author = nil,
+					version = nil,
+					source = nil,
+					installable = false,
+					note = "No listed version is compatible with this device.",
+				},
+				{
+					name = "dsh-plugin-mystery",
+					title = "dsh-plugin-mystery",
+					description = nil,
+					author = nil,
+					version = "1.2.3",
+					source = "npm",
+					installable = true,
+					note = "Its engines.dsh couldn't be read — compatibility is unknown.",
+				},
+			},
+		})
 	end,
 	-- One bundle's patch rows (`{name}` -> `{rows: […]}`), and a row's
 	-- switch (`{id, disabled}` -> the owning bundle's refreshed rows),
@@ -640,7 +706,7 @@ local function detail(arg: any): string
 	if type(arg) == "string" then
 		return arg
 	elseif type(arg) == "table" then
-		return arg.id or arg.method or arg.name or arg.path or ""
+		return arg.id or arg.method or arg.name or arg.path or arg.url or ""
 	end
 	return ""
 end

@@ -1,10 +1,12 @@
 -- Settings → DeepSeek plugins (screens/settings/dsh_plugins): the dsh
--- bundles installed for DeepSeek sessions, installing one from a spec, and
--- removing one after asking once. On the shell in ui/shell_fixture.luau,
--- `DshPlugins`, `DshPluginAdd` and `DshPluginRemove` answered by
+-- bundles installed for DeepSeek sessions, installing one from a spec, an
+-- index's entries discovered for what to install, and removing one after
+-- asking once. On the shell in ui/shell_fixture.luau, `DshPlugins`,
+-- `DshPluginAdd`, `DshPluginRemove` and `DshPluginIndex` answered by
 -- ui/settings_stub.luau (`settings_stub_dsh_plugins`,
--- `settings_stub_dsh_plugin_add`, `settings_stub_dsh_plugin_remove`; the
--- ops asked for are in `settings_stub_dsh_plugin_calls`).
+-- `settings_stub_dsh_plugin_add`, `settings_stub_dsh_plugin_remove`,
+-- `settings_stub_dsh_plugin_index`; the ops asked for are in
+-- `settings_stub_dsh_plugin_calls`).
 
 local PAGE = "#settings-page"
 local NAV = "#settings-nav"
@@ -366,4 +368,84 @@ test("DeepSeek plugins a refused switch flips back to what it was and says why",
 	app:frames(10)
 	expect(app:has(`{PAGE} >> "Couldn't switch it."`)).to_be(true)
 	expect(app:tree(`{PAGE} >> role:switch "hello"`)).to_contain(" checked")
+end)
+
+-- The index address the Discover tests load (the stub answers it whatever
+-- it is).
+local INDEX_URL = "https://index.invalid/plugins.json"
+
+-- Typed in and Enter'd: the field commits on it, asking once (a click on
+-- Load index asks again, for the retry test).
+local function discovered(app: any)
+	app:type(`{PAGE} >> role:textbox "Index URL"`, INDEX_URL)
+	app:key("Enter")
+	app:frames(10)
+end
+
+test("DeepSeek plugins lists an index's entries with the version recommended for each", function()
+	local app = open()
+	discovered(app)
+	-- The index's title over its entries.
+	expect(app:has(`{PAGE} >> "From “Team plugins”"`)).to_be(true)
+	-- Foo tools: its words, and 1.1.0 — the recommended version, not the
+	-- highest (2.0.0-rc.1 a prerelease).
+	expect(app:has(`{PAGE} >> "Foo tools"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "Foo's own tools"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "Ada Dev"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "1.1.0"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "2.0.0-rc.1"`)).to_be(false)
+	-- The git one and the incompatible one listed too, their notes said.
+	expect(app:has(`{PAGE} >> "dsh-plugin-bar"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "0.4.0"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "Broken"`)).to_be(true)
+	-- Asked once, with the address typed.
+	expect(asked(app, `DshPluginIndex:{INDEX_URL}`)).to_be(1)
+end)
+
+test("DeepSeek plugins installs an index entry as name@version", function()
+	local app = open()
+	discovered(app)
+	app:click(`{PAGE} >> role:button "Install Foo tools"`)
+	app:frames(10)
+	local ops = added(app)
+	expect(#ops).to_be(1)
+	expect(ops[1].op).to_be("add")
+	expect(ops[1].value).to_be("dsh-plugin-foo@1.1.0")
+	-- Done: the note under the row, the installed list asked again.
+	expect(app:has(`{PAGE} >> "Installed. Applies to new sessions."`)).to_be(true)
+	expect(asked(app, "DshPlugins")).to_be(2)
+end)
+
+test("DeepSeek plugins leaves Install off on an entry that can't install here, its note saying why", function()
+	local app = open()
+	discovered(app)
+	-- The git-sourced entry: listed, its Install off, the index's note.
+	expect(app:tree(`{PAGE} >> role:button "Install dsh-plugin-bar"`)).to_contain("disabled")
+	expect(app:has(`{PAGE} >> "Installs from a git repository — add it by its URL."`)).to_be(true)
+	-- The incompatible one's is off the same way, its note.
+	expect(app:tree(`{PAGE} >> role:button "Install Broken"`)).to_contain("disabled")
+	expect(app:has(`{PAGE} >> "No listed version is compatible with this device."`)).to_be(true)
+	-- An installable entry's stays on.
+	expect(app:tree(`{PAGE} >> role:button "Install Foo tools"`)).never.to_contain("disabled")
+	-- Clicking a disabled Install asks nothing of the host.
+	app:click(`{PAGE} >> role:button "Install dsh-plugin-bar"`)
+	app:frames(10)
+	expect(#added(app)).to_be(0)
+end)
+
+test("DeepSeek plugins says why when an address doesn't answer a plugin index, and asks again on Load index", function()
+	local app = open()
+	app:set_state("settings_stub_dsh_plugin_index", "that address didn't answer a plugin index (expected value at line 1 column 1)")
+	app:type(`{PAGE} >> role:textbox "Index URL"`, "https://index.invalid/not-json")
+	app:key("Enter")
+	app:frames(10)
+	expect(app:tree(PAGE)).to_contain("that address didn't answer a plugin index")
+	expect(asked(app, "DshPluginIndex:https://index.invalid/not-json")).to_be(1)
+	-- No list; Load is back on for another try, and asks again.
+	expect(app:has(`{PAGE} >> "Foo tools"`)).to_be(false)
+	expect(app:tree(`{PAGE} >> role:button "Load index"`)).never.to_contain("disabled")
+	app:click(`{PAGE} >> role:button "Load index"`)
+	app:frames(10)
+	expect(asked(app, "DshPluginIndex:https://index.invalid/not-json")).to_be(2)
+	expect(app:tree(PAGE)).to_contain("that address didn't answer a plugin index")
 end)
