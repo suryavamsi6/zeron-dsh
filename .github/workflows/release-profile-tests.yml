@@ -1,7 +1,7 @@
 name: Release-profile tests
 
 # Pull-request and main CI test the dev profile (fast rebuilds). This runs the
-# Linux core tests once a day against the optimized release profile that
+# same Linux core suite once a day against the optimized release profile that
 # ships, so optimization-only failures still surface. It does not save a Rust
 # cache, so it cannot evict the main-seeded caches pull requests depend on.
 

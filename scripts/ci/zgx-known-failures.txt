@@ -4,6 +4,8 @@
 #
 #   rust: <test path>        both runners: `cargo test --bin zeron-zgx` (skipped, exact name)
 #   rust-macos: <test path>  the macOS runner only: skipped there, run by the others
+#   tests: <test name>       `cargo test --test '*'`, apps/zgx/tests/*.rs (skipped,
+#                            exact name)
 #   luau: <test name>        `zgx test ui` (run; its FAIL line accepted)
 #
 # A `rust`/`rust-macos` test is skipped, so it can't report that it passes

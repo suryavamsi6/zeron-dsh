@@ -36,7 +36,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.7"
+version = "0.3.9"
 edition = "2024"
 license = "MIT"
 publish = false
@@ -141,7 +141,7 @@ lto = "thin"
 strip = "symbols"
 
 [profile.dev]
-# gpui is slow unoptimized; match zed's approach for deps
+# Our own crates unoptimized for quick rebuilds; dependencies optimized below.
 opt-level = 0
 # Full DWARF was ~90% of every rlib (25 GB of target/debug/deps). Line tables
 # keep file:line in panics and backtraces; for locals in lldb, build with
