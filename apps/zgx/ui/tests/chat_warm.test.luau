@@ -170,7 +170,7 @@ test("a change of model while it waits starts another with it", function()
 	app:type(BOX, "Draft")
 	settle(app)
 	local first = string.match(calls(app), "warm_ask:[%w%-]+|([^|]*)|")
-	local other = if first == "opus" then "sonnet" else "opus"
+	local other = if first == "deepseek-flash" then "deepseek-v4-pro" else "deepseek-flash"
 	app:set_state("chat_model", other)
 	settle(app)
 	local models = {}

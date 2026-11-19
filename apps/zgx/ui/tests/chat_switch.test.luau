@@ -137,10 +137,10 @@ test("drafts, models and sends stay with their chat, back and forth", function()
 	for round = 1, 6 do
 		open(app, "s1")
 		expect(`{round}: {app:text('role:textbox "Message"')}`).to_be(`{round}: Draft for one`)
-		expect(chip_text(app, "Model")).to_contain("Opus")
+		expect(chip_text(app, "Model")).to_contain("DeepSeek V4.1 Flash")
 		open(app, "s2")
 		expect(`{round}: {app:text('role:textbox "Message"')}`).to_be(`{round}: Draft for two`)
-		expect(chip_text(app, "Model")).to_contain("Sonnet")
+		expect(chip_text(app, "Model")).to_contain("DeepSeek V4 Pro")
 	end
 	-- Sent from s2, after all that: to s2, shown in s2, and s1's draft stays.
 	app:key("Enter")
