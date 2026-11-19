@@ -552,9 +552,7 @@ function M.Row(props: RowProps): Node
 	end
 	local row: { [any]: any } = {
 		w_full = true,
-		-- (No `min_h`: a row is its content's height, 42 for one line, as it
-		-- has always drawn; `"$zeron.settings.row"` here, which zgx once
-		-- ignored, would hold it at 52.)
+		min_h = if props.compact then ui.raw(if props.on_click then 49 else 53, "compact provider card row") else "$zeron.settings.row",
 		px = if props.compact then ui.raw(15, "compact provider inset") else "$space.4",
 		py = if props.compact then "$space.2" else "$space.3",
 		gap = if props.stacked then "$space.3" else "$space.4",
