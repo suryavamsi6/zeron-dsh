@@ -8,8 +8,8 @@ publish.workspace = true
 [features]
 # Lets `HarnessId::Mock` run. Mock is a test harness, so it is off in shipped
 # builds; test targets turn it on via dev-dependencies (see zeron-engine).
-# `cfg!(debug_assertions)` was tried instead and fails the release-profile
-# test run, where assertions are off but the code is still under test.
+# The previous gate, `cfg!(debug_assertions)`, fails the release-profile test
+# run, where assertions are off but the code is still under test.
 mock-harness = []
 
 [dependencies]

@@ -158,13 +158,15 @@ impl HarnessId {
     }
 
     /// Whether this build can actually run `self`: DeepSeek everywhere, Mock
-    /// only in test builds. Decode still accepts the legacy ids so an old row
-    /// reads back as what it was.
+    /// only with the `mock-harness` feature. Decode still accepts the legacy
+    /// ids so an old row reads back as what it was.
     ///
-    /// Mock is a test harness, so the gate is `cfg!(test)` rather than
-    /// `cfg!(debug_assertions)`: `--release` turns debug assertions off but is
-    /// still a test build, and gating on the profile made every Mock-driven
-    /// test fail as "unsupported" in the release-profile run.
+    /// Mock is a test harness, but neither `cfg!(debug_assertions)` (the
+    /// previous gate) nor `cfg!(test)` works as its gate: assertions are off in
+    /// `--release`, and `cfg!(test)` is off in a consumer's integration-test
+    /// binaries, which is exactly where Mock has to run. So the gate is the
+    /// `mock-harness` feature, which a consumer enables from its
+    /// `[dev-dependencies]`: test targets get it, shipped binaries do not.
     pub fn can_run(self) -> bool {
         self == HarnessId::DeepSeek
             || (cfg!(feature = "mock-harness") && self == HarnessId::Mock)
