@@ -75,6 +75,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 tracing-subscriber.workspace = true
 zeron-mcp.workspace = true
 zeron-harness = { workspace = true, features = ["installer-fixture"] }
+# The Mock harness the engine tests drive sessions through; shipped builds
+# leave it off (see zeron-proto's `mock-harness` feature).
+zeron-proto = { workspace = true, features = ["mock-harness"] }
 # Paused-clock tests (the 30-minute idle reaper).
 tokio = { workspace = true, features = ["test-util"] }
 tokio-tungstenite.workspace = true
