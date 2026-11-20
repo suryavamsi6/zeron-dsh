@@ -209,6 +209,27 @@ pub(crate) type McpCall =
 /// The MCP list's two host actions over `call`: this app's engine here, an
 /// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
 /// `args.to_json()` pass-through, same [`answer`].
+/// `value` with every leaf under an `env` key replaced: a failure's shape
+/// without a token in it.
+fn shape(value: &Json) -> Json {
+    match value {
+        Json::Object(map) => Json::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let value = if key == "env" {
+                        Json::String("<redacted>".into())
+                    } else {
+                        shape(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Json::Array(items) => Json::Array(items.iter().map(shape).collect()),
+        other => other.clone(),
+    }
+}
+
 pub(crate) fn install_mcp<F>(host: &ScriptHost, call: F)
 where
     F: Fn(&'static str, Json) -> McpCall + Clone + 'static,
@@ -226,19 +247,47 @@ where
             .map_err(|error| error.to_string());
         async move {
             let mut params = params?;
-            // A server with no arguments: Luau's empty table crosses as
-            // `{}`, where the engine's `args` is a list — spell it `[]`, or
-            // the engine answers a shape error instead of saving (SUR-145).
-            if let Some(servers) = params.get_mut("servers").and_then(Json::as_array_mut) {
-                for server in servers {
-                    if let Some(args) = server.get_mut("args")
-                        && args.as_object().is_some_and(|object| object.is_empty())
-                    {
-                        *args = Json::Array(Vec::new());
+            // The page's list crosses Luau as a table, and the engine's
+            // contract is JSON: an empty table is `{}` where it wants `[]`,
+            // and a list may arrive keyed "1".. rather than as an array.
+            // Spell what `McpServer` names before the engine sees it, or a
+            // server with no arguments (or an emptied list) is refused with
+            // a shape error instead of saving (SUR-145).
+            if let Some(list) = params.get_mut("servers") {
+                if let Some(object) = list.as_object() {
+                    let mut items: Vec<(u64, Json)> = object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            key.parse::<u64>().ok().map(|index| (index, value.clone()))
+                        })
+                        .collect();
+                    if items.len() == object.len() {
+                        items.sort_by_key(|(index, _)| *index);
+                        *list = Json::Array(items.into_iter().map(|(_, value)| value).collect());
+                    }
+                }
+                if let Some(servers) = list.as_array_mut() {
+                    for server in servers {
+                        if let Some(args) = server.get_mut("args")
+                            && args.as_object().is_some_and(|object| object.is_empty())
+                        {
+                            *args = Json::Array(Vec::new());
+                        }
                     }
                 }
             }
-            answer(call("SetMcpServers", params).await)
+            let result = call("SetMcpServers", params.clone()).await;
+            if result.is_err() {
+                // The engine's words say what the shape should have been,
+                // never which value. An env value can be a token, so only
+                // the shape is printed: every leaf off `env` is replaced.
+                eprintln!(
+                    "SetMcpServers failed: {:?}\nshape: {}",
+                    result.as_ref().err(),
+                    serde_json::to_string(&shape(&params)).unwrap_or_default()
+                );
+            }
+            answer(result)
         }
     });
 }
