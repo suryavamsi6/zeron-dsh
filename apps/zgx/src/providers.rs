@@ -209,6 +209,18 @@ pub(crate) type McpCall =
 /// The MCP list's two host actions over `call`: this app's engine here, an
 /// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
 /// `args.to_json()` pass-through, same [`answer`].
+/// What a JSON value is, for a diagnostic.
+fn kind(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "null",
+        Json::Bool(_) => "a bool",
+        Json::Number(_) => "a number",
+        Json::String(_) => "a string",
+        Json::Array(_) => "an array",
+        Json::Object(_) => "an object",
+    }
+}
+
 /// `value` with every leaf under an `env` key replaced: a failure's shape
 /// without a token in it.
 fn shape(value: &Json) -> Json {
@@ -216,8 +228,20 @@ fn shape(value: &Json) -> Json {
         Json::Object(map) => Json::Object(
             map.iter()
                 .map(|(key, value)| {
+                    // `env`'s shape without a value: an object keeps its
+                    // keys, an array its length (which is the bug's tell).
                     let value = if key == "env" {
-                        Json::String("<redacted>".into())
+                        match value {
+                            Json::Object(map) => Json::Object(
+                                map.keys()
+                                    .map(|key| (key.clone(), Json::String("<redacted>".into())))
+                                    .collect(),
+                            ),
+                            Json::Array(items) => Json::Array(
+                                items.iter().map(|_| Json::String("<redacted>".into())).collect(),
+                            ),
+                            other => Json::String(format!("<env is {}>", kind(other))),
+                        }
                     } else {
                         shape(value)
                     };
@@ -272,6 +296,14 @@ where
                             && args.as_object().is_some_and(|object| object.is_empty())
                         {
                             *args = Json::Array(Vec::new());
+                        }
+                        // An empty table is `[]` crossing Luau, and `env`
+                        // is a map: a server with no environment (the
+                        // common case) was refused with a shape error.
+                        if let Some(env) = server.get_mut("env")
+                            && env.as_array().is_some_and(|items| items.is_empty())
+                        {
+                            *env = Json::Object(serde_json::Map::new());
                         }
                     }
                 }
