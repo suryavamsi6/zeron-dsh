@@ -199,16 +199,11 @@ pub fn install(host: &ScriptHost) {
     });
 }
 
-/// The engine's answer as a script value: its JSON, or the words it refused
-/// with. The page reads the same shape the gateway sends.
-/// One host action's engine call: the seam [`install_mcp`] takes, so the app
+/// A host action's engine call: the seam [`install_mcp`] takes, so the app
 /// and an in-process test use the same action bodies.
 pub(crate) type McpCall =
     std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, String>>>>;
 
-/// The MCP list's two host actions over `call`: this app's engine here, an
-/// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
-/// `args.to_json()` pass-through, same [`answer`].
 /// What a JSON value is, for a diagnostic.
 fn kind(value: &Json) -> &'static str {
     match value {
@@ -254,6 +249,9 @@ fn shape(value: &Json) -> Json {
     }
 }
 
+/// The MCP list's two host actions over `call`: this app's engine here, an
+/// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
+/// `args.to_json()` pass-through, same [`answer`].
 pub(crate) fn install_mcp<F>(host: &ScriptHost, call: F)
 where
     F: Fn(&'static str, Json) -> McpCall + Clone + 'static,
@@ -311,8 +309,10 @@ where
             let result = call("SetMcpServers", params.clone()).await;
             if result.is_err() {
                 // The engine's words say what the shape should have been,
-                // never which value. An env value can be a token, so only
-                // the shape is printed: every leaf off `env` is replaced.
+                // never which value. `env` is where a token lives, so every
+                // value under an `env` key is replaced; `name`, `command`
+                // and `args` are printed as typed, which the page already
+                // shows on screen.
                 eprintln!(
                     "zeron-zgx: mcp: SetMcpServers failed: {:?}; shape: {}",
                     result.as_ref().err(),
@@ -324,6 +324,8 @@ where
     });
 }
 
+/// The engine's answer as a script value: its JSON, or the words it refused
+/// with. The page reads the same shape the gateway sends.
 fn answer(reply: Result<Json, String>) -> Result<Value, String> {
     let json = reply?;
     let text = serde_json::to_string(&json).map_err(|error| error.to_string())?;

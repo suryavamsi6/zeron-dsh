@@ -35,8 +35,11 @@ struct Live {
 
 impl Live {
     fn close(self) {
-        let Live { core, rt, .. } = self;
+        // Shut the engine down while the temp dir still exists: dropping it
+        // first removes the files underneath a running engine.
+        let Live { core, rt, _dir, .. } = self;
         rt.block_on(async { core.shutdown().await });
+        drop(_dir);
     }
 }
 
@@ -269,7 +272,7 @@ fn adding_a_server_writes_it_to_the_engines_list() {
 }
 
 #[test]
-fn a_second_add_leaves_the_firsts_env_byte_identical() {
+fn a_second_add_leaves_the_firsts_env_unchanged() {
     let mut live = live(&[]);
     assert!(wait_for(
         &mut live.app,
@@ -289,7 +292,9 @@ fn a_second_add_leaves_the_firsts_env_byte_identical() {
     );
     let first_env = env_text(&servers(&live.data_dir), "notes").expect("the first server's env");
 
-    add(&mut live.app, "second", "/usr/bin/second", "", "SECOND=value-two");
+    // An empty environment is the common case, and the shape the page used
+    // to get refused: this add must save with `env` an empty map.
+    add(&mut live.app, "second", "/usr/bin/second", "", "");
     assert!(
         listed(&mut live.app, "second"),
         "the second server did not list; page:\n{}",
@@ -301,12 +306,12 @@ fn a_second_add_leaves_the_firsts_env_byte_identical() {
     assert_eq!(
         env_text(&list, "notes").as_deref(),
         Some(first_env.as_str()),
-        "the first server's env came back byte-identical through the second save"
+        "the first server's env came back unchanged through the second save"
     );
     assert_eq!(
         env_text(&list, "second").as_deref(),
-        Some(r#"{"SECOND":"value-two"}"#),
-        "the second's env is what was typed"
+        Some("{}"),
+        "a server added with no environment saves as an empty map"
     );
     live.close();
 }
