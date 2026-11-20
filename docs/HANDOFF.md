@@ -128,6 +128,27 @@ never by rebasing.
   while a sync is in review, so commits that arrive mid-round are the *next* round rather than an
   extension of the current one. Round 1 closed at 0.3.10 (`d6fad8238`) in PR #43; `17d777fa0`
   (RollText, Grok approval) is round 2.
+- **Rounds so far:** round 2 at **0.3.12** (`2e3513c67`) merged as `0779d8cd6` (PR #66); round 3
+  at **0.3.13** (`13cf7db91`) merged as `bf9fd5913` (PR #77). Both kept `upstream/main` an
+  ancestor: drift 0 behind after each.
+- **Round 3 (0.3.13) — what was not taken, and why:**
+  - **Code Mode** is `zeron_harness::supports_code_mode`-gated for **Codex and Muse only**, both
+    cut. Its auto-merged hunks were reverted on top of the merge: `RunRequest.code_mode`,
+    `CodeModeSettings`/`code_mode()`, the `GetCodeMode`/`SetCodeMode` RPCs, the warm-start
+    replacement and every test's `RunRequest` initializer. No generic fix rode along: the only
+    non-Code-Mode hunk in those files is `crates/engine/tests/warm_start.rs` adding Codex coverage,
+    which is cut-provider, and `crates/engine/src/harness_updates.rs` / `crates/harness/README.md`
+    are Antigravity docs and updaters.
+  - **ACP registry agents** (`register_registry_agent`, `descriptors_for(include_registry)`) not
+    resurrected — they live in `acp_registry.rs`, which the cut removed.
+  - **Fork state kept** in `screens/settings/providers.luau`, `harness_updates.rs`, `registry.rs`,
+    `sessions.rs` (schedule bridge and user-MCP blocks), and the three Claude-only engine tests.
+  - **49 `modify/delete` conflicts** kept the deletion (46 from the DeepSeek-only cut `f9a17677a`,
+    3 from earlier cut-preserving merges).
+  - **`HarnessId::LEGACY` (11 entries) stays** for wire decode of old sessions; it is not a
+    resurrected provider, and `HarnessId::ALL` remains exactly `[DeepSeek, Mock]`.
+  - Locale strings for the cut provider pages remain in `en.json`/`zh-Hans.json` as inert data.
+  - Templates: `zeron-v2/.base.json` regenerated 8/8 from `apps/zgx/ui/<rel>` after the merge.
 - **Gate:** `CI result` green on the sync PR, release-profile failures triaged rather than re-run
   away, and `git merge-base --is-ancestor <round target> main` true afterwards.
 
