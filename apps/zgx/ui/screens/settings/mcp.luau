@@ -199,6 +199,8 @@ function M.view(): Node
 	local draft_env = ui.use_state("")
 	-- A write (add or remove) on its way; the row's Remove stays off.
 	local saving = ui.use_state(false)
+	-- The add form is its row's: open while it is being filled in.
+	local form_open = ui.use_state(false)
 	local problem = ui.use_state(nil :: string?)
 	-- The server whose remove is being asked about.
 	local removing = ui.use_state(nil :: string?)
@@ -276,6 +278,7 @@ function M.view(): Node
 			draft_command:set("")
 			draft_args:set("")
 			draft_env:set("")
+			form_open:set(false)
 		end)
 	end
 	local function ask_remove(name: string)
@@ -346,99 +349,110 @@ function M.view(): Node
 			end, { w_full = true, enter = { opacity = { 0, 1 }, duration = 120 }, exit = { opacity = 0, duration = 60 }, mode = "wait" }),
 		}),
 		search.anchor("add", ds.Settings.Section {
-			title = "Add server",
-			description = "A program this device starts beside your agents, over the Model Context Protocol.",
 			ds.Settings.Row {
-				label = "Name",
-				stacked = true,
-				control = ui.column {
-					w_full = true,
-					gap = "$space.1",
-					ds.TextField {
-						value = draft_name,
-						name = "Name",
-						placeholder = "filesystem",
+				label = "Add server",
+				description = "A program this device starts beside your agents, over the Model Context Protocol.",
+				icon = "plus",
+				on_click = function()
+					form_open:set(not form_open:peek())
+				end,
+			},
+			ui.show(form_open, ui.column {
+				w_full = true,
+				gap = "$space.2",
+				ds.Settings.Row {
+					label = "Name",
+					stacked = true,
+					control = ui.column {
+						w_full = true,
+						gap = "$space.1",
+						ds.TextField {
+							value = draft_name,
+							name = "Name",
+							placeholder = "filesystem",
+							size = "sm",
+							w_full = true,
+							error = typed_name_problem,
+							disabled = saving,
+						},
+						ui.show(function(): boolean
+							return typed_name_problem() ~= nil
+						end, ds.Hint {
+							tone = "danger",
+							function(): string
+								return typed_name_problem() or ""
+							end,
+						}),
+					},
+				},
+				ds.Settings.Row {
+					label = "Command",
+					stacked = true,
+					control = ds.TextField {
+						value = draft_command,
+						name = "Command",
+						placeholder = "npx",
 						size = "sm",
 						w_full = true,
-						error = typed_name_problem,
 						disabled = saving,
 					},
+				},
+				ds.Settings.Row {
+					label = "Arguments",
+					description = "One per line.",
+					stacked = true,
+					control = ds.TextArea {
+						value = draft_args,
+						name = "Arguments",
+						placeholder = "-y\n@modelcontextprotocol/server-filesystem\n/work/notes",
+						rows = 2,
+						max_rows = 6,
+						size = "sm",
+						mono = true,
+						w_full = true,
+						disabled = saving,
+					},
+				},
+				ds.Settings.Row {
+					label = "Environment",
+					description = "KEY=value, one per line. Values stay on this device.",
+					stacked = true,
+					control = ds.TextArea {
+						value = draft_env,
+						name = "Environment",
+						placeholder = "NOTES_ROOT=/work/notes",
+						rows = 2,
+						max_rows = 6,
+						size = "sm",
+						mono = true,
+						w_full = true,
+						disabled = saving,
+					},
+				},
+				ui.row {
+					w_full = true,
+					gap = "$space.3",
+					items = "center",
 					ui.show(function(): boolean
-						return typed_name_problem() ~= nil
+						return problem:get() ~= nil
 					end, ds.Hint {
 						tone = "danger",
+						grow = 1,
 						function(): string
-							return typed_name_problem() or ""
+							return problem:get() or ""
 						end,
 					}),
+					ds.Button {
+						"Save",
+						size = "sm",
+						busy = saving,
+						disabled = saving,
+						on_click = save,
+					},
 				},
-			},
-			ds.Settings.Row {
-				label = "Command",
-				stacked = true,
-				control = ds.TextField {
-					value = draft_command,
-					name = "Command",
-					placeholder = "npx",
-					size = "sm",
-					w_full = true,
-					disabled = saving,
-				},
-			},
-			ds.Settings.Row {
-				label = "Arguments",
-				description = "One per line.",
-				stacked = true,
-				control = ds.TextArea {
-					value = draft_args,
-					name = "Arguments",
-					placeholder = "-y\n@modelcontextprotocol/server-filesystem\n/work/notes",
-					rows = 2,
-					max_rows = 6,
-					size = "sm",
-					mono = true,
-					w_full = true,
-					disabled = saving,
-				},
-			},
-			ds.Settings.Row {
-				label = "Environment",
-				description = "KEY=value, one per line. Values stay on this device.",
-				stacked = true,
-				control = ds.TextArea {
-					value = draft_env,
-					name = "Environment",
-					placeholder = "NOTES_ROOT=/work/notes",
-					rows = 2,
-					max_rows = 6,
-					size = "sm",
-					mono = true,
-					w_full = true,
-					disabled = saving,
-				},
-			},
-			ui.row {
-				w_full = true,
-				gap = "$space.3",
-				items = "center",
-				ui.show(function(): boolean
-					return problem:get() ~= nil
-				end, ds.Hint {
-					tone = "danger",
-					grow = 1,
-					function(): string
-						return problem:get() or ""
-					end,
-				}),
-				ds.Button {
-					"Save",
-					size = "sm",
-					busy = saving,
-					disabled = saving,
-					on_click = save,
-				},
-			},
+			}),
 		}),
+
 		-- (The asking stands over the page wherever it is built.)
 		ds.Dialog {
 			open = remove_open,

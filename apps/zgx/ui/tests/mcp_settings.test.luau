@@ -68,6 +68,12 @@ test("MCP servers says when there are none", function()
 	expect(app:has(`{PAGE} >> "No MCP servers yet"`)).to_be(true)
 end)
 
+-- The add form is its row's: open it before filling anything in.
+local function start_adding(app: any)
+	app:click(`{PAGE} >> role:button "Add server"`)
+	app:frames(5)
+end
+
 -- The whole lists `SetMcpServers` was asked to save, in order.
 local function saved(app: any): { any }
 	return (app:state("settings_stub_mcp_saves") :: any) or {}
@@ -80,8 +86,11 @@ end
 
 test("MCP servers refuses a name the engine would, without asking the host", function()
 	local app = open()
+	start_adding(app)
 	app:fill(`{PAGE} >> role:textbox "Name"`, "bad name!")
 	app:fill(`{PAGE} >> role:textbox "Command"`, "npx")
+	app:scroll(PAGE, 600)
+	app:frames(5)
 	app:click(`{PAGE} >> role:button "Save"`)
 	app:frames(10)
 	expect(app:has(`{PAGE} >> "A name takes letters, digits, - and _ only."`)).to_be(true)
@@ -90,6 +99,7 @@ end)
 
 test("MCP servers adds a server and sends the whole list, env values intact", function()
 	local app = open()
+	start_adding(app)
 	app:fill(`{PAGE} >> role:textbox "Name"`, "notes")
 	app:fill(`{PAGE} >> role:textbox "Command"`, "npx")
 	app:fill(`{PAGE} >> role:textbox "Arguments"`, "-y\n@modelcontextprotocol/server-notes")
@@ -156,6 +166,7 @@ end)
 test("MCP servers keeps the draft when the host refuses the save", function()
 	local app = open()
 	app:set_state("settings_stub_mcp_save", `Two servers are named "notes"`)
+	start_adding(app)
 	app:fill(`{PAGE} >> role:textbox "Name"`, "notes")
 	app:fill(`{PAGE} >> role:textbox "Command"`, "npx")
 	app:fill(`{PAGE} >> role:textbox "Environment"`, "NOTES_TOKEN=keep-this")
