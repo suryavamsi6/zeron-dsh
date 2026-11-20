@@ -341,6 +341,21 @@ mod tests {
         assert!(error.contains("remote server"), "{error}");
     }
 
+    /// SUR-141: an HTTP entry is refused as remote *before* the command
+    /// rule, so one that carries no command at all never reads as a stdio
+    /// server with a missing command.
+    #[test]
+    fn validate_refuses_a_remote_server_with_no_command_as_remote() {
+        let mut server = server("remote", "");
+        server.http = Some(zeron_proto::McpHttp {
+            url: "https://example.test/mcp".into(),
+            ..Default::default()
+        });
+        let error = validate(&[server]).unwrap_err();
+        assert!(error.contains("remote server"), "{error}");
+        assert!(!error.contains("needs a command"), "{error}");
+    }
+
     #[test]
     fn validate_rejects_more_than_sixteen() {
         let many: Vec<McpServer> = (0..MAX_SERVERS + 1)
