@@ -74,11 +74,19 @@ fn live(preload: &[Json]) -> Live {
         let _enter = rt.enter();
         zeron_rpc::memory_client(core.rpc_service())
     });
-    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui/mcp_live_fixture.luau");
+    let ui = Path::new(env!("CARGO_MANIFEST_DIR")).join("ui");
+    let fixture = ui.join("mcp_live_fixture.luau");
     let app = {
         let _enter = rt.enter();
         TestApp::new(move |runtime| {
-            let host = ScriptHost::new(runtime, fixture);
+            // The page's modules name their packages as `ui/.luaurc` does
+            // (`@ds`, `@screens`, `@account`); the app's own host registers
+            // them, so a fixture mounted on a bare `ScriptHost` must too.
+            // (`@app` is zgx's own: the root, passed above.)
+            let host = ScriptHost::new(runtime, fixture)
+                .package("ds", ui.join("ds"))
+                .package("screens", ui.join("screens"))
+                .package("account", ui.join("account"));
             crate::providers::install_mcp(&host, {
                 let client = Rc::clone(&client);
                 move |method, params| {
@@ -127,8 +135,34 @@ fn has(app: &mut TestApp, target: &str) -> bool {
     app.find(target).is_some()
 }
 
+/// Deliver frames and real time until `target` shows (about five seconds).
+/// Explicit frames, as every other fixture test drives: a reactive update
+/// needs one, and `wait_until` only sends frames while something asks for
+/// them.
 fn wait_for(app: &mut TestApp, target: &str) -> bool {
-    app.wait_until(|app| has(app, target))
+    for _ in 0..1000 {
+        app.frames(1);
+        if has(app, target) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    false
+}
+
+/// The page's own text when an expectation fails: the section titles, the
+/// form's hints and any words the engine (or the host) said.
+fn page_state(app: &mut TestApp) -> String {
+    let tree = app.tree();
+    let want = [
+        "MCP", "server", "Server", "Save", "loaded", "host", "engine", "16", "notes", "second",
+        "seventeenth", "unsupported", "error",
+    ];
+    tree.lines()
+        .filter(|line| want.iter().any(|w| line.contains(w)))
+        .take(60)
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn fill(app: &mut TestApp, field: &str, text: &str) {
@@ -161,7 +195,11 @@ fn adding_a_server_writes_it_to_the_engines_list() {
         "-y\n@modelcontextprotocol/server-notes\n/work",
         "NOTES_ROOT=/work/notes\nTOKEN=abc=def ghi",
     );
-    assert!(listed(&mut live.app, "notes"), "the saved server did not list");
+    assert!(
+        listed(&mut live.app, "notes"),
+        "the saved server did not list; page:\n{}",
+        page_state(&mut live.app)
+    );
 
     let list = servers(&live.data_dir);
     assert_eq!(list.len(), 1, "{list:?}");
@@ -194,11 +232,19 @@ fn a_second_add_leaves_the_firsts_env_byte_identical() {
         "-y\nserver-notes\n/work",
         "TOKEN=abc=def ghi\nNOTES_ROOT=/work/notes",
     );
-    assert!(listed(&mut live.app, "notes"));
+    assert!(
+        listed(&mut live.app, "notes"),
+        "the first server did not list; page:\n{}",
+        page_state(&mut live.app)
+    );
     let first_env = env_text(&servers(&live.data_dir), "notes").expect("the first server's env");
 
     add(&mut live.app, "second", "/usr/bin/second", "", "SECOND=value-two");
-    assert!(listed(&mut live.app, "second"), "the second server did not list");
+    assert!(
+        listed(&mut live.app, "second"),
+        "the second server did not list; page:\n{}",
+        page_state(&mut live.app)
+    );
 
     let list = servers(&live.data_dir);
     assert_eq!(names(&list), vec!["notes", "second"], "the engine's order");
@@ -223,7 +269,11 @@ fn removing_the_first_leaves_only_the_second_unchanged() {
         &format!("{PAGE} >> \"No MCP servers yet\"")
     ));
     add(&mut live.app, "notes", "npx", "-y\nserver-notes", "TOKEN=abc=def ghi");
-    assert!(listed(&mut live.app, "notes"));
+    assert!(
+        listed(&mut live.app, "notes"),
+        "the first server did not list; page:\n{}",
+        page_state(&mut live.app)
+    );
     add(&mut live.app, "second", "/usr/bin/second", "", "SECOND=value-two");
     assert!(listed(&mut live.app, "second"));
     let second_env = env_text(&servers(&live.data_dir), "second").expect("the second's env");
@@ -274,7 +324,8 @@ fn a_refused_save_shows_the_engines_words_and_leaves_the_file_untouched() {
     add(&mut live.app, "seventeenth", "x", "", "");
     assert!(
         wait_for(&mut live.app, &format!("{PAGE} >> \"At most 16 MCP servers\"")),
-        "the engine's words never reached the page"
+        "the engine's words never reached the page; page:\n{}",
+        page_state(&mut live.app)
     );
     let after = std::fs::read(live.data_dir.join("mcp-servers.json")).unwrap();
     assert_eq!(before, after, "a refused save wrote the file");
