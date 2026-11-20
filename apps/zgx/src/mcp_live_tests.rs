@@ -170,11 +170,27 @@ fn fill(app: &mut TestApp, field: &str, text: &str) {
 }
 
 fn add(app: &mut TestApp, name: &str, command: &str, args: &str, env: &str) {
+    // The form sits under the list, and a row count can put it past the
+    // window's foot: bring it in before filling, as a person scrolls.
+    app.scroll(PAGE, 4000.0);
     fill(app, "Name", name);
     fill(app, "Command", command);
     fill(app, "Arguments", args);
     fill(app, "Environment", env);
     app.click(&format!("{PAGE} >> role:button \"Save\""));
+}
+
+/// Scroll back to the list (the form is at its foot) and ask to remove
+/// `name`, confirming the dialog.
+fn remove(app: &mut TestApp, name: &str) {
+    app.scroll(PAGE, -4000.0);
+    app.click(&format!("{PAGE} >> role:button \"Remove {name}\""));
+    assert!(
+        wait_for(app, &format!("role:dialog \"Remove “{name}”?\"")),
+        "removing {name} asked nothing; page:\n{}",
+        page_state(app)
+    );
+    app.click("role:button \"Remove server\"");
 }
 
 fn listed(app: &mut TestApp, name: &str) -> bool {
@@ -278,13 +294,7 @@ fn removing_the_first_leaves_only_the_second_unchanged() {
     assert!(listed(&mut live.app, "second"));
     let second_env = env_text(&servers(&live.data_dir), "second").expect("the second's env");
 
-    live.app
-        .click(&format!("{PAGE} >> role:button \"Remove notes\""));
-    assert!(
-        wait_for(&mut live.app, "role:dialog \"Remove “notes”?\""),
-        "removing asked nothing"
-    );
-    live.app.click("role:button \"Remove server\"");
+    remove(&mut live.app, "notes");
     assert!(
         live.app
             .wait_until(|app| !has(app, &format!("{PAGE} >> role:button \"Remove notes\""))),
