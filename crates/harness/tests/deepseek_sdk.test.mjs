@@ -20,6 +20,9 @@ const environmentSource = await readFile(resolve(here, '../src/deepseek/environm
 
 async function runtime(t, options = {}) {
   const home = options.home ?? await mkdtemp(join(tmpdir(), 'zeron-deepseek-test-'));
+  // The sidecar hands its child a filtered environment, so a test that wants
+  // the fake peer to fail `/plan` leaves a file where that peer can read it.
+  if (options.failPlan) await writeFile(join(home, 'plan-fails'), '');
   const child = spawn(process.execPath, [shim, sdkRoot, ...(options.realRuntime ? [] : [fixture])], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, SystemRoot: process.env.SystemRoot,
       DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: options.baseURL ?? 'http://127.0.0.1:9/anthropic' },
@@ -63,6 +66,7 @@ async function runtime(t, options = {}) {
     if (!options.home) await rm(home, { recursive: true, force: true });
   });
   send({ type: 'start', dshHome: home, cwd: here, model: options.model ?? 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource,
+    ...(options.plan === true ? { plan: true } : {}),
     ...(options.title ? { title: true, systemPrompt: options.systemPrompt, maxTokens: options.maxTokens } : {}) });
   return { home, send, next, frames, exited };
 }
@@ -248,6 +252,44 @@ test('actual SDK stops by shutdown and resumes the saved identity in a fresh run
   await second.next('ready');
   second.send({ type: 'prompt', prompt: 'continued' });
   assert.equal((await second.next('done')).finalResponse, 'reply:continued');
+});
+
+test('plan mode enters through the same slash path as the permission preset, before the prompt', async t => {
+  const peer = await runtime(t, { plan: true });
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: 'draft a change' });
+  assert.equal((await peer.next('done')).finishReason, 'completed');
+  const command = id => String(id).startsWith('plan-') ? 'plan'
+    : String(id).startsWith('permission-') ? 'permission' : String(id);
+  const commands = peer.frames
+    .filter(f => f.type === 'notification' && f.params?.event?.type === 'command/run')
+    .map(f => command(f.params.event.data.commandId));
+  assert.deepEqual(commands, ['permission', 'plan'], 'both modes are runtime commands, in that order');
+  const promptAt = peer.frames.findIndex(f => f.type === 'notification' && f.params?.event?.type === 'turn/start');
+  const planAt = peer.frames.findIndex(f => f.type === 'notification' && command(f.params?.event?.data?.commandId) === 'plan');
+  assert.ok(planAt >= 0, 'the runtime saw a /plan command');
+  assert.ok(promptAt >= 0 && planAt < promptAt, 'plan mode is entered before the user prompt reaches the model');
+});
+
+test('a failed /plan stops the start before any prompt reaches the runtime', async t => {
+  const peer = await runtime(t, { plan: true, failPlan: true });
+  const error = await peer.next('error');
+  assert.match(error.message, /Unable to enter DeepSeek plan mode/);
+  assert.equal((await peer.exited).code, 1);
+  assert.ok(!peer.frames.some(f => f.type === 'ready'), 'ready is never sent');
+  assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
+    'no prompt reaches the runtime');
+});
+
+test('a prompt cannot enter plan mode by starting with /plan', async t => {
+  const peer = await runtime(t);
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: '/plan' });
+  const error = await peer.next('error');
+  assert.match(error.message, /Plan mode is set by Zeron when a run starts/);
+  assert.equal((await peer.exited).code, 1);
+  assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
+    'a /plan prompt never becomes a command');
 });
 
 for (const prompt of ['protocol-error', 'malformed-event']) {

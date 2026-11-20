@@ -203,6 +203,13 @@ async function start(config) {
   if (!title) {
     const permission = await session.run('/permission zeron-managed');
     if (permission.finishReason === 'error') throw new Error('Unable to enforce DeepSeek session permissions');
+    // Plan mode is the run's, entered before the model ever sees a prompt:
+    // the same slash path `session.run` gives `/permission`, so the runtime
+    // persists the mode with the session rather than reading it as text.
+    if (config.plan === true) {
+      const plan = await session.run('/plan');
+      if (plan.finishReason === 'error') throw new Error('Unable to enter DeepSeek plan mode');
+    }
   }
   send({ type: 'ready', sessionId: session.id });
 }
@@ -224,6 +231,9 @@ async function prompt(command) {
   await startup;
   if (stopped) return;
   if (/^\s*\/(permission|权限)(?:\s|$)/u.test(command.prompt)) throw new Error('Change permissions through Zeron access controls');
+  // The same rule for plan: the run's flag is set once, at start, and a
+  // prompt that reads `/plan` would otherwise toggle the runtime's mode.
+  if (/^\s*\/plan(?:\s|$)/u.test(command.prompt)) throw new Error('Plan mode is set by Zeron when a run starts');
   const input = [{ type: 'text', text: command.prompt }];
   for (const path of command.attachments ?? []) {
     const extension = path.split('.').at(-1).toLowerCase();

@@ -66,6 +66,20 @@ async function handle(request) {
     notify('session.query.completed', { sessionId, commandId, finalResponse: 'managed', finishReason: 'completed' });
     return reply(id, { kind: 'command', execution: { commandId, result: { kind: 'success', text: 'managed' } } });
   }
+  // The published runtime routes `/plan` through its commands service the
+  // same way `/permission` goes; a fixture that treated it as a prompt would
+  // let the sidecar look right while the real runtime got plain text.
+  if (text === '/plan') {
+    const commandId = `plan-${id}`;
+    // The host's test marker: a fixture that cannot be told to fail `/plan`
+    // could never show that a failed entry stops the start.
+    let failed = false;
+    try { await readFile(join(process.env.DSH_HOME, 'plan-fails')); failed = true; } catch {}
+    event(sessionId, 'command/run', { commandId });
+    event(sessionId, 'command/done', { commandId });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: failed ? 'unavailable' : 'plan', finishReason: failed ? 'error' : 'completed' });
+    return reply(id, { kind: 'command', execution: { commandId, result: failed ? { kind: 'error', text: 'unavailable' } : { kind: 'success', text: 'plan' } } });
+  }
   if (text === 'protocol-error') return reply(id, { kind: 'prompt' });
   const messageId = `input-${id}`;
   reply(id, { kind: 'prompt', messageId });
