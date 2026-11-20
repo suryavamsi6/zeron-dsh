@@ -90,7 +90,15 @@ jobs:
         # from its folder as scripts/package-windows.ps1 does.)
         env:
           LUAU_CXXFLAGS: -DNDEBUG
+          # `ort-sys` caches its extracted DirectML runtime in a directory that
+          # belongs to the runner, not to this job. `cache_dir()` skips the
+          # download whenever that directory merely *exists*, so a partially
+          # extracted cache makes the build script copy a DLL that isn't there
+          # and panic (`dynamic_link.rs:42`, `Os { code: 3, NotFound }`). Start
+          # each run from an empty, job-local cache (SUR-129).
+          ORT_CACHE_DIR: ${{ runner.temp }}\ort-cache
         run: |
+          Remove-Item -Recurse -Force $env:ORT_CACHE_DIR -ErrorAction SilentlyContinue
           Push-Location apps/zgx
           try {
             cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
