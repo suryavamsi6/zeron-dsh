@@ -360,6 +360,10 @@ stub.warm_taken = function(id: string)
 end
 stub.send = function(req: any)
 	note(`send:{req.session or "new"}:{req.text}`)
+	-- (Plan mode travels as the run's own `plan`, as the host's send takes it.)
+	if req.plan == true then
+		note("plan:true")
+	end
 	if req.model_options and req.model_options.provider then
 		note(`send_provider:{req.model_options.provider}`)
 	end
