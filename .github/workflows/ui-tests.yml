@@ -29,6 +29,9 @@ jobs:
   # and only shard 1 saves it. Including the voice protocol and transport tests
   # that need no audio stack.
   core-tests:
+    permissions:
+      contents: read
+      actions: write
     if: inputs.core
     strategy:
       matrix:
@@ -50,4 +53,13 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-core-tests-${{ matrix.shard }}
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
 

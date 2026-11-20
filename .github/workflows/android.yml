@@ -71,6 +71,9 @@ env:
 
 jobs:
   apk:
+    permissions:
+      contents: read
+      actions: write
     runs-on: ubuntu-latest
     # Main's pushes and dispatches sign with the release key; everything else
     # (pull requests, the merge queue, nightlies, other branches) takes no
@@ -188,8 +191,20 @@ jobs:
       - name: remove signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/zeron-release.jks"
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
 
   play:
+    permissions:
+      contents: read
+      actions: write
     name: Upload to Google Play testing
     needs: apk
     if: >-
@@ -231,11 +246,25 @@ jobs:
           releaseName: ${{ needs.apk.outputs.version }} (${{ needs.apk.outputs.build }})
           tracks: ${{ env.PLAY_TRACK }}
           status: ${{ env.PLAY_STATUS }}
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
 
   publish:
+    permissions:
+      contents: read
+      actions: write
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.apk.outputs.signed == 'true'
     needs: apk
     runs-on: ubuntu-latest
+    # An upload to Cloudflare can stall with no bound of its own (SUR-152).
+    timeout-minutes: 20
     environment: cloudflare
     concurrency:
       group: android-publish
@@ -271,3 +300,12 @@ jobs:
           put zeron-android-arm64.apk "$apk" "$type" "no-cache"
           sed "s/$(basename "$apk")/zeron-android-arm64.apk/" "$apk.sha256" > latest.sha256
           put zeron-android-arm64.apk.sha256 latest.sha256 text/plain "no-cache"
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true

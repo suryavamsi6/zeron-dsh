@@ -19,6 +19,9 @@ jobs:
   # The WebRTC AEC3 audio stack (zeron-audio; its meson build is most of the
   # job) and the Python fixtures.
   offline-linux:
+    permissions:
+      contents: read
+      actions: write
     if: ${{ !contains(fromJSON(inputs.skip), 'offline-linux') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -39,3 +42,12 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-offline-linux
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true

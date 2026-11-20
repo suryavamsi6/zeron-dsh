@@ -36,6 +36,9 @@ jobs:
   # committed Swift bindings are current" (the UniFFI metadata is identical for any target, so the
   # bindings are generated from the host build of the library).
   ios-core:
+    permissions:
+      contents: read
+      actions: write
     if: inputs.ios
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -77,7 +80,19 @@ jobs:
   # (apps/ios/CoreFFI), and ios-core checks they are current.
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
   ios-tests:
+    permissions:
+      contents: read
+      actions: write
     if: ${{ inputs.ios && !contains(fromJSON(inputs.skip), 'ios-tests') }}
     runs-on: macos-latest
     timeout-minutes: 30
@@ -141,3 +156,12 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-ios-tests
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
