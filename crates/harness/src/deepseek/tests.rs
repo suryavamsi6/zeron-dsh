@@ -337,7 +337,7 @@ async fn advertises_the_dsh_commands_the_sidecar_can_route() {
     );
     assert_eq!(
         commands[0].input_hint.as_deref(),
-        Some("[objective | edit | pause | resume | clear]")
+        Some("[<objective> | clear | edit <objective> | pause | resume]")
     );
     assert_eq!(
         commands[1].description,

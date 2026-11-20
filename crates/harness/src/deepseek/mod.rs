@@ -474,7 +474,9 @@ impl Harness for DeepSeekHarness {
             SlashCommand {
                 name: "goal".into(),
                 description: "Create, edit, pause or resume a goal".into(),
-                input_hint: Some("[objective | edit | pause | resume | clear]".into()),
+                // The runtime's own grammar: a bare `edit` is `invalid-edit`
+                // there, so the hint must not offer one (`dsh-command-goal`).
+                input_hint: Some("[<objective> | clear | edit <objective> | pause | resume]".into()),
             },
             SlashCommand {
                 name: "compact".into(),
