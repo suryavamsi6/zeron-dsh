@@ -155,21 +155,34 @@ never by rebasing.
   - `runtime_survival`'s held-send test now asserts upstream's Stop contract: the send stays in
     the paused queue and runs on the person's next message, rather than being cancelled into the
     transcript.
-  - Generic upstream fixes kept: `VAULT_PROVIDERS_HEADER` + `known_connections` (an edge newer
-    than the client listing an unknown vault provider must not fail the whole status read),
+  - Generic upstream fixes kept: `known_connections` (a client drops vault providers it does not
+    know, so an edge newer than the client listing one must not fail the whole status read),
     `newest_node_dir` / `prefer_node_dir` on a Cloud machine (with `executable::node_version`
     ported, since `adapter_install` is cut), `starts_with` (a new chat shows the agent it was
     sent with at once), `steers` / `turn_running` in the composer, and the sur-75 MCP page.
+  - **Vault status provider filter: not taken, deliberately.** Upstream 0.3.12's edge filters a
+    status's `connections` to the providers the client names in `VAULT_PROVIDERS_HEADER`
+    (`understoodProviders` / `forClient` in `edge/src/vault-routes.ts`). This tree defines that
+    header (`crates/proto/src/cloud.rs`) and sends it (`crates/client/src/cloud.rs`), but its
+    edge does not filter. Safe today: the vault can only ever emit `deepseek-key` and `github`
+    (`VAULT_PROVIDERS` in `edge/vault/src/api.ts`, `isProvider`, `VaultProvider::ALL`), and the
+    client already drops unknown names (`known_connections`). The one break path is future: add
+    a third vault provider and serve a client released before this merge, which has neither the
+    header nor the client-side filter. Before that happens port `understoodProviders` /
+    `forClient` with a legacy default of today's two providers.
   - **Deliberately not taken:** upstream's multi-provider cloud-agent feature —
-    `model_publish`, `sign_in_catalog` + `engine discover-models`, `grantMany` and the
-    per-provider vault materials, the expanded `CLOUD_HARNESSES`, provider UI in `agents.rs`
-    and the iOS agent list, and the 17-provider vault enum/`ALL`. The cut keeps DeepSeek and
-    the GitHub key only; Cloud accounts stay the fork's `deepseek-key` implementation.
+    `model_publish`, `sign_in_catalog` + `engine discover-models`, the per-provider vault
+    materials, the expanded `CLOUD_HARNESSES`, provider UI in `agents.rs` and the iOS agent
+    list, and the 17-provider vault enum/`ALL`. The cut keeps DeepSeek and the GitHub key only;
+    Cloud accounts stay the fork's `deepseek-key` implementation.
+  - **Taken from it:** `grantMany` and `POST /vault/{org}/grants` — the route is back at
+    `edge/src/vault-routes.ts:250` with its batch test re-pointed to `deepseek-key`; the batched
+    RPC is provider-agnostic, so it does not need the multi-provider catalog.
   - `UserInputQuestion::note` is new: every in-tree constructor needs `note: None` (`deepseek`
     was the only one that did not already carry it).
   - zeron-v2 template: the default `composer.luau` moved with the Cloud commit and both copies
-    took it; `.base.json` re-blessed from this tree's default — composer `2cfa270ac78e2ef3`,
-    lane_tab `25290a15fc413a8f` (identical to upstream's).
+    took it; `.base.json` re-blessed from this tree's default — composer `c3aecf97b99d7bfc`
+    (the fork's own delta), lane_tab `5958161a55b26ba4` (identical to upstream's).
 - **Gate run on the merged tree:** `cargo nextest run -p zeron-engine -p zeron-harness` and
   `cargo check --locked --all-targets` for `zeron-proto`, `zeron-harness`, `zeron-engine`,
   `zeron-mcp`, `zeron-client` and `zeron`.

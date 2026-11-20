@@ -441,9 +441,12 @@ impl VaultProvider {
 }
 
 /// Request header naming the vault providers a client understands
-/// (comma-separated wire names). The edge lists only those in `VaultStatus`;
-/// a client that sends none (built before this header) sees the original
-/// five, so a provider added later never fails its whole status read.
+/// (comma-separated wire names). This fork defines and sends it, but its edge
+/// does not filter `VaultStatus` by it yet: the vault can only list
+/// `deepseek-key` and `github`, and the client drops names it does not know
+/// (`known_connections` below), so no client that can exist here breaks. Port
+/// upstream's `understoodProviders`/`forClient` to the edge before a third
+/// vault provider is added.
 pub const VAULT_PROVIDERS_HEADER: &str = "x-zeron-vault-providers";
 
 /// [`VAULT_PROVIDERS_HEADER`]'s value for this build.
