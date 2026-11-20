@@ -69,9 +69,33 @@ local schedule_save = ui.state("settings_stub_schedule_save", nil :: any)
 local schedule_delete = ui.state("settings_stub_schedule_delete", nil :: any)
 local schedule_run = ui.state("settings_stub_schedule_run", nil :: any)
 local schedule_calls = ui.state("settings_stub_schedule_calls", {} :: { any })
--- What `McpServers` answers: nil (the two servers the `McpServers`
--- answer below carries), or a `{ servers = … }` a test sets.
+-- What `McpServers` answers: nil (the two servers the store below holds),
+-- or a `{ servers = … }` a test sets.
 local mcp_servers_answer = ui.state("settings_stub_mcp_servers", nil :: any)
+-- What `SetMcpServers` answers: nil (the write lands, the store becomes
+-- what was sent, and `McpServers` answers it after), a string (the
+-- engine's refusal), or a table (its answer). The lists asked to be
+-- saved, in order, are in `settings_stub_mcp_saves`.
+local mcp_save = ui.state("settings_stub_mcp_save", nil :: any)
+local mcp_saves = ui.state("settings_stub_mcp_saves", {} :: { any })
+-- The person's MCP servers: each a program run beside the sessions'
+-- agents (`{name, command, args, env}`). Their env's values are as secret
+-- as the engine keeps them — the page shows the names only, so each value
+-- here is markedly itself, for a test to find nowhere.
+local mcp_store: { any } = {
+	{
+		name = "filesystem",
+		command = "npx",
+		args = { "-y", "@modelcontextprotocol/server-filesystem", "/work/notes" },
+		env = { NOTES_ROOT = "filesystem-env-value-should-not-render" },
+	},
+	{
+		name = "github",
+		command = "uvx",
+		args = { "mcp-server-github" },
+		env = { GITHUB_TOKEN = "github-token-value-should-not-render" },
+	},
+}
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -576,32 +600,29 @@ local answers: { [string]: (arg: any) -> any } = {
 		end
 		return settled({ fired = true, session = if type(t.target) == "table" then t.target.session else nil })
 	end,
-	-- The person's MCP servers: each a program run beside the sessions'
-	-- agents (`{name, command, args, env}`). Their env's values are as
-	-- secret as the engine keeps them — the page is to show the names
-	-- only, so each value here is markedly itself, for a test to find
-	-- nowhere.
+	-- The person's MCP servers, as the store above holds them.
 	["McpServers"] = function()
 		local over = mcp_servers_answer:peek()
 		if over ~= nil then
 			return settled(over)
 		end
-		return settled({
-			servers = {
-				{
-					name = "filesystem",
-					command = "npx",
-					args = { "-y", "@modelcontextprotocol/server-filesystem", "/work/notes" },
-					env = { NOTES_ROOT = "filesystem-env-value-should-not-render" },
-				},
-				{
-					name = "github",
-					command = "uvx",
-					args = { "mcp-server-github" },
-					env = { GITHUB_TOKEN = "github-token-value-should-not-render" },
-				},
-			},
-		})
+		return settled({ servers = mcp_store })
+	end,
+	-- The whole list, as the engine's `SetMcpServers` takes it: on success
+	-- it becomes the store (so the next `McpServers` answers it) and the
+	-- saved list comes back.
+	["SetMcpServers"] = function(arg: any)
+		local servers = if type(arg) == "table" and type(arg.servers) == "table" then arg.servers else {}
+		mcp_saves:push(servers)
+		local over = mcp_save:peek()
+		if over ~= nil then
+			if type(over) == "string" then
+				return settled(nil, over)
+			end
+			return settled(over)
+		end
+		mcp_store = servers
+		return settled({ servers = servers })
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })

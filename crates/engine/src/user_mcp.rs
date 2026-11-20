@@ -171,16 +171,18 @@ fn validate_one(server: &McpServer) -> Result<(), String> {
             "\"{name}\" isn't a server name the driver accepts: letters, digits, - and _ only, up to {MAX_NAME}"
         ));
     }
-    if server.command.trim().is_empty() {
-        return Err(format!("\"{name}\" needs a command"));
-    }
     // (This list is stdio: the file keeps a command to start. An HTTP entry
     // would pass a save and then be dropped by `load`, so it is refused
-    // here instead — a successful set means the entry is in the list.)
+    // here instead — a successful set means the entry is in the list. Said
+    // before the command check: an HTTP entry with no command is remote
+    // first, missing a command second.)
     if server.http.is_some() {
         return Err(format!(
             "\"{name}\" is a remote server; this list takes stdio servers only"
         ));
+    }
+    if server.command.trim().is_empty() {
+        return Err(format!("\"{name}\" needs a command"));
     }
     Ok(())
 }
@@ -330,12 +332,19 @@ mod tests {
 
     #[test]
     fn validate_rejects_an_http_server() {
-        let mut server = server("remote", "x");
-        server.http = Some(zeron_proto::McpHttp {
+        let http = || zeron_proto::McpHttp {
             url: "https://example.test/mcp".into(),
             ..Default::default()
-        });
-        let error = validate(&[server]).unwrap_err();
+        };
+        let mut remote = server("remote", "x");
+        remote.http = Some(http());
+        let error = validate(&[remote]).unwrap_err();
+        assert!(error.contains("remote server"), "{error}");
+        // The remote refusal is about what the entry is, not what it lacks:
+        // an HTTP entry with no command still says remote.
+        let mut commandless = server("remote", " ");
+        commandless.http = Some(http());
+        let error = validate(&[commandless]).unwrap_err();
         assert!(error.contains("remote server"), "{error}");
     }
 
