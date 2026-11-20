@@ -225,7 +225,19 @@ where
         let params: Result<Json, String> = serde_json::from_str(&args.to_json())
             .map_err(|error| error.to_string());
         async move {
-            let params = params?;
+            let mut params = params?;
+            // A server with no arguments: Luau's empty table crosses as
+            // `{}`, where the engine's `args` is a list — spell it `[]`, or
+            // the engine answers a shape error instead of saving (SUR-145).
+            if let Some(servers) = params.get_mut("servers").and_then(Json::as_array_mut) {
+                for server in servers {
+                    if let Some(args) = server.get_mut("args")
+                        && args.as_object().is_some_and(|object| object.is_empty())
+                    {
+                        *args = Json::Array(Vec::new());
+                    }
+                }
+            }
             answer(call("SetMcpServers", params).await)
         }
     });
