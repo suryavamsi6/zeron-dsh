@@ -53,7 +53,9 @@ jobs:
         with:
           workspaces: '. -> target'
       - name: Build the app's test binary
-        run: cargo test --locked -p zeron-zgx --no-run
+        # (`apps/zgx` is its own workspace — `-p zeron-zgx` from the root finds
+        # nothing, so every cargo call names its manifest and its target dir.)
+        run: cargo test --locked --manifest-path apps/zgx/Cargo.toml --target-dir apps/zgx/target --bin zeron-zgx --no-run
       - name: Render the shots
         env:
           AUDIT_SHOTS: ${{ inputs.shots }}
@@ -61,7 +63,8 @@ jobs:
           AUDIT_OUT: ${{ github.workspace }}/shots
         run: |
           mkdir -p shots
-          xvfb-run -a cargo test --locked -p zeron-zgx --bin zeron-zgx audit_shots -- --ignored --nocapture
+          xvfb-run -a cargo test --locked --manifest-path apps/zgx/Cargo.toml \
+            --target-dir apps/zgx/target --bin zeron-zgx audit_shots -- --ignored --nocapture
       - name: What was produced
         if: always()
         run: |
