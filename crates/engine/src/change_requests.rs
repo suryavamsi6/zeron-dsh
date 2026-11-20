@@ -1023,7 +1023,10 @@ mod tests {
         assert_eq!(lookup.resolve_count(), 3);
     }
 
-    #[tokio::test]
+    // The retry this test waits for is scheduled by the service's own
+    // `tokio::time::Instant`: on virtual time the 15 ms TTL definitely fires
+    // before the 50 ms window, so a loaded runner cannot decide the outcome.
+    #[tokio::test(start_paused = true)]
     async fn failure_keeps_the_last_success() {
         let lookup = FakeLookup::new(
             source("feature/status"),
