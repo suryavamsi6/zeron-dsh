@@ -1,6 +1,7 @@
 pub mod gateway;
 pub mod plugins;
 mod normalize;
+mod skills;
 #[cfg(test)]
 mod tests;
 
@@ -478,6 +479,14 @@ impl Harness for DeepSeekHarness {
             binary_path: node,
             binary_version: Some(SDK_VERSION.into()),
         }))
+    }
+    /// The skills dsh's filesystem provider would load for `cwd`, read from
+    /// disk so the `$` menu can offer them before a chat starts (SUR-56).
+    async fn skills(
+        &self,
+        cwd: &Path,
+    ) -> Result<Option<Vec<zeron_proto::invocation::Skill>>, HarnessError> {
+        Ok(Some(skills::discover(cwd, &self.home)))
     }
     /// An isolated title run: the ordinary sidecar, on the `sdk-minimal`
     /// profile with no agent tools and a 32-token cap.
