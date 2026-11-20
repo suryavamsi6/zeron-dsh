@@ -172,6 +172,13 @@ impl Normalizer {
                         new_string: input["new_string"].as_str().map(str::to_owned),
                     },
                     "apply_patch" => ToolCall::ApplyPatch { path: None },
+                    "glob" => ToolCall::Glob {
+                        pattern: input["pattern"].as_str().unwrap_or_default().into(),
+                    },
+                    "grep" => ToolCall::Search {
+                        pattern: input["pattern"].as_str().unwrap_or_default().into(),
+                        path: input["path"].as_str().map(str::to_owned),
+                    },
                     "web_search" => {
                         let queries = input["queries"]
                             .as_array()
@@ -328,6 +335,31 @@ mod tests {
         assert!(matches!(
             tool_call("web_fetch", json!({"url":"https://example.com/docs"})),
             ToolCall::WebFetch { url, prompt: None } if url == "https://example.com/docs"
+        ));
+    }
+
+    #[test]
+    fn glob_carries_the_pattern() {
+        assert!(matches!(
+            tool_call("glob", json!({"pattern":"**/*.rs"})),
+            ToolCall::Glob { pattern } if pattern == "**/*.rs"
+        ));
+        assert!(matches!(
+            tool_call("glob", json!({"pattern":"src/**/*.luau","path":"apps/zgx"})),
+            ToolCall::Glob { pattern } if pattern == "src/**/*.luau"
+        ));
+    }
+
+    #[test]
+    fn grep_carries_the_pattern_and_the_path_only_when_supplied() {
+        assert!(matches!(
+            tool_call("grep", json!({"pattern":"fn main","path":"apps/zgx"})),
+            ToolCall::Search { pattern, path: Some(path) }
+                if pattern == "fn main" && path == "apps/zgx"
+        ));
+        assert!(matches!(
+            tool_call("grep", json!({"pattern":"fn main","include":"*.rs"})),
+            ToolCall::Search { pattern, path: None } if pattern == "fn main"
         ));
     }
 
