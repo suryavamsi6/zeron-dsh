@@ -102,6 +102,12 @@ fn live(preload: &[Json]) -> Live {
             host
         })
     };
+    // The default test window is 400 by 300 points; this page's list and
+    // form are taller than that (with 16 rows, far taller), and a click
+    // lands only inside the window. Size the document as the settings page
+    // has it in a window, so every field and row is reachable.
+    app.ui.scene.borrow_mut().resize(900., 2600.);
+    app.frames(1);
     Live {
         app,
         core,
@@ -169,14 +175,42 @@ fn fill(app: &mut TestApp, field: &str, text: &str) {
     app.fill(&format!("{PAGE} >> role:textbox \"{field}\""), text);
 }
 
+/// Whether `field` now holds the window's focus, as the tree marks it.
+fn focused(app: &mut TestApp, field: &str) -> bool {
+    let line = format!("textbox \"{field}\"");
+    app.tree()
+        .lines()
+        .any(|line_text| line_text.contains("focused") && line_text.contains(&line))
+}
+
+/// Fill one field, stepping the page down until it is in the window and a
+/// click lands. The page is longer than the test window, so a field past
+/// its foot takes the clicks nowhere.
+fn fill_field(app: &mut TestApp, field: &str, text: &str) {
+    let target = format!("{PAGE} >> role:textbox \"{field}\"");
+    for _ in 0..40 {
+        app.click(&target);
+        if focused(app, field) {
+            app.fill(&target, text);
+            return;
+        }
+        app.scroll(PAGE, 80.0);
+    }
+    panic!(
+        "could not bring the {field} field into the window; page:\n{}",
+        page_state(app)
+    );
+}
+
+/// The add form, in page order, then Save at the page's foot.
 fn add(app: &mut TestApp, name: &str, command: &str, args: &str, env: &str) {
-    // The form sits under the list, and a row count can put it past the
-    // window's foot: bring it in before filling, as a person scrolls.
+    app.scroll(PAGE, -4000.0);
+    fill_field(app, "Name", name);
+    fill_field(app, "Command", command);
+    fill_field(app, "Arguments", args);
+    fill_field(app, "Environment", env);
+    // Save is the form's last row: the page's foot always shows it.
     app.scroll(PAGE, 4000.0);
-    fill(app, "Name", name);
-    fill(app, "Command", command);
-    fill(app, "Arguments", args);
-    fill(app, "Environment", env);
     app.click(&format!("{PAGE} >> role:button \"Save\""));
 }
 
