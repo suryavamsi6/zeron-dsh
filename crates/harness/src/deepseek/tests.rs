@@ -322,6 +322,31 @@ fn installed_probe_requires_matching_sdk_runtime_and_protocol_without_running_th
 }
 
 #[tokio::test]
+async fn advertises_the_dsh_commands_the_sidecar_can_route() {
+    let commands = DeepSeekHarness::new().commands().await.unwrap();
+    let names: Vec<&str> = commands.iter().map(|command| command.name.as_str()).collect();
+    // `/plan` is deliberately absent: plan mode is set by Zeron when a run
+    // starts, and the sidecar refuses a typed `/plan` (shim.mjs), so offering
+    // it would put a command in the composer that always errors. `/goal` and
+    // `/compact` route through `session/query` and their direct text reaches
+    // the transcript (SUR-57).
+    assert_eq!(names, ["goal", "compact"]);
+    assert_eq!(
+        commands[0].description,
+        "Create, edit, pause or resume a goal"
+    );
+    assert_eq!(
+        commands[0].input_hint.as_deref(),
+        Some("[<objective> | clear | edit <objective> | pause | resume]")
+    );
+    assert_eq!(
+        commands[1].description,
+        "Summarize the conversation to free context"
+    );
+    assert_eq!(commands[1].input_hint, None);
+}
+
+#[tokio::test]
 #[ignore = "requires Node and the pinned SDK prefix in ZERON_DEEPSEEK_SDK_DIR"]
 async fn sdk_runtime_round_trip_and_resume() {
     let prefix = std::env::var_os("ZERON_DEEPSEEK_SDK_DIR").expect("SDK prefix");

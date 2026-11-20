@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use zeron_proto::{
     AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SandboxLevel, SteeringMode, UserInputQuestion,
+    ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputQuestion,
 };
 
 use crate::{
@@ -462,6 +462,28 @@ impl Harness for DeepSeekHarness {
             models: static_models(),
             source: "sdk-bundled",
         })
+    }
+    /// The dsh built-ins this sidecar can route. `/plan` is deliberately not
+    /// listed: plan mode is set by Zeron when a run starts, and the sidecar
+    /// refuses a typed `/plan` (`refusesCommand` in shim.mjs), so advertising
+    /// it would offer a command that always fails. `/goal` and `/compact` go
+    /// through `session/query`, and their direct text reaches the transcript
+    /// as a notice (SUR-57).
+    async fn commands(&self) -> Result<Vec<SlashCommand>, HarnessError> {
+        Ok(vec![
+            SlashCommand {
+                name: "goal".into(),
+                description: "Create, edit, pause or resume a goal".into(),
+                // The runtime's own grammar: a bare `edit` is `invalid-edit`
+                // there, so the hint must not offer one (`dsh-command-goal`).
+                input_hint: Some("[<objective> | clear | edit <objective> | pause | resume]".into()),
+            },
+            SlashCommand {
+                name: "compact".into(),
+                description: "Summarize the conversation to free context".into(),
+                input_hint: None,
+            },
+        ])
     }
     fn model_context(&self) -> Result<Option<ModelContext>, HarnessError> {
         let Some(node) = node() else { return Ok(None) };
