@@ -351,8 +351,33 @@ async fn idle_traffic(original: bool) -> (u64, u64) {
 
 #[tokio::test(start_paused = true)]
 async fn healthy_idle_traffic_does_not_increase() {
-    let baseline = idle_traffic(true).await;
-    let current = idle_traffic(false).await;
-    assert_eq!(current, baseline);
-    assert_eq!(current, (400, 240), "40 masked pings and 40 unmasked pongs");
+    // The beat grid's first tick is the next whole multiple of the period of
+    // wall time, so a 601 s window holds 40 beats or 41 depending on the
+    // phase it starts at: SUR-144's failure started 14.31 s into a 15 s beat,
+    // putting the first tick at +0.69 s and the last at 600.69 s — 41 pings,
+    // one more than this assertion names. Pin a phase 2 s into the period so
+    // the ticks are 13, 28 … 598 s and the count is exactly 40 on every run.
+    {
+        let _wall = crate::wake::PinnedWall::at_ms(1_800_000_002_000);
+        let baseline = idle_traffic(true).await;
+        let current = idle_traffic(false).await;
+        assert_eq!(current, baseline);
+        assert_eq!(current, (400, 240), "40 masked pings and 40 unmasked pongs");
+    }
+
+    // The boundary the hardcoded count could not survive, stated exactly
+    // rather than left to the time of day: 0.5 s before a beat the first tick
+    // is at +0.5 s and the window holds 41 (a masked ping is 10 bytes, its
+    // unmasked pong 6).
+    {
+        let _wall = crate::wake::PinnedWall::at_ms(1_800_000_014_500);
+        let baseline = idle_traffic(true).await;
+        let current = idle_traffic(false).await;
+        assert_eq!(baseline, (400, 240), "the fixed 15 s interval: 40");
+        assert_eq!(
+            current,
+            (410, 246),
+            "the grid, 0.5 s before a beat: 41 (ticks at 0.5 … 600.5 s)"
+        );
+    }
 }
