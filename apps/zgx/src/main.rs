@@ -93,6 +93,8 @@ mod composer_metrics_tests;
 #[cfg(test)]
 mod composer_layout_tests;
 #[cfg(test)]
+mod mcp_live_tests;
+#[cfg(test)]
 mod composer_motion_tests;
 #[cfg(test)]
 mod hit_sweep_tests;

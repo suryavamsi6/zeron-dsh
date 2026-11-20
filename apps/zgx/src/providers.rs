@@ -21,13 +21,9 @@ pub fn install(host: &ScriptHost) {
     // The person's own MCP servers: one list on this device, read and
     // replaced whole by the settings page (engine `user_mcp`). The full
     // payload rides through: the engine names what it takes.
-    host.async_action("McpServers", |_| async {
-        answer(engine::get().call("McpServers", json!({})).await)
-    });
-    host.async_action("SetMcpServers", |args| async move {
-        let params: Json = serde_json::from_str(&args.to_json())
-            .map_err(|error| error.to_string())?;
-        answer(engine::get().call("SetMcpServers", params).await)
+    install_mcp(host, |method, params| {
+        let engine = engine::get();
+        Box::pin(async move { engine.call(method, params).await })
     });
     host.async_action("DshCredentials", |args| {
         let refs = strings(args.field("refs"));
@@ -205,6 +201,36 @@ pub fn install(host: &ScriptHost) {
 
 /// The engine's answer as a script value: its JSON, or the words it refused
 /// with. The page reads the same shape the gateway sends.
+/// One host action's engine call: the seam [`install_mcp`] takes, so the app
+/// and an in-process test use the same action bodies.
+pub(crate) type McpCall =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, String>>>>;
+
+/// The MCP list's two host actions over `call`: this app's engine here, an
+/// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
+/// `args.to_json()` pass-through, same [`answer`].
+pub(crate) fn install_mcp<F>(host: &ScriptHost, call: F)
+where
+    F: Fn(&'static str, Json) -> McpCall + Clone + 'static,
+{
+    host.async_action("McpServers", {
+        let call = call.clone();
+        move |_| {
+            let call = call.clone();
+            async move { answer(call("McpServers", json!({})).await) }
+        }
+    });
+    host.async_action("SetMcpServers", move |args| {
+        let call = call.clone();
+        let params: Result<Json, String> = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string());
+        async move {
+            let params = params?;
+            answer(call("SetMcpServers", params).await)
+        }
+    });
+}
+
 fn answer(reply: Result<Json, String>) -> Result<Value, String> {
     let json = reply?;
     let text = serde_json::to_string(&json).map_err(|error| error.to_string())?;
