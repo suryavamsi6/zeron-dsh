@@ -129,6 +129,7 @@ pub fn added(existing: &[McpServer], user: &[McpServer]) -> Vec<McpServer> {
     }
     out
 }
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
     #[serde(default)]
@@ -361,8 +362,6 @@ mod tests {
     /// lives in an `env` value, and a log line is readable by anyone.
     #[test]
     fn a_corrupt_file_s_warning_carries_no_env_value() {
-        use std::io::Write as _;
-
         struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
         impl std::io::Write for Capture {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -402,7 +401,6 @@ mod tests {
             !text.contains("secret-token-value"),
             "no env value may reach a log line: {text}"
         );
-        let _ = std::io::sink().flush();
     }
 
     #[test]
