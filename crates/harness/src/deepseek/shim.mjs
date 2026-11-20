@@ -209,6 +209,13 @@ async function start(config) {
     if (config.plan === true) {
       const plan = await session.run('/plan');
       if (plan.finishReason === 'error') throw new Error('Unable to enter DeepSeek plan mode');
+    } else if (config.resume === true) {
+      // Plan mode is stored with the session, so a runtime resumed by a run
+      // whose toggle is off starts out still planning. Leave it at start, on
+      // the same slash path: `/plan off` succeeds even when the stored session
+      // was never in plan mode, so no previous state has to be guessed.
+      const plan = await session.run('/plan off');
+      if (plan.finishReason === 'error') throw new Error('Unable to leave DeepSeek plan mode');
     }
   }
   send({ type: 'ready', sessionId: session.id });
