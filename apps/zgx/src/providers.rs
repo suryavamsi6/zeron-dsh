@@ -21,13 +21,9 @@ pub fn install(host: &ScriptHost) {
     // The person's own MCP servers: one list on this device, read and
     // replaced whole by the settings page (engine `user_mcp`). The full
     // payload rides through: the engine names what it takes.
-    host.async_action("McpServers", |_| async {
-        answer(engine::get().call("McpServers", json!({})).await)
-    });
-    host.async_action("SetMcpServers", |args| async move {
-        let params: Json = serde_json::from_str(&args.to_json())
-            .map_err(|error| error.to_string())?;
-        answer(engine::get().call("SetMcpServers", params).await)
+    install_mcp(host, |method, params| {
+        let engine = engine::get();
+        Box::pin(async move { engine.call(method, params).await })
     });
     host.async_action("DshCredentials", |args| {
         let refs = strings(args.field("refs"));
@@ -200,6 +196,131 @@ pub fn install(host: &ScriptHost) {
     host.async_action("ScheduleRunNow", |args| async move {
         let params: Json = serde_json::from_str(&args.to_json()).map_err(|error| error.to_string())?;
         answer(engine::get().call("ScheduleRunNow", params).await)
+    });
+}
+
+/// A host action's engine call: the seam [`install_mcp`] takes, so the app
+/// and an in-process test use the same action bodies.
+pub(crate) type McpCall =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<Json, String>>>>;
+
+/// What a JSON value is, for a diagnostic.
+fn kind(value: &Json) -> &'static str {
+    match value {
+        Json::Null => "null",
+        Json::Bool(_) => "a bool",
+        Json::Number(_) => "a number",
+        Json::String(_) => "a string",
+        Json::Array(_) => "an array",
+        Json::Object(_) => "an object",
+    }
+}
+
+/// `value` with every leaf under an `env` key replaced: a failure's shape
+/// without a token in it.
+fn shape(value: &Json) -> Json {
+    match value {
+        Json::Object(map) => Json::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    // `env`'s shape without a value: an object keeps its
+                    // keys, an array its length (which is the bug's tell).
+                    let value = if key == "env" {
+                        match value {
+                            Json::Object(map) => Json::Object(
+                                map.keys()
+                                    .map(|key| (key.clone(), Json::String("<redacted>".into())))
+                                    .collect(),
+                            ),
+                            Json::Array(items) => Json::Array(
+                                items.iter().map(|_| Json::String("<redacted>".into())).collect(),
+                            ),
+                            other => Json::String(format!("<env is {}>", kind(other))),
+                        }
+                    } else {
+                        shape(value)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Json::Array(items) => Json::Array(items.iter().map(shape).collect()),
+        other => other.clone(),
+    }
+}
+
+/// The MCP list's two host actions over `call`: this app's engine here, an
+/// in-process `EngineCore` in `mcp_live_tests` (SUR-145). Same names, same
+/// `args.to_json()` pass-through, same [`answer`].
+pub(crate) fn install_mcp<F>(host: &ScriptHost, call: F)
+where
+    F: Fn(&'static str, Json) -> McpCall + Clone + 'static,
+{
+    host.async_action("McpServers", {
+        let call = call.clone();
+        move |_| {
+            let call = call.clone();
+            async move { answer(call("McpServers", json!({})).await) }
+        }
+    });
+    host.async_action("SetMcpServers", move |args| {
+        let call = call.clone();
+        let params: Result<Json, String> = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string());
+        async move {
+            let mut params = params?;
+            // The page's list crosses Luau as a table, and the engine's
+            // contract is JSON: an empty table is `{}` where it wants `[]`,
+            // and a list may arrive keyed "1".. rather than as an array.
+            // Spell what `McpServer` names before the engine sees it, or a
+            // server with no arguments (or an emptied list) is refused with
+            // a shape error instead of saving (SUR-145).
+            if let Some(list) = params.get_mut("servers") {
+                if let Some(object) = list.as_object() {
+                    let mut items: Vec<(u64, Json)> = object
+                        .iter()
+                        .filter_map(|(key, value)| {
+                            key.parse::<u64>().ok().map(|index| (index, value.clone()))
+                        })
+                        .collect();
+                    if items.len() == object.len() {
+                        items.sort_by_key(|(index, _)| *index);
+                        *list = Json::Array(items.into_iter().map(|(_, value)| value).collect());
+                    }
+                }
+                if let Some(servers) = list.as_array_mut() {
+                    for server in servers {
+                        if let Some(args) = server.get_mut("args")
+                            && args.as_object().is_some_and(|object| object.is_empty())
+                        {
+                            *args = Json::Array(Vec::new());
+                        }
+                        // An empty table is `[]` crossing Luau, and `env`
+                        // is a map: a server with no environment (the
+                        // common case) was refused with a shape error.
+                        if let Some(env) = server.get_mut("env")
+                            && env.as_array().is_some_and(|items| items.is_empty())
+                        {
+                            *env = Json::Object(serde_json::Map::new());
+                        }
+                    }
+                }
+            }
+            let result = call("SetMcpServers", params.clone()).await;
+            if result.is_err() {
+                // The engine's words say what the shape should have been,
+                // never which value. `env` is where a token lives, so every
+                // value under an `env` key is replaced; `name`, `command`
+                // and `args` are printed as typed, which the page already
+                // shows on screen.
+                eprintln!(
+                    "zeron-zgx: mcp: SetMcpServers failed: {:?}; shape: {}",
+                    result.as_ref().err(),
+                    serde_json::to_string(&shape(&params)).unwrap_or_default()
+                );
+            }
+            answer(result)
+        }
     });
 }
 

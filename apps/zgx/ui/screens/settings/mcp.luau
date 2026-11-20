@@ -24,9 +24,23 @@ search.index(M.ID, "MCP servers", "mcp model context protocol servers tools comm
 -- - and _ only, at most 32.
 local NAME_MAX = 32
 
+-- The RPC envelope's prefixes, ahead of the engine's sentence: the app hands
+-- the page the engine's `err` string, and that is `crates/rpc`'s `RpcError`
+-- Display (`bad params: …` for a refused save, a cut capability's
+-- `capability error: …`). A bare failure carries no prefix at all
+-- (`RpcError::Failed` is `{0}`). Only a leading one is cut: the person is to
+-- read the sentence, not the transport's taxonomy.
+local ENVELOPE = { "bad params: ", "capability error: " }
+
 -- What went wrong asking the host, in words.
 local function say(err: any): string
-	return if type(err) == "table" and type(err.message) == "string" then err.message else tostring(err)
+	local text = if type(err) == "table" and type(err.message) == "string" then err.message else tostring(err)
+	for _, prefix in ENVELOPE do
+		if string.sub(text, 1, #prefix) == prefix then
+			return string.sub(text, #prefix + 1)
+		end
+	end
+	return text
 end
 
 local function trim(s: string): string
