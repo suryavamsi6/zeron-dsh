@@ -30,6 +30,7 @@ async function runtime(t, options = {}) {
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const frames = [];
+  const seen = [];
   const waiters = [];
   let stderr = '';
   child.stderr.on('data', value => { stderr += value; });
@@ -37,6 +38,7 @@ async function runtime(t, options = {}) {
   createInterface({ input: child.stdout }).on('line', line => {
     const frame = JSON.parse(line);
     frames.push(frame);
+    seen.push(frame.type);
     for (const check of [...waiters]) check();
   });
   function next(type) {
@@ -69,7 +71,7 @@ async function runtime(t, options = {}) {
   send({ type: 'start', dshHome: home, cwd: here, model: options.model ?? 'deepseek-flash', access: 'supervised', sandbox: 'workspace-write', sessionId: options.sessionId ?? 'session-1', resume: options.resume ?? false, policySource, environmentSource,
     ...(options.plan === true ? { plan: true } : {}),
     ...(options.title ? { title: true, systemPrompt: options.systemPrompt, maxTokens: options.maxTokens } : {}) });
-  return { home, send, next, frames, exited };
+  return { home, send, next, frames, seen, exited };
 }
 
 async function mockModel(t) {
@@ -315,6 +317,47 @@ test('a failed /plan stops the start before any prompt reaches the runtime', asy
   assert.ok(!peer.frames.some(f => f.type === 'ready'), 'ready is never sent');
   assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
     'no prompt reaches the runtime');
+});
+
+test("a state-only command's text is a notice exactly once, before the turn ends", async t => {
+  const peer = await runtime(t);
+  await peer.next('ready');
+  for (const [prompt, reply] of [['/goal', 'Goal: no active goal.'],
+    ['/compact', 'Condensed 4 history items; ~1234 tokens saved.']]) {
+    const start = peer.seen.length;
+    peer.send({ type: 'prompt', prompt });
+    const notice = await peer.next('notice');
+    const done = await peer.next('done');
+    assert.equal(notice.text, reply);
+    assert.equal(done.finishReason, 'completed');
+    const tail = peer.seen.slice(start);
+    assert.equal(tail.filter(type => type === 'notice').length, 1, `${prompt} noticed its text once`);
+    assert.ok(tail.indexOf('notice') < tail.indexOf('done'), `${prompt} noticed before the turn ended`);
+    assert.ok(!peer.frames.some(frame => frame.type === 'notice'), `${prompt} left no second notice`);
+  }
+});
+
+test('a typed /goal whose reply is already visible gets no notice', async t => {
+  const peer = await runtime(t);
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: '/goal summarize the repo' });
+  assert.equal((await peer.next('done')).finalResponse, 'Working on: summarize the repo');
+  assert.equal(peer.seen.filter(type => type === 'notice').length, 0,
+    'the assistant reply is the only visible text');
+  const run = peer.frames.find(frame => frame.type === 'notification'
+    && frame.params?.event?.type === 'command/run'
+    && frame.params.event.data.name === 'goal');
+  assert.equal(run?.params.event.data.args, ' summarize the repo');
+});
+
+test("a failing command's own text is a notice exactly once", async t => {
+  const peer = await runtime(t);
+  await peer.next('ready');
+  peer.send({ type: 'prompt', prompt: '/goal edit' });
+  const notice = await peer.next('notice');
+  assert.equal(notice.text, 'Goal edit needs an objective.');
+  assert.equal((await peer.next('done')).finishReason, 'error');
+  assert.equal(peer.seen.filter(type => type === 'notice').length, 1);
 });
 
 // The runtime resolves its localized token to the same command, so the guard

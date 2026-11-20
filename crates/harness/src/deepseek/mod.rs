@@ -712,6 +712,17 @@ async fn run_child(
                             }
                         }
                         Some("requestCancelled") => {}
+                        // A native command's direct output (`/goal`, `/compact`)
+                        // never enters model history, so the sidecar forwards it
+                        // as a notice: show it as the turn's text. Commands that
+                        // started model activity send none (the reply is already
+                        // in the assistant stream).
+                        Some("notice") => {
+                            let text = frame["text"].as_str().unwrap_or_default();
+                            if !text.is_empty() {
+                                let _ = tx.send(Ok(AgentEvent::TextDelta { text: text.into() })).await;
+                            }
+                        }
                         Some("done") => {
                             let reason = frame["finishReason"].as_str().unwrap_or("error");
                             let status = match reason { "completed" | "max-tokens" => DoneStatus::Completed, "aborted" => DoneStatus::Interrupted, _ => DoneStatus::Errored };

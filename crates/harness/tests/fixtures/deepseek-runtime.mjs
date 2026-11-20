@@ -92,6 +92,50 @@ async function handle(request) {
     notify('session.query.completed', { sessionId, commandId, finalResponse: failed ? 'unavailable' : 'off', finishReason: failed ? 'error' : 'completed' });
     return reply(id, { kind: 'command', execution: { commandId, result: failed ? { kind: 'error', text: 'unavailable' } : { kind: 'success', text: 'Plan mode off.' } } });
   }
+  // `/goal` and `/compact` are state-only builtins: their text is the
+  // command's direct output and never enters model history, so the run has
+  // command events and no assistant message.
+  if (text === '/compact') {
+    const commandId = `compact-${id}`;
+    const text = 'Condensed 4 history items; ~1234 tokens saved.';
+    event(sessionId, 'command/run', { commandId, name: 'compact' });
+    event(sessionId, 'command/done', { commandId, kind: 'success', text });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: text, finishReason: 'completed' });
+    return reply(id, { kind: 'command', execution: { commandId, result: { kind: 'success', text } } });
+  }
+  // A goal edit with nothing to edit is a direct command error, not a model
+  // turn: the failure text is all the run produces.
+  if (text === '/goal edit') {
+    const commandId = `goal-edit-${id}`;
+    const text = 'Goal edit needs an objective.';
+    event(sessionId, 'command/run', { commandId, name: 'goal', args: ' edit' });
+    event(sessionId, 'command/done', { commandId, kind: 'error', text });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: text, finishReason: 'error' });
+    return reply(id, { kind: 'command', execution: { commandId, result: { kind: 'error', text } } });
+  }
+  // A typed `/goal <objective>` that starts goal rounds: the command text is
+  // the direct output, and the assistant reply that follows is the visible
+  // one, so nothing may be noticed twice.
+  if (text === '/goal summarize the repo') {
+    const commandId = `goal-${id}`;
+    event(sessionId, 'command/run', { commandId, name: 'goal', args: ' summarize the repo' });
+    event(sessionId, 'command/done', { commandId, kind: 'success', text: 'Goal created.' });
+    notify('session.status', { sessionId, status: 'running' });
+    event(sessionId, 'turn/start', { turn: 1 });
+    event(sessionId, 'assistant/message', { message: { id: 'assistant-goal', content: [{ type: 'text', text: 'Working on: summarize the repo' }] } });
+    event(sessionId, 'turn/end', { turn: 1, reason: { kind: 'completed' } });
+    notify('session.status', { sessionId, status: 'idle' });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: 'Working on: summarize the repo', finishReason: 'completed' });
+    return reply(id, { kind: 'command', execution: { commandId, result: { kind: 'success', text: 'Goal created.' } } });
+  }
+  if (text === '/goal') {
+    const commandId = `goal-${id}`;
+    const text = 'Goal: no active goal.';
+    event(sessionId, 'command/run', { commandId, name: 'goal' });
+    event(sessionId, 'command/done', { commandId, kind: 'success', text });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: text, finishReason: 'completed' });
+    return reply(id, { kind: 'command', execution: { commandId, result: { kind: 'success', text } } });
+  }
   if (text === 'protocol-error') return reply(id, { kind: 'prompt' });
   const messageId = `input-${id}`;
   reply(id, { kind: 'prompt', messageId });
