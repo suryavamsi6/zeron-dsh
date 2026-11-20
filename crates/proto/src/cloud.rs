@@ -440,6 +440,35 @@ impl VaultProvider {
     }
 }
 
+/// Request header naming the vault providers a client understands
+/// (comma-separated wire names). The edge lists only those in `VaultStatus`;
+/// a client that sends none (built before this header) sees the original
+/// five, so a provider added later never fails its whole status read.
+pub const VAULT_PROVIDERS_HEADER: &str = "x-zeron-vault-providers";
+
+/// [`VAULT_PROVIDERS_HEADER`]'s value for this build.
+pub fn vault_providers_understood() -> String {
+    VaultProvider::ALL
+        .iter()
+        .map(|p| p.as_str())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// `connections`, keeping only providers this build knows: an edge newer
+/// than the client may list more, and one unknown entry must not fail the
+/// whole status.
+fn known_connections<'de, D>(deserializer: D) -> Result<Vec<VaultConnection>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = Vec::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VaultConnectionStatus {
@@ -540,7 +569,7 @@ pub struct VaultDevice {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VaultStatus {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "known_connections")]
     pub connections: Vec<VaultConnection>,
     #[serde(default)]
     pub devices: Vec<VaultDevice>,
@@ -629,6 +658,29 @@ mod tests {
             let wire = serde_json::to_value(provider).unwrap();
             assert_eq!(wire, serde_json::Value::String(provider.as_str().into()));
         }
+    }
+
+    #[test]
+    fn a_provider_this_build_doesnt_know_never_fails_the_status() {
+        let status: VaultStatus = serde_json::from_value(serde_json::json!({
+            "available": true,
+            "connections": [
+                {"provider": "deepseek-key", "status": "connected", "updatedAt": 1},
+                {"provider": "some-later-key", "status": "connected", "updatedAt": 2},
+                {"provider": "github", "status": "needsReconnect", "updatedAt": 3},
+            ],
+        }))
+        .unwrap();
+        let providers: Vec<_> = status.connections.iter().map(|c| c.provider).collect();
+        assert_eq!(
+            providers,
+            vec![VaultProvider::DeepseekKey, VaultProvider::Github]
+        );
+        assert!(
+            vault_providers_understood()
+                .split(',')
+                .all(|p| VaultProvider::parse(p).is_some())
+        );
     }
 
     #[test]

@@ -88,6 +88,53 @@ fn is_windows_absolute(path: &Path) -> bool {
     drive || text.starts_with(r"\\")
 }
 
+/// The node version managers' and global installs' bin directories that
+/// exist on this machine (nvm's newest version first).
+pub fn node_manager_bins() -> Vec<PathBuf> {
+    node_version_manager_bins_with(&|key| std::env::var_os(key), Platform::current())
+        .into_iter()
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
+/// What `node --version` says (cached per path: a version manager's binary
+/// doesn't change under us mid-process). Read as a version, not a minimum
+/// range: the plain `vX.Y.Z` every Node prints.
+pub(crate) fn node_version(node: &Path) -> Option<(u64, u64, u64)> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<PathBuf, Option<(u64, u64, u64)>>>,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some(known) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(node)
+    {
+        return *known;
+    }
+    let version = std::process::Command::new(node)
+        .arg("--version")
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            let text = String::from_utf8_lossy(&out.stdout);
+            let text = text.trim().trim_start_matches('v');
+            let mut parts = text.split('.').map(|p| p.parse::<u64>().ok());
+            let major = parts.next()??;
+            let minor = parts.next().flatten().unwrap_or(0);
+            let patch = parts.next().flatten().unwrap_or(0);
+            Some((major, minor, patch))
+        });
+    cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(node.to_path_buf(), version);
+    version
+}
+
 fn node_version_manager_bins_with(
     env: &impl Fn(&str) -> Option<OsString>,
     platform: Platform,
@@ -408,6 +455,7 @@ pub(crate) fn find_on_paths_matching_with(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use std::collections::HashMap;
 
     /// Resolution walks the PATHs in the child PATH's order: the login shell

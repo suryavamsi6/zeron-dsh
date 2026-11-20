@@ -124,6 +124,40 @@ never by rebasing.
 - **Gate:** `CI result` green on the sync PR, release-profile failures triaged rather than re-run
   away, and `git merge-base --is-ancestor <round target> main` true afterwards.
 
+#### Round 2 — 2026-11-20, upstream 0.3.11 (`33d981bd3`)
+
+- **Range merged:** `d6fad8238..33d981bd3` (5 commits): `22eb085c5` 0.3.11, `8c5549ecb` Cloud:
+  every built-in agent with every login, `17d777fa0` Grok Auto + Full access always-approve,
+  `4820dd83c` RollText interface font, `33d981bd3` the release merge. 64 conflicted paths against
+  `origin/main` `80c72f7a1`. Merge commit, never squash.
+- **Upstream moved mid-round:** its tip was `2e3513c67` (0.3.12: `890c4527e` Antigravity 1.5.0,
+  `5ac8d75a5` 0.3.12) when the merge ran. The round targets `33d981bd3`; 0.3.12 is the next
+  round, and the ancestry check is `git merge-base --is-ancestor 33d981bd3 main`, not
+  `upstream/main` (which has moved past it).
+- **Resolutions worth repeating:**
+  - 27 `modify/delete` paths were all the provider cut: keep deleted.
+  - The fork's rewritten modules (`agent_accounts`, `cloud_accounts`, `credentials`,
+    `harness_updates`, `install`, `plan_usage`, `providers`, `registry`) take the fork's version
+    wholesale; upstream's edits inside them are provider machinery.
+  - Generic upstream fixes kept: `VAULT_PROVIDERS_HEADER` + `known_connections` (an edge newer
+    than the client listing an unknown vault provider must not fail the whole status read),
+    `newest_node_dir` / `prefer_node_dir` on a Cloud machine (with `executable::node_version`
+    ported, since `adapter_install` is cut), `starts_with` (a new chat shows the agent it was
+    sent with at once), `steers` / `turn_running` in the composer, and the sur-75 MCP page.
+  - **Deliberately not taken:** upstream's multi-provider cloud-agent feature —
+    `model_publish`, `sign_in_catalog` + `engine discover-models`, `grantMany` and the
+    per-provider vault materials, the expanded `CLOUD_HARNESSES`, provider UI in `agents.rs`
+    and the iOS agent list, and the 17-provider vault enum/`ALL`. The cut keeps DeepSeek and
+    the GitHub key only; Cloud accounts stay the fork's `deepseek-key` implementation.
+  - `UserInputQuestion::note` is new: every in-tree constructor needs `note: None` (`deepseek`
+    was the only one that did not already carry it).
+  - zeron-v2 template: the default `composer.luau` moved with the Cloud commit and both copies
+    took it; `.base.json` re-blessed from this tree's default — composer `2cfa270ac78e2ef3`,
+    lane_tab `25290a15fc413a8f` (identical to upstream's).
+- **Gate run on the merged tree:** `cargo nextest run -p zeron-engine -p zeron-harness` and
+  `cargo check --locked --all-targets` for `zeron-proto`, `zeron-harness`, `zeron-engine`,
+  `zeron-mcp`, `zeron-client` and `zeron`.
+
 ### SUR-97: Captains on dsh (desk findings, dsh 0.2.2-rc.3)
 
 | | Capability | dsh support |
