@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
-use zeron_proto::{AgentEvent, DoneStatus, ToolCall};
+use zeron_proto::{AgentEvent, DoneStatus, TodoItem, TodoStatus, ToolCall};
 
 use crate::HarnessError;
 
@@ -178,6 +178,27 @@ impl Normalizer {
                     "grep" => ToolCall::Search {
                         pattern: input["pattern"].as_str().unwrap_or_default().into(),
                         path: input["path"].as_str().map(str::to_owned),
+                    },
+                    "todo_write" => ToolCall::Todo {
+                        items: input["todos"]
+                            .as_array()
+                            .map(|todos| {
+                                todos
+                                    .iter()
+                                    .filter_map(|todo| {
+                                        let text = todo["content"].as_str()?;
+                                        if text.trim().is_empty() {
+                                            return None;
+                                        }
+                                        let status = todo["status"]
+                                            .as_str()
+                                            .map(TodoStatus::parse)
+                                            .unwrap_or_default();
+                                        Some(TodoItem::new(text, status))
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                     },
                     "web_search" => {
                         let queries = input["queries"]
@@ -361,6 +382,57 @@ mod tests {
             tool_call("grep", json!({"pattern":"fn main","include":"*.rs"})),
             ToolCall::Search { pattern, path: None } if pattern == "fn main"
         ));
+    }
+
+    #[test]
+    fn todo_write_carries_the_list_in_order_and_clears_it_when_empty() {
+        let call = tool_call(
+            "todo_write",
+            json!({"todos":[
+                {"content":"write the arm","status":"pending"},
+                {"content":"test it","status":"in_progress"},
+                {"content":"ship it","status":"completed"},
+            ]}),
+        );
+        let items = match call {
+            ToolCall::Todo { items } => items,
+            other => panic!("expected a todo call, got {other:?}"),
+        };
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.text.as_str())
+                .collect::<Vec<_>>(),
+            ["write the arm", "test it", "ship it"]
+        );
+        assert_eq!(items[0].status(), TodoStatus::Pending);
+        assert_eq!(items[1].status(), TodoStatus::InProgress);
+        assert_eq!(items[2].status(), TodoStatus::Completed);
+
+        // dsh sends the whole list on every call: an empty one clears the
+        // panel, so it must be a Todo call with no items, not `Unknown`.
+        let items = match tool_call("todo_write", json!({"todos":[]})) {
+            ToolCall::Todo { items } => items,
+            other => panic!("expected a todo call, got {other:?}"),
+        };
+        assert!(items.is_empty());
+
+        // An entry with no `content` — or only blanks — is skipped; the rest
+        // stay visible, so one bad row cannot blank the panel.
+        let items = match tool_call(
+            "todo_write",
+            json!({"todos":[
+                {"content":"still here","status":"pending"},
+                {"status":"completed"},
+                {"content":"   ","status":"completed"}
+            ]}),
+        ) {
+            ToolCall::Todo { items } => items,
+            other => panic!("expected a todo call, got {other:?}"),
+        };
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].text, "still here");
+        assert_eq!(items[0].status(), TodoStatus::Pending);
     }
 
     #[test]
