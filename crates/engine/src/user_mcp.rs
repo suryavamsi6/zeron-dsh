@@ -171,16 +171,18 @@ fn validate_one(server: &McpServer) -> Result<(), String> {
             "\"{name}\" isn't a server name the driver accepts: letters, digits, - and _ only, up to {MAX_NAME}"
         ));
     }
-    if server.command.trim().is_empty() {
-        return Err(format!("\"{name}\" needs a command"));
-    }
     // (This list is stdio: the file keeps a command to start. An HTTP entry
-    // would pass a save and then be dropped by `load`, so it is refused
-    // here instead — a successful set means the entry is in the list.)
+    // would pass a save and then be dropped by `load`, so it is refused here
+    // instead — a successful set means the entry is in the list. It is asked
+    // before the command so a remote entry always gets this message, even
+    // when it carries no command.)
     if server.http.is_some() {
         return Err(format!(
             "\"{name}\" is a remote server; this list takes stdio servers only"
         ));
+    }
+    if server.command.trim().is_empty() {
+        return Err(format!("\"{name}\" needs a command"));
     }
     Ok(())
 }
