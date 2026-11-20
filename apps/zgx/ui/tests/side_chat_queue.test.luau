@@ -19,6 +19,20 @@ local function calls(app: any): string
 	return tostring(app:state("calls") or "")
 end
 
+test("a message sent while a side chat works is queued, not put in its transcript", function()
+	local app = open()
+	app:command("side_running")
+	app:frames(5)
+	app:type(BOX, "one more thing")
+	app:key("Enter")
+	app:frames(10)
+	expect(calls(app)).to_contain("send:side-a:one more thing")
+	-- Carries what's picked so the queued message runs on that agent/model.
+	expect(calls(app)).to_contain("pick:side-a:deepseek/deepseek-v4-pro:deepseek:medium:edits")
+	expect(app:has('.side-chat-tab >> "one more thing"')).to_be(false)
+	expect(app:text(BOX)).to_be("")
+end)
+
 test("idle, a side chat's message joins its transcript as ever", function()
 	local app = open()
 	app:type(BOX, "one more thing")
