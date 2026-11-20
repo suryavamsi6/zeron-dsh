@@ -134,10 +134,12 @@ local function settled(value: any, word: string?): any
 		end
 	end
 	-- A resource's `load` awaits it (`ui.call(...):await()`), as the host's
-	-- own promise is awaited.
+	-- own promise is awaited. A rejection is raised as the word itself: the
+	-- host's is a `UiError` userdata whose message `ui.resource` takes, so a
+	-- table here would reach the page as `Table(...)`, not the sentence.
 	function p.await(self: any): any
 		if word then
-			error({ message = word })
+			error(word, 0)
 		end
 		return value
 	end

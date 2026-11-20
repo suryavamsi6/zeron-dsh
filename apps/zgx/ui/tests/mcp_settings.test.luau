@@ -237,6 +237,21 @@ test("MCP servers shows the engine's words without the RPC envelope", function()
 	expect(app:has(`{PAGE} >> "Could not save the MCP servers: disk full"`)).to_be(true)
 end)
 
+-- The load path takes the same `say()`: a list that fails on a transport
+-- error, or against an engine that does not serve the method, must read as
+-- the sentence too.
+test("MCP servers shows the engine's words without the envelope when the list fails", function()
+	for _, failure in {
+		{ prefix = "transport: ", said = "the engine went away" },
+		{ prefix = "unknown method: ", said = "McpServers" },
+	} do
+		local app = open(failure.prefix .. failure.said)
+		expect(app:has(`{PAGE} >> "Can't list MCP servers"`)).to_be(true)
+		expect(app:tree(PAGE)).to_contain(failure.said)
+		expect(app:tree(PAGE)).never.to_contain(failure.prefix)
+	end
+end)
+
 test("MCP servers asks before removing a server, naming it", function()
 	local app = open()
 	app:click(`{PAGE} >> role:button "Remove filesystem"`)
