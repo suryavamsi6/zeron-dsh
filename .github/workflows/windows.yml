@@ -98,7 +98,15 @@ jobs:
           # each run from an empty, job-local cache (SUR-129).
           ORT_CACHE_DIR: ${{ runner.temp }}\ort-cache
         run: |
+          # `rust-cache` restores `apps/zgx/target`, including the previous
+          # build's `ort-sys` OUT_DIR where `copy_dylibs` leaves `DirectML.dll`
+          # symlinks into the cache directory emptied above. A restored link
+          # whose target is gone makes the script's own copy fail at
+          # `dynamic_link.rs:42` (`Os { code: 3, NotFound }`), which is the
+          # failure #46 did not reach (SUR-129). Drop those build outputs so
+          # the script extracts and links afresh.
           Remove-Item -Recurse -Force $env:ORT_CACHE_DIR -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force apps\zgx\target\release\build\ort-sys-* -ErrorAction SilentlyContinue
           Push-Location apps/zgx
           try {
             cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
