@@ -207,6 +207,10 @@ test("MCP servers keeps the draft and shows the engine's words when a save is re
 	expect(asked(app, "McpServers")).to_be(1)
 end)
 
+-- A refusal reaches the page as the engine's `err` string, whose Display is
+-- `crates/rpc`'s `RpcError` — it carries the RPC taxonomy ahead of the
+-- sentence (`crates/rpc/src/server.rs`'s `respond` sends `err.to_string()`).
+-- The person reads the sentence alone.
 test("MCP servers shows the engine's words without the RPC envelope", function()
 	local app = open()
 	local refusals = {

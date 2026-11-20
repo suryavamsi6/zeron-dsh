@@ -26,10 +26,10 @@ local NAME_MAX = 32
 
 -- The RPC envelope's prefixes, ahead of the engine's sentence: the app hands
 -- the page the engine's `err` string, and that is `crates/rpc`'s `RpcError`
--- Display — `bad params: …` for refused params, `capability error: …` for a
--- cut capability, `transport: …` for a broken link, `unknown method: …` for
--- a method this build doesn't serve. A bare failure carries no prefix
--- (`RpcError::Failed` is `{0}`), and `Closed` is the bare sentence
+-- Display (`bad params: …` for a refused save, a cut capability's
+-- `capability error: …`, `transport: …` for a broken link, `unknown method: …`
+-- for a method this build doesn't serve). A bare failure carries no prefix at
+-- all (`RpcError::Failed` is `{0}`), and `Closed` is the sentence
 -- `connection closed`. Only a leading one is cut: the person is to read the
 -- sentence, not the transport's taxonomy.
 local ENVELOPE = { "bad params: ", "capability error: ", "transport: ", "unknown method: " }

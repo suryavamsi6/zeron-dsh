@@ -223,6 +223,10 @@ embed-resource = "3.0.11"
 
 [dev-dependencies]
 tempfile = "3"
+# src/mcp_live_tests.rs (SUR-145): the MCP page over an in-process engine.
+zeron-engine = { path = "../../crates/engine" }
+zeron-rpc = { path = "../../crates/rpc" }
+zeron-harness = { path = "../../crates/harness" }
 
 # src/terminal.rs's test: the bridge line split as Windows itself splits a
 # command line (CommandLineToArgvW).
