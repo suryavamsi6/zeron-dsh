@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::{Arc, Mutex};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
 
 fn request(cwd: &Path) -> RunRequest {
@@ -324,20 +326,27 @@ fn installed_probe_requires_matching_sdk_runtime_and_protocol_without_running_th
 async fn sdk_runtime_round_trip_and_resume() {
     let prefix = std::env::var_os("ZERON_DEEPSEEK_SDK_DIR").expect("SDK prefix");
     let dir = tempfile::tempdir().unwrap();
+    let (base_url, requests) = mock_model().await;
+    // The pinned runtime, not the fixture: the plan-mode guidance is the
+    // runtime's own `plan:policy` prompt section, so only a real run can show
+    // whether a resumed run still carries it.
     let harness = DeepSeekHarness {
         sdk_root: prefix.into(),
         home: dir.path().join("dsh"),
-        test_runtime: Some(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/deepseek-runtime.mjs"),
-        ),
+        test_runtime: None,
     };
     let mut run = request(dir.path());
     run.env
         .insert("DEEPSEEK_API_KEY".into(), "synthetic-not-live".into());
+    run.env.insert("DEEPSEEK_BASE_URL".into(), base_url);
+    // Round 1 enters plan mode, round 2 resumes with the toggle off (the fix
+    // under test), and round 3 resumes the now-inactive session, which has to
+    // be the success no-op `/plan off` promises rather than a failed start.
     let mut saved = None;
-    for prompt in ["first", "resumed"] {
+    for (index, prompt) in ["first", "resumed", "resumed again"].into_iter().enumerate() {
         run.prompt = prompt.into();
         run.resume = saved.clone();
+        run.plan = index == 0;
         let (_steer_tx, steering) = mpsc::channel(4);
         let interrupt = crate::CancellationToken::new();
         let controls = RunControls {
@@ -354,7 +363,7 @@ async fn sdk_runtime_round_trip_and_resume() {
         let mut events = harness.run(run.clone(), controls).await.unwrap();
         let mut text = String::new();
         loop {
-            let event = tokio::time::timeout(Duration::from_secs(5), events.next())
+            let event = tokio::time::timeout(Duration::from_secs(30), events.next())
                 .await
                 .unwrap()
                 .unwrap()
@@ -369,17 +378,129 @@ async fn sdk_runtime_round_trip_and_resume() {
                 AgentEvent::TextDelta { text: delta } => text.push_str(&delta),
                 AgentEvent::Done { status, error, .. } => {
                     assert_eq!(status, DoneStatus::Completed, "{error:?}");
-                    assert_eq!(text, format!("reply:{prompt}"));
+                    assert_eq!(text, "SDK_RUNTIME_OK");
                     break;
                 }
                 _ => {}
             }
         }
         interrupt.cancel();
-        while tokio::time::timeout(Duration::from_secs(5), events.next())
-            .await
-            .unwrap()
-            .is_some()
-        {}
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), events.next()).await {
+                Ok(Some(_)) => continue,
+                _ => break,
+            }
+        }
+    }
+    let seen = requests.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "one model request per round");
+    // DeepSeek carries system-prompt updates in history (`systemPromptUpdate:
+    // 'in-history'`): the `system` field keeps the session's first snapshot and
+    // each change arrives as a later system snapshot in `messages`, so the last
+    // one is what the model is told right now.
+    let snapshot = |request: &Value| -> String {
+        let text = |value: &Value| -> String {
+            value["content"]
+                .as_array()
+                .map(|blocks| {
+                    blocks
+                        .iter()
+                        .filter_map(|block| block["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("")
+                })
+                .unwrap_or_default()
+        };
+        if let Some(current) = request["messages"]
+            .as_array()
+            .and_then(|messages| messages.iter().rev().find(|message| message["role"] == "system"))
+        {
+            return text(current);
+        }
+        request["system"].as_str().unwrap_or_default().into()
+    };
+    let in_plan_mode = |request: &Value| snapshot(request).contains("You are in plan mode");
+    assert!(in_plan_mode(&seen[0]), "round 1 entered plan mode");
+    assert!(
+        !in_plan_mode(&seen[1]),
+        "the resumed run left plan mode before its prompt"
+    );
+    assert!(
+        !in_plan_mode(&seen[2]),
+        "a second /plan off on an inactive session is a no-op"
+    );
+}
+
+/// A loopback Anthropic streaming endpoint: it records every request body and
+/// answers with one completed text turn, so the pinned runtime can run a real
+/// turn with no network and the test can read the guidance it sent.
+async fn mock_model() -> (String, Arc<Mutex<Vec<Value>>>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = Arc::clone(&requests);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let recorded = Arc::clone(&recorded);
+            tokio::spawn(async move {
+                let Some(body) = http_body(&mut socket).await else {
+                    return;
+                };
+                if let Ok(request) = serde_json::from_slice::<Value>(&body) {
+                    recorded.lock().unwrap().push(request);
+                }
+                let head = "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                            cache-control: no-cache\r\nconnection: close\r\n\r\n";
+                let _ = socket
+                    .write_all(format!("{head}{MOCK_REPLY}").as_bytes())
+                    .await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+    (format!("http://{address}/anthropic"), requests)
+}
+
+/// One complete Anthropic SSE text turn, shaped like the node mock's reply.
+const MOCK_REPLY: &str = concat!(
+    "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{",
+    "\"id\":\"msg-mock\",\"type\":\"message\",\"role\":\"assistant\",",
+    "\"model\":\"deepseek-flash\",\"content\":[],\"stop_reason\":null,",
+    "\"stop_sequence\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+    "event: content_block_start\ndata: {\"type\":\"content_block_start\",",
+    "\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+    "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",",
+    "\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"SDK_RUNTIME_OK\"}}\n\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",",
+    "\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},",
+    "\"usage\":{\"output_tokens\":3}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+);
+
+/// Read one HTTP request off the socket and return its body, which the model
+/// client always sends with a `content-length`.
+async fn http_body(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        if let Some(end) = data.windows(4).position(|window| window == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&data[..end]).to_ascii_lowercase();
+            let length = head
+                .lines()
+                .find_map(|line| line.strip_prefix("content-length:"))
+                .and_then(|value| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            if data.len() >= end + 4 + length {
+                return Some(data[end + 4..end + 4 + length].to_vec());
+            }
+        }
+        let read = socket.read(&mut chunk).await.ok()?;
+        if read == 0 {
+            return None;
+        }
+        data.extend_from_slice(&chunk[..read]);
     }
 }

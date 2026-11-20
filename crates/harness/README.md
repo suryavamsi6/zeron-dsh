@@ -129,7 +129,8 @@ ZERON_DEEPSEEK_SDK_DIR=<pinned npm prefix> \
   node --test crates/harness/tests/deepseek_sdk.test.mjs
 ```
 
-The ignored Rust round trip uses the same prefix and fixture:
+The ignored Rust round trip uses the same prefix with a loopback model server,
+and reads the plan-mode guidance the pinned runtime puts in its system prompt:
 
 ```sh
 ZERON_DEEPSEEK_SDK_DIR=<pinned npm prefix> \
