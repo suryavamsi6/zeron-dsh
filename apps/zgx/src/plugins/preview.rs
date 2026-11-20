@@ -47,6 +47,7 @@ pub const BLOCKED: &[&str] = &[
     "terminal.write",
     "terminal.command",
     "account.",
+    "agents.cloud_key",
     "plugins.install",
     // (Deciding on and signing plugins are the consent window's alone, a
     // host of their own: never the main window's to refuse.)
@@ -82,7 +83,6 @@ pub const BLOCKED: &[&str] = &[
     // (An API key, and what an agent's keys are called.)
     "agents.add_key",
     // (The API key every Cloud machine's agent uses, kept by the vault.)
-    "agents.cloud_key",
     "agents.rename",
     "agents.sign_in",
     "agents.sign_out",

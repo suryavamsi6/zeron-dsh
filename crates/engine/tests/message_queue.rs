@@ -110,6 +110,7 @@ impl Harness for HeldHarness {
             // Only the engine can mint a request id it will honour, so the
             // question has to go through controls rather than the stream.
             (controls.request_input)(vec![UserInputQuestion {
+                note: None,
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),
@@ -123,31 +124,34 @@ impl Harness for HeldHarness {
         let steering = controls.steering;
         let prompts = self.prompts.clone();
         let gate = self.mailbox_gate.lock().unwrap().take();
+        let harness_id = self.id;
+        let session_id = format!("sess-queue-{}", harness_id.as_str());
+        let done_session_id = session_id.clone();
         let started = futures::stream::iter(vec![Ok(AgentEvent::SessionStarted {
-            harness: HarnessId::Mock,
-            model: "mock-1".into(),
+            harness: harness_id,
+            model: request.model.clone().unwrap_or_else(|| "mock-1".into()),
             tools: vec![],
             cwd: request.cwd.clone(),
-            session_id: "sess-queue".into(),
+            session_id,
             assistant_message_id: format!("a-{}", request.prompt),
         })]);
         let done = futures::stream::unfold(
-            (finish, steering, prompts, false),
-            |(mut finish, mut steering, prompts, ended)| async move {
+            (finish, steering, prompts, done_session_id, false),
+            |(mut finish, mut steering, prompts, done_session_id, ended)| async move {
                 if ended {
                     return None;
                 }
                 let (event, ended) = tokio::select! {
-                    _ = finish.recv() => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-queue".into()) }, true),
+                    _ = finish.recv() => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some(done_session_id.clone()) }, true),
                     steer = steering.recv() => match steer {
                         Some(message) => {
                             prompts.lock().unwrap().push(message.prompt);
                             (AgentEvent::Steered { assistant_message_id: None, next_assistant_message_id: Some(uuid::Uuid::new_v4().to_string()) }, false)
                         }
-                        None => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some("sess-queue".into()) }, true),
+                        None => (AgentEvent::Done { status: DoneStatus::Completed, result: None, error: None, session_id: Some(done_session_id.clone()) }, true),
                     }
                 };
-                Some((Ok(event), (finish, steering, prompts, ended)))
+                Some((Ok(event), (finish, steering, prompts, done_session_id, ended)))
             },
         );
         let gated = futures::stream::once(async move {
@@ -599,6 +603,67 @@ async fn a_steer_command_for_a_turn_boundary_agent_waits_in_the_queue_for_the_tu
         user_message_id(&core, "and also this").as_deref(),
         Some("m-steer")
     );
+    assert!(queue_texts(&core).is_empty());
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// A message sent mid-turn to an agent that reads input only between turns
+/// waits in the queue; a Stop leaves it there, paused with the person's own
+/// rows — never moved into the transcript unrun, where nothing would answer
+/// it — and Send now sends it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stop_keeps_a_message_sent_mid_turn_in_the_queue() {
+    let (core, harness, prompts) = setup(SteeringMode::TurnBoundary).await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "opening"),
+        "the turn to start",
+    )
+    .await;
+    core.doc_host
+        .queue_command(
+            CHAT,
+            SessionCommandPayload::Steer {
+                prompt: "use chrome instead".into(),
+                message_id: Some("m-mid".into()),
+            },
+        )
+        .expect("queue steer command");
+    wait_for(
+        || queue_texts(&core) == vec!["use chrome instead".to_owned()],
+        "the message to wait in the queue",
+    )
+    .await;
+
+    core.doc_host
+        .queue_command(CHAT, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt");
+    wait_for(
+        || !core.sessions.turn_in_flight(CHAT),
+        "the stopped turn to settle",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(queue_texts(&core), vec!["use chrome instead".to_owned()], "still queued");
+    assert_eq!(user_messages(&core), vec!["opening".to_owned()], "not in the transcript");
+    assert!(
+        !prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "the Stop doesn't send it on by itself"
+    );
+
+    core.doc_host
+        .send_queued_now(CHAT, "m-mid")
+        .await
+        .expect("send it now");
+    wait_for(
+        || prompts.lock().unwrap().iter().any(|p| p == "use chrome instead"),
+        "Send now to send it",
+    )
+    .await;
     assert!(queue_texts(&core).is_empty());
     let _ = harness.finish.send(());
     core.shutdown().await;
@@ -2170,6 +2235,127 @@ async fn a_send_reaches_the_agent_while_the_open_chats_publish_is_held() {
         "the publish to land once released",
     )
     .await;
+    let _ = harness.finish.send(());
+    core.shutdown().await;
+}
+
+/// The queue carries the pick it was sent with. A message queued while a turn
+/// runs, with a config for the SAME harness (a model-only change — what the
+/// model picker makes inside this build's one runtime), drains onto that model
+/// when the turn ends and the chat keeps it. Nothing is announced: a provider
+/// switch is the only thing that writes a seam, and this is not one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_model_only_config_drains_onto_that_model_without_a_switch_seam() {
+    let (core, harness, prompts) = setup(SteeringMode::StepBoundary).await;
+    let mut base = zeron_proto::ChatConfig {
+        harness: HarnessId::Mock,
+        model: Some("mock-base".into()),
+        reasoning: Some(ReasoningLevel::Medium),
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        access: Default::default(),
+        plan: false,
+    };
+    core.workspace.set_chat_config(CHAT, &base).unwrap();
+
+    core.doc_host
+        .queue_message(CHAT, "opening on the saved model", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || {
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "opening on the saved model")
+        },
+        "the opening turn",
+    )
+    .await;
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(requests[0].model.as_deref(), Some("mock-base"));
+    }
+
+    // While that turn runs, queue with another model of the same runtime.
+    base.model = Some("mock-picked".into());
+    let queued_id = core
+        .doc_host
+        .queue_message_with_config(
+            CHAT,
+            "run on the picked model",
+            Vec::new(),
+            true,
+            Vec::new(),
+            Some(base),
+        )
+        .expect("queue the pick");
+    assert_eq!(queue_texts(&core), vec!["run on the picked model"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|m| m == "run on the picked model"),
+        "the pick waits for the turn end"
+    );
+
+    // The turn ends: the queued row drains on the picked model.
+    let _ = harness.finish.send(());
+    wait_for(
+        || {
+            prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "run on the picked model")
+        },
+        "the queued pick to reach the harness",
+    )
+    .await;
+
+    assert_eq!(
+        user_message_id(&core, "run on the picked model").as_deref(),
+        Some(queued_id.as_str()),
+        "the row's own id becomes the user message"
+    );
+    {
+        let requests = harness.requests.lock().unwrap();
+        assert_eq!(
+            requests[1].model.as_deref(),
+            Some("mock-picked"),
+            "the dispatch carries the row's config, not the chat's older row"
+        );
+    }
+    // Same harness on both sides: no switch seam is written for it.
+    let entries: Vec<SessionMessageEntry> = core
+        .doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_entries()
+        .expect("read entries");
+    assert!(
+        !entries
+            .iter()
+            .flat_map(|e| &e.parts)
+            .any(|p| matches!(p, MessagePart::Switch { .. })),
+        "a model-only pick must not write a provider-switch seam: {entries:#?}"
+    );
+    // Kept for the next turn.
+    wait_for(
+        || {
+            core.workspace
+                .chat_config(CHAT)
+                .is_some_and(|c| c.model.as_deref() == Some("mock-picked"))
+        },
+        "the chat to keep the picked model",
+    )
+    .await;
+    assert_eq!(
+        core.workspace.chat_config(CHAT).map(|c| c.harness),
+        Some(HarnessId::Mock),
+        "the runtime is unchanged"
+    );
+
     let _ = harness.finish.send(());
     core.shutdown().await;
 }

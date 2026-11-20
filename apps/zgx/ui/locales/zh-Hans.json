@@ -1011,7 +1011,8 @@
       "rename": "重命名",
       "rename_title": "重命名 API 密钥",
       "rename_hint": "留空则使用默认名称。",
-      "key_name_optional": "名称（可选）"
+      "key_name_optional": "名称（可选）",
+      "how_it_signs_in": "在 Cloud 上如何登录"
     },
     "command_palette": {
       "scope": {

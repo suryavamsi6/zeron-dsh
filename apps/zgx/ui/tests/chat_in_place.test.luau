@@ -861,3 +861,165 @@ test("the conversation width setting widens the transcript and the composer", fu
 	local w = widest_reply()
 	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)
+
+test("a short chat's next message glides smoothly into its runway instead of cutting", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s2")
+	local ys, pill, id = glide(app, "Follow up on short chat")
+	expect(pill).to_be(false)
+	expect(id).never.to_be_nil()
+	local from, to = ys[1], ys[#ys]
+	expect(from ~= nil and to ~= nil).to_be(true)
+	-- Starts below the first turn and glides smoothly to the top (not a 1-frame cut).
+	expect((from :: number) > 150).to_be(true)
+	expect((to :: number) < 120).to_be(true)
+	local between = 0
+	for i = 2, #ys do
+		local step = ys[i - 1] - ys[i]
+		expect(step >= -0.5).to_be(true)
+		expect(step <= 0.25 * ((from :: number) - (to :: number))).to_be(true)
+		if ys[i] < (from :: number) - 2 and ys[i] > (to :: number) + 2 then
+			between += 1
+		end
+	end
+	expect(between >= 5).to_be(true)
+	-- Stays pinned after settling and as the reply streams (no upward drift).
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (to :: number)) <= 2).to_be(true)
+	app:command("engine_copy")
+	app:command("start_reply")
+	app:command("stream_words")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (to :: number)) <= 2).to_be(true)
+end)
+
+test("consecutive sends settle flush at the top with no upward scroll drift", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	open(app, "s1")
+	local ys1, pill1, id1 = glide(app, "First turn here")
+	expect(eased(ys1)).to_be_nil()
+	expect(pill1).to_be(false)
+	local landed1 = ys1[#ys1]
+	settle(app)
+	expect(math.abs((y_of_id(app, id1 :: string) :: number) - landed1) <= 2).to_be(true)
+
+	app:command("engine_copy")
+	app:command("start_reply")
+	for _ = 1, 4 do
+		app:command("stream_words")
+		app:frames(2)
+	end
+	app:command("end_reply")
+	settle(app)
+
+	local ys2, pill2, id2 = glide(app, "Second turn right after")
+	expect(eased(ys2)).to_be_nil()
+	expect(pill2).to_be(false)
+	local landed2 = ys2[#ys2]
+	local _, list_y = box(app, "#transcript")
+	expect(landed2 >= list_y).to_be(true)
+	expect(landed2 - list_y < 60).to_be(true)
+	settle(app)
+	expect(math.abs((y_of_id(app, id2 :: string) :: number) - landed2) <= 2).to_be(true)
+end)
+
+test("sending while composer shrinks and clamps scroll offset downward never hangs", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	settle(app)
+	open(app, "s1")
+	-- Switch model and type a multi-line draft so clearing the composer on
+	-- send shrinks the foot padding and clamps max_scroll downward while the
+	-- send's glide starts.
+	app:set_state("chat_model", "deepseek-v4-pro-max")
+	settle(app)
+	app:type('role:textbox "Message"', "Line 1")
+	for i = 2, 5 do
+		app:key("Shift+Enter")
+		app:type('role:textbox "Message"', `Line {i}`)
+	end
+	app:key("Shift+Enter")
+	app:type('role:textbox "Message"', "Testing")
+	settle(app)
+	app:key("Enter")
+	-- Grow viewport taller immediately after send starts gliding so max_scroll
+	-- drops below `freeze_at` during the pre-rise window.
+	app:resize(900, 820)
+	settle(app)
+	expect(app:wait('~"Testing"', { timeout_ms = 1000 })).to_be(true)
+	expect(app:wait('~"DeepSeek"', { timeout_ms = 1000 })).to_be(true)
+end)
+
+test("a model picked inside the one runtime shows no switch seam and frames the prompt inside the runway", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	open(app, "s1")
+	-- Pick another DeepSeek model: s1's own (deepseek-flash) and this pick
+	-- resolve to the same runtime, so the send is no provider switch and
+	-- has no seam to frame.
+	app:click('role:button "Model"')
+	settle(app)
+	app:click(".folded")
+	settle(app)
+	app:click('role:option "DeepSeek V4 Pro Max"')
+	settle(app)
+
+	app:type('role:textbox "Message"', "Tear it to pieces")
+	app:key("Enter")
+	local id: string? = nil
+	local seams = 0
+	local ys: { number } = {}
+	local pill = false
+	for _ = 1, 60 do
+		app:frames(1)
+		if not id then
+			local ms = app:state("chat.messages")
+			local tail = ms[#ms]
+			if tail and tail.text == "Tear it to pieces" then
+				id = tail.id
+			end
+		end
+		for _, m in app:state("chat.messages") do
+			if m.role == "switch" then
+				seams += 1
+			end
+		end
+		if id then
+			local y = y_of_id(app, id)
+			if y then
+				table.insert(ys, y)
+			end
+		end
+		pill = pill or app:has('role:button "Jump to latest"')
+	end
+	-- The same runtime on both sides: no seam row is framed at any point.
+	expect(seams).to_be(0)
+	expect(eased(ys)).to_be_nil()
+	expect(pill).to_be(false)
+
+	-- After landing: the prompt sits cleanly inside the top of #transcript,
+	-- NOT clipped off the top.
+	local _, list_y = box(app, "#transcript")
+	local prompt_y = y_of_id(app, id :: string)
+	expect(prompt_y).never.to_be_nil()
+	expect((prompt_y :: number) >= list_y).to_be(true)
+	expect((prompt_y :: number) - list_y < 60).to_be(true)
+
+	-- Holds steady as the engine copy, reply, and tools arrive.
+	app:command("engine_copy")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("start_reply")
+	app:command("stream_words")
+	app:command("add_tool")
+	settle(app)
+	expect((y_of_id(app, id :: string) :: number) >= list_y).to_be(true)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("end_reply")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+end)

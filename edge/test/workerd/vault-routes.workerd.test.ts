@@ -81,6 +81,19 @@ describe("/vault routes → VAULT service binding", () => {
     expect((await lastCall("accountUsage")).args).toEqual([caller, "deepseek-key", "a1"]);
   });
 
+  it("batches grants for the providers this build has, never github", async () => {
+    const u = newUser();
+    const bearer = userBearer(u);
+    const caller = { userId: u.userId, orgId: "org1", kind: "user" };
+    const batch = { providers: ["deepseek-key"], deviceId: "laptop-2", ts: 1_800_000_000_000, sig: "c2ln" };
+    const reply = (await (await call("POST", "/vault/org1/grants", bearer, batch)).json()) as { grants: { provider: string }[] };
+    expect(reply.grants.map((g) => g.provider)).toEqual(["deepseek-key"]);
+    expect((await lastCall("grantMany")).args).toEqual([caller, batch]);
+    for (const providers of [[], ["github"], ["nope"], "deepseek-key"]) {
+      expect((await call("POST", "/vault/org1/grants", bearer, { ...batch, providers })).status, JSON.stringify(providers)).toBe(400);
+    }
+  });
+
   it("validates shapes before calling the vault", async () => {
     const bearer = userBearer(newUser());
     const bad = async (method: string, path: string, body?: unknown) =>

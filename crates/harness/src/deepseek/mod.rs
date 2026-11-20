@@ -777,6 +777,7 @@ fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError
                 multi_select: q["multiSelect"].as_bool().unwrap_or(false),
                 prefill: None,
                 multiline: false,
+                note: None,
             })
         })
         .collect()

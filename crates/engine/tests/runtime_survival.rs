@@ -561,11 +561,12 @@ async fn a_send_held_for_the_turn_end_runs_as_sent_without_a_ping() {
     rig.core.sessions.shutdown().await;
 }
 
-/// A Stop cancels what was sent during the turn it stops: a send held for
-/// that turn's end never runs — not even after the user's next message
-/// thaws the queue.
+/// A Stop holds back what was sent during the turn it stops: the send stays
+/// in the queue, paused with the person's own rows — never starting the
+/// stopped work again by itself, and never stranded unrun in the transcript.
+/// The person's next message thaws the queue onto a fresh runtime.
 #[tokio::test]
-async fn stop_cancels_sends_held_for_the_stopped_turn() {
+async fn a_stop_holds_sends_sent_during_its_turn_in_the_paused_queue() {
     let rig = rig_full(false, true);
     rig.core
         .sessions
@@ -600,11 +601,47 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
         || {
             rig.ledger.kills.load(Ordering::SeqCst) == 1
                 && status(&rig.core) == Some(SessionStatus::Idle)
-                && queued(&rig).is_empty()
         },
-        "the stop to cancel the held send",
+        "the stop to settle",
     )
     .await;
+    assert_eq!(
+        queued(&rig),
+        ["held before the stop"],
+        "the stopped turn's send waits in the queue, paused"
+    );
+    // Nothing starts on its own, and nothing is stranded unrun in the chat.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        rig.ledger.spawns.load(Ordering::SeqCst),
+        1,
+        "the Stop's held send started a runtime by itself"
+    );
+    assert!(
+        !rig.ledger
+            .prompts
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(p, _)| p.contains("held before the stop")),
+        "a send held for the stopped turn ran after the Stop"
+    );
+    assert!(
+        !rig.core
+            .doc_host
+            .open(CHAT)
+            .unwrap()
+            .doc()
+            .read_entries()
+            .unwrap()
+            .iter()
+            .any(|e| e.parts.iter().any(|part| match part {
+                zeron_doc::parts::MessagePart::Text { text, .. } => text.contains("held before the stop"),
+                _ => false,
+            })),
+        "the held send was stranded unrun in the transcript"
+    );
+    // The person's next message thaws the queue: the held row runs now.
     rig.core
         .doc_host
         .queue_command(
@@ -617,27 +654,13 @@ async fn stop_cancels_sends_held_for_the_stopped_turn() {
         .unwrap();
     wait_for(
         || {
-            rig.ledger
-                .prompts
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|(p, _)| p == "after the stop")
+            let prompts = rig.ledger.prompts.lock().unwrap();
+            prompts.iter().any(|(p, _)| p == "after the stop")
+                && prompts.iter().any(|(p, _)| p == "held before the stop")
         },
-        "the next message to run",
+        "the thawed queue to run both rows",
     )
     .await;
-    settle(&rig, 2).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !rig.ledger
-            .prompts
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(p, _)| p.contains("held before the stop")),
-        "a send held for the stopped turn ran after the Stop"
-    );
     rig.core.sessions.shutdown().await;
 }
 

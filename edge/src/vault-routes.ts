@@ -15,6 +15,7 @@
 import {
   VAULT_PROVIDERS,
   type EnrollDeviceRequest,
+  type GrantManyRequest,
   type GrantRequest,
   type PutCredentialRequest,
   type VaultCaller,
@@ -240,6 +241,32 @@ export const handleVaultRoute = async (
       ...(inheritFrom !== undefined ? { inheritFrom } : {})
     };
     return call(() => vault.grant(caller, req));
+  }
+
+  // POST /vault/{orgId}/grants — several providers' grants at once (user or
+  // runner). `sig` signs the grant message with `providers.join(",")` as its
+  // provider; the list is sorted and distinct, and never holds github (its
+  // grants name a repository, so those go one at a time through /grant).
+  if (rest[0] === "grants" && rest.length === 1 && method === "POST") {
+    const b = await body();
+    if (b instanceof Response) return b;
+    const { providers, deviceId, ts, sig } = b;
+    if (
+      !Array.isArray(providers) ||
+      providers.length === 0 ||
+      providers.length > VAULT_PROVIDERS.length ||
+      !providers.every((p) => isProvider(p) && p !== "github")
+    ) {
+      return bad("Expected providers: a list of providers other than github.");
+    }
+    if (typeof deviceId !== "string" || !ID_RE.test(deviceId)) return bad("Bad deviceId.");
+    if (typeof ts !== "number" || !Number.isSafeInteger(ts)) return bad("Bad ts.");
+    if (typeof sig !== "string" || !KEY_RE.test(sig)) return bad("Bad sig.");
+    if (auth.kind === "runner" && deviceId !== auth.deviceId) {
+      return json({ error: "forbidden", message: "A runner may only request grants for itself." }, 403);
+    }
+    const req: GrantManyRequest = { providers: providers as VaultProviderId[], deviceId, ts, sig };
+    return call(() => vault.grantMany(caller, req));
   }
 
   // GET /vault/{orgId}/github/repos?q= — the repositories the user's GitHub
