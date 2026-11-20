@@ -26,8 +26,8 @@ on:
         description: '1 for the dark scheme'
         required: false
         default: '0'
-      yes:
-        description: 'Type RUN to confirm the (long) build '
+      confirm:
+        description: 'Type RUN to confirm (this builds the app and takes 20+ minutes)'
         required: true
         default: ''
 
@@ -36,7 +36,7 @@ permissions:
 
 jobs:
   shots:
-    if: ${{ inputs.yes == 'RUN' }}
+    if: ${{ inputs.confirm == 'RUN' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
