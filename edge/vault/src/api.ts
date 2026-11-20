@@ -232,6 +232,25 @@ export interface Grant {
   readonly generation: number;
 }
 
+/**
+ * Several providers' grants for one device in one round trip. `sig` signs
+ * the grant message with `providers.join(",")` as its provider. The list is
+ * sorted and distinct, and never holds `github` (its grants name a
+ * repository). One signature spends one `ts`.
+ */
+export interface GrantManyRequest {
+  readonly providers: readonly VaultProviderId[];
+  readonly deviceId: string;
+  readonly ts: number;
+  readonly sig: string;
+}
+
+export interface GrantManyReply {
+  readonly grants: readonly Grant[];
+  /** The providers granted nothing, and why (`not_found`, `needs_reconnect`, …). */
+  readonly missing: readonly { readonly provider: VaultProviderId; readonly error: VaultErrorCode; readonly message: string }[];
+}
+
 export interface GithubDeviceStart {
   readonly flowId: string;
   readonly userCode: string;
@@ -268,6 +287,10 @@ export interface VaultRpc {
   /** Per-user kill switch. */
   setDisabled(caller: VaultCaller, disabled: boolean): Promise<VaultResult<VaultStatusView>>;
   grant(caller: VaultCaller, request: GrantRequest): Promise<VaultResult<Grant>>;
+  /** Several grants at once (`GrantManyRequest`). A refusal of the device
+   * (signature, revoked, disabled) fails the whole call; a provider with
+   * nothing to grant is listed in `missing`. */
+  grantMany(caller: VaultCaller, request: GrantManyRequest): Promise<VaultResult<GrantManyReply>>;
   githubDeviceStart(
     caller: VaultCaller,
     authorizedDevices: readonly string[]

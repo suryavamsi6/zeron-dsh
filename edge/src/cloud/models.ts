@@ -10,6 +10,14 @@
  * the picker offer a model the harness cannot run.
  */
 
+/** A per-model toggle a picker offers (mirrors `crates/proto` `ModelOption`). */
+export interface ModelOption {
+  readonly id: string;
+  readonly label: string;
+  readonly choices: readonly { readonly id: string; readonly label: string }[];
+  readonly defaultChoice: string;
+}
+
 export interface CloudModel {
   readonly id: string;
   readonly label: string;
@@ -49,19 +57,7 @@ export const CLOUD_MODELS: Readonly<Record<CloudHarness, readonly CloudModel[]>>
  * (`POST /runner/models`), kept per account and served while every machine
  * sleeps.
  */
-export const CLOUD_AGENTS = [
-  "claude-code",
-  "codex",
-  "cursor",
-  "devin",
-  "grok",
-  "hermes",
-  "fx",
-  "pi",
-  "opencode",
-  "antigravity",
-  "muse"
-] as const;
+export const CLOUD_AGENTS = ["deepseek"] as const;
 export type CloudAgent = (typeof CLOUD_AGENTS)[number];
 
 export const isCloudAgent = (value: unknown): value is CloudAgent =>

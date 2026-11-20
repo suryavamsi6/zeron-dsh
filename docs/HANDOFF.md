@@ -124,21 +124,30 @@ never by rebasing.
 - **Gate:** `CI result` green on the sync PR, release-profile failures triaged rather than re-run
   away, and `git merge-base --is-ancestor <round target> main` true afterwards.
 
-#### Round 2 — 2026-11-20, upstream 0.3.11 (`33d981bd3`)
+#### Round 2 — 2026-11-20, upstream 0.3.11 (`33d981bd3`) and 0.3.12 (`2e3513c67`)
 
 - **Range merged:** `d6fad8238..33d981bd3` (5 commits): `22eb085c5` 0.3.11, `8c5549ecb` Cloud:
   every built-in agent with every login, `17d777fa0` Grok Auto + Full access always-approve,
   `4820dd83c` RollText interface font, `33d981bd3` the release merge. 64 conflicted paths against
   `origin/main` `80c72f7a1`. Merge commit, never squash.
-- **Upstream moved mid-round:** its tip was `2e3513c67` (0.3.12: `890c4527e` Antigravity 1.5.0,
-  `5ac8d75a5` 0.3.12) when the merge ran. The round targets `33d981bd3`; 0.3.12 is the next
-  round, and the ancestry check is `git merge-base --is-ancestor 33d981bd3 main`, not
-  `upstream/main` (which has moved past it).
+- **Upstream moved mid-round, so the tip was taken too:** `33d981bd3..2e3513c67` (3 commits:
+  `890c4527e` Antigravity 1.5.0 hardening + provider-switch seam, `5ac8d75a5` 0.3.12,
+  `2e3513c67` the release merge) merged on top as a second merge commit, plus current `main`
+  (`432a0724b`) in between. That is what keeps `upstream/main` an ancestor — the acceptance is
+  `git merge-base --is-ancestor upstream/main main`, not the release the round started against.
 - **Resolutions worth repeating:**
-  - 27 `modify/delete` paths were all the provider cut: keep deleted.
+  - 27 `modify/delete` paths were all the provider cut: keep deleted. 0.3.12's ACP work
+    (`acp/mod.rs`, `acp_stall.rs`, `acp.rs`, `provider_switch.rs`, new `ccpa_thoughts.rs` and
+    `antigravity_live.rs`) is the same cut and stays out.
   - The fork's rewritten modules (`agent_accounts`, `cloud_accounts`, `credentials`,
     `harness_updates`, `install`, `plan_usage`, `providers`, `registry`) take the fork's version
     wholesale; upstream's edits inside them are provider machinery.
+  - The 0.3.12 queued-message config seam is kept in `rpc.rs` *behind* the fork's
+    `ensure_chat_harness` guard; `sessions.rs` takes upstream's provider-switch seam and
+    recovery-history carry, because the surrounding merged code is upstream's.
+  - `runtime_survival`'s held-send test now asserts upstream's Stop contract: the send stays in
+    the paused queue and runs on the person's next message, rather than being cancelled into the
+    transcript.
   - Generic upstream fixes kept: `VAULT_PROVIDERS_HEADER` + `known_connections` (an edge newer
     than the client listing an unknown vault provider must not fail the whole status read),
     `newest_node_dir` / `prefer_node_dir` on a Cloud machine (with `executable::node_version`
