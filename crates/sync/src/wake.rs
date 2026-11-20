@@ -122,15 +122,57 @@ pub fn beat_interval(period: Duration) -> tokio::time::Interval {
 pub fn next_beat(period: Duration) -> tokio::time::Instant {
     let now = tokio::time::Instant::now();
     let period_ns = period.as_nanos().max(1);
-    let wall_ns = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
+    let wall_ns = wall_ns();
     let mut wait = period_ns - wall_ns % period_ns;
     if wait < 100_000_000 && period_ns > 200_000_000 {
         wait += period_ns;
     }
     now + Duration::from_nanos(wait.min(u64::MAX as u128) as u64)
+}
+
+/// The wall clock the beat grid is placed against. Production reads the real
+/// clock; a test may pin it (below) so a window that is a whole number of
+/// periods holds one fixed number of beats instead of whichever of two the
+/// time of day picks — the first tick is the *next* whole multiple, so a
+/// 601 s window starting 0.5 s before a beat holds 41 beats at a 15 s period
+/// and one starting 2 s after one holds 40 (SUR-144).
+fn wall_ns() -> u128 {
+    #[cfg(test)]
+    {
+        let pinned = PINNED_WALL_MS.load(Ordering::Relaxed);
+        if pinned >= 0 {
+            return Duration::from_millis(pinned as u64).as_nanos();
+        }
+    }
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_nanos()
+}
+
+/// `next_beat`'s wall clock as pinned by a test; `-1` is the real clock.
+#[cfg(test)]
+static PINNED_WALL_MS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(-1);
+
+/// Pins [`wall_ns`] for as long as it lives, restoring the previous pin on
+/// drop. Tests only: the pin makes a phase-dependent cadence deterministic;
+/// it is not a way to read the expectation back out of the code.
+#[cfg(test)]
+pub(crate) struct PinnedWall(i64);
+
+#[cfg(test)]
+impl PinnedWall {
+    /// `ms` since the Unix epoch. The beat phase is `ms % period`.
+    pub(crate) fn at_ms(ms: i64) -> Self {
+        Self(PINNED_WALL_MS.swap(ms, Ordering::Relaxed))
+    }
+}
+
+#[cfg(test)]
+impl Drop for PinnedWall {
+    fn drop(&mut self) {
+        PINNED_WALL_MS.store(self.0, Ordering::Relaxed);
+    }
 }
 
 fn online_channel() -> &'static broadcast::Sender<()> {
