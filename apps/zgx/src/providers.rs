@@ -314,7 +314,7 @@ where
                 // never which value. An env value can be a token, so only
                 // the shape is printed: every leaf off `env` is replaced.
                 eprintln!(
-                    "SetMcpServers failed: {:?}\nshape: {}",
+                    "zeron-zgx: mcp: SetMcpServers failed: {:?}; shape: {}",
                     result.as_ref().err(),
                     serde_json::to_string(&shape(&params)).unwrap_or_default()
                 );
