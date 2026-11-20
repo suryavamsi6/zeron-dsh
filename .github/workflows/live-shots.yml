@@ -22,8 +22,8 @@ on:
         description: 'AUDIT_SHOTS list, comma separated'
         required: true
         default: 'shell'
-      dark:
-        description: '1 for the dark scheme'
+      light:
+        description: '1 for the light scheme (the fixtures default to dark)'
         required: false
         default: '0'
       confirm:
@@ -59,9 +59,12 @@ jobs:
       - name: Render the shots
         env:
           AUDIT_SHOTS: ${{ inputs.shots }}
-          AUDIT_DARK: ${{ inputs.dark }}
           AUDIT_OUT: ${{ github.workspace }}/shots
+          # The app reads `AUDIT_LIGHT` (its own module doc says `AUDIT_DARK`,
+          # which nothing reads) and is dark unless it is set.
+          WANT_LIGHT: ${{ inputs.light }}
         run: |
+          if [ "$WANT_LIGHT" = "1" ]; then export AUDIT_LIGHT=1; fi
           mkdir -p shots
           xvfb-run -a cargo test --locked --manifest-path apps/zgx/Cargo.toml \
             --target-dir apps/zgx/target --bin zeron-zgx audit_shots -- --ignored --nocapture
