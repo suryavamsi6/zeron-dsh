@@ -107,10 +107,23 @@ The variable holds the stdio server description (`serverName`, `command`,
 `args`, `env`, `cwd`, `failOnStartupError`, `startupTimeoutMs`). Server names
 must match `[A-Za-z0-9_-]{1,32}` and be unique. Zeron's runtime disables the
 SDK's own plugin manager, so no user-level plugin or MCP configuration from
-the isolated Harness home is loaded on a run; Zeron's injected server is the only
-MCP entry the host adds to a run.
+the isolated Harness home is loaded on a run: every MCP entry a run starts is
+one Zeron itself put there. They come from three places — this server, the
+plugins' native servers, and the person's own stdio servers saved on this
+device in `{data_dir}/mcp-servers.json` (at most 16, each a program the driver
+starts with the run). The person's servers stand last and never take a name
+already in use: one that collides with this server, a plugin's, the schedule
+bridge's or an earlier entry is dropped rather than shadowing it, and one a
+hand edit made unusable is left out instead of failing the run.
 
-Title runs never carry it. A run with no served port (embedded engine that
+That list is this device's alone. `McpServers` reads it and `SetMcpServers`
+replaces it whole; only this device's own window may call either — a peer or
+an agent is refused. A set that fails validation (a name the driver would
+refuse, a duplicate, a missing command, a remote `http` entry, more than 16)
+leaves the previous list in place, so a saved entry is always one the next run
+will start.
+
+Title runs never carry Zeron's server. A run with no served port (embedded engine that
 lost the bind) gets no Zeron tools rather than a dead server. A missing
 Node >=24.9 or the pinned SDK fails the run as `NotInstalled` before any
 MCP server starts.
