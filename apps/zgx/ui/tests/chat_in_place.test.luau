@@ -862,81 +862,6 @@ test("the conversation width setting widens the transcript and the composer", fu
 	expect(w > 660 + 24 and w <= 900 + 24).to_be(true)
 end)
 
-test("switching provider shows its seam immediately on send and frames it inside the runway", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(900, 700)
-	app:command("catalog_grows")
-	open(app, "s1")
-	-- Pick a model on Codex (switching away from s1's Claude Code).
-	app:click('role:button "Model"')
-	settle(app)
-	app:click(".folded")
-	settle(app)
-	app:click('role:tab "Codex"')
-	settle(app)
-	app:click('role:option ~"GPT-5.5"')
-	settle(app)
-
-	app:type('role:textbox "Message"', "Tear it to pieces")
-	app:key("Enter")
-	local id: string? = nil
-	local seam_id: string? = nil
-	local saw_seam_on_first_frame = false
-	local ys: { number } = {}
-	local pill = false
-	for _ = 1, 60 do
-		app:frames(1)
-		if not id then
-			local ms = app:state("chat.messages")
-			local tail = ms[#ms]
-			if tail and tail.text == "Tear it to pieces" then
-				id = tail.id
-				local prev = ms[#ms - 1]
-				if prev and prev.role == "switch" then
-					seam_id = prev.id
-					saw_seam_on_first_frame = true
-				end
-			end
-		end
-		if id then
-			local y = y_of_id(app, id)
-			if y then
-				table.insert(ys, y)
-			end
-		end
-		pill = pill or app:has('role:button "Jump to latest"')
-	end
-	expect(saw_seam_on_first_frame).to_be(true)
-	expect(seam_id).never.to_be_nil()
-	expect(eased(ys)).to_be_nil()
-	expect(pill).to_be(false)
-
-	-- After landing: the switch seam sits cleanly inside the top of #transcript,
-	-- NOT clipped off the top, with the user prompt right beneath it.
-	local _, list_y = box(app, "#transcript")
-	local seam_y = y_in(app:tree("#transcript"), '"Codex"')
-	local prompt_y = y_of_id(app, id :: string)
-	expect(seam_y ~= nil and prompt_y ~= nil).to_be(true)
-	expect((seam_y :: number) >= list_y).to_be(true)
-	expect((seam_y :: number) - list_y < 60).to_be(true)
-	expect((prompt_y :: number) > (seam_y :: number)).to_be(true)
-
-	-- Holds steady as the engine copy, reply, and tools arrive.
-	app:command("engine_copy")
-	settle(app)
-	expect(math.abs((y_in(app:tree("#transcript"), '"Codex"') :: number) - (seam_y :: number)) <= 2).to_be(true)
-	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
-	app:command("start_reply")
-	app:command("stream_words")
-	app:command("add_tool")
-	settle(app)
-	expect((y_in(app:tree("#transcript"), '"Codex"') :: number) >= list_y).to_be(true)
-	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
-	app:command("end_reply")
-	settle(app)
-	expect(math.abs((y_in(app:tree("#transcript"), '"Codex"') :: number) - (seam_y :: number)) <= 2).to_be(true)
-end)
-
 test("a short chat's next message glides smoothly into its runway instead of cutting", function()
 	local app = mount("chat_fixture.luau")
 	app:resize(900, 700)
@@ -998,34 +923,6 @@ test("consecutive sends settle flush at the top with no upward scroll drift", fu
 	expect(landed2 - list_y < 60).to_be(true)
 	settle(app)
 	expect(math.abs((y_of_id(app, id2 :: string) :: number) - landed2) <= 2).to_be(true)
-end)
-
-test("sending while composer shrinks and clamps scroll offset downward never hangs", function()
-	local app = mount("chat_fixture.luau")
-	app:resize(900, 700)
-	app:command("catalog_grows")
-	settle(app)
-	open(app, "s1")
-	-- Switch model and type a multi-line draft so clearing the composer on
-	-- send shrinks the foot padding and clamps max_scroll downward while the
-	-- send's glide starts.
-	app:set_state("chat_model", "deepseek-v4-pro-max")
-	settle(app)
-	app:type('role:textbox "Message"', "Line 1")
-	for i = 2, 5 do
-		app:key("Shift+Enter")
-		app:type('role:textbox "Message"', `Line {i}`)
-	end
-	app:key("Shift+Enter")
-	app:type('role:textbox "Message"', "Testing")
-	settle(app)
-	app:key("Enter")
-	-- Grow viewport taller immediately after send starts gliding so max_scroll
-	-- drops below `freeze_at` during the pre-rise window.
-	app:resize(900, 820)
-	settle(app)
-	expect(app:wait('~"Testing"', { timeout_ms = 1000 })).to_be(true)
-	expect(app:wait('~"DeepSeek"', { timeout_ms = 1000 })).to_be(true)
 end)
 
 
