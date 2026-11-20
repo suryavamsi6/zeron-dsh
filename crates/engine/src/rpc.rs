@@ -7500,7 +7500,7 @@ mod tests {
             .await;
         let refused = refused.err().expect("an HTTP server must be refused");
         assert!(
-            matches!(&refused, RpcError::BadParams(message) if message.contains("HTTP")),
+            matches!(&refused, RpcError::BadParams(message) if message.contains("remote server")),
             "{refused:?}"
         );
         assert_eq!(

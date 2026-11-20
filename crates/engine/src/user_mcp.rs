@@ -172,7 +172,7 @@ fn validate_one(server: &McpServer) -> Result<(), String> {
     // here instead — a successful set means the entry is in the list.)
     if server.http.is_some() {
         return Err(format!(
-            "\"{name}\" is an HTTP server: this list keeps stdio servers only"
+            "\"{name}\" is a remote server; this list takes stdio servers only"
         ));
     }
     Ok(())
@@ -329,7 +329,7 @@ mod tests {
             ..Default::default()
         });
         let error = validate(&[server]).unwrap_err();
-        assert!(error.contains("HTTP"), "{error}");
+        assert!(error.contains("remote server"), "{error}");
     }
 
     #[test]
