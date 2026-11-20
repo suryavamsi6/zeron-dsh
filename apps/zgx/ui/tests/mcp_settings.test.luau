@@ -207,6 +207,32 @@ test("MCP servers keeps the draft and shows the engine's words when a save is re
 	expect(asked(app, "McpServers")).to_be(1)
 end)
 
+test("MCP servers shows the engine's words without the RPC envelope", function()
+	local app = open()
+	local refusals = {
+		{ prefix = "bad params: ", said = "At most 16 MCP servers" },
+		{ prefix = "capability error: ", said = "mcp_servers_unavailable" },
+		{ prefix = "transport: ", said = "the engine went away" },
+		{ prefix = "unknown method: ", said = "SetMcpServers" },
+	}
+	for _, refusal in refusals do
+		app:set_state("settings_stub_mcp_set", refusal.prefix .. refusal.said)
+		fill_server(app, "notes", "npx", "", "")
+		app:click(`{PAGE} >> role:button "Save"`)
+		app:frames(10)
+		expect(app:has(`{PAGE} >> "{refusal.said}"`)).to_be(true)
+		-- The envelope's word, nowhere.
+		expect(app:tree(PAGE)).never.to_contain(refusal.prefix)
+	end
+	-- A bare failure has no envelope (`RpcError::Failed` is `{0}`): the
+	-- sentence must reach the page whole, not with a word cut off it.
+	app:set_state("settings_stub_mcp_set", "Could not save the MCP servers: disk full")
+	fill_server(app, "notes", "npx", "", "")
+	app:click(`{PAGE} >> role:button "Save"`)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "Could not save the MCP servers: disk full"`)).to_be(true)
+end)
+
 test("MCP servers asks before removing a server, naming it", function()
 	local app = open()
 	app:click(`{PAGE} >> role:button "Remove filesystem"`)
