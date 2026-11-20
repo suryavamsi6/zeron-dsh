@@ -953,4 +953,73 @@ test("sending while composer shrinks and clamps scroll offset downward never han
 	expect(app:wait('~"DeepSeek"', { timeout_ms = 1000 })).to_be(true)
 end)
 
+test("a model picked inside the one runtime shows no switch seam and frames the prompt inside the runway", function()
+	local app = mount("chat_fixture.luau")
+	app:resize(900, 700)
+	app:command("catalog_grows")
+	open(app, "s1")
+	-- Pick another DeepSeek model: s1's own (deepseek-flash) and this pick
+	-- resolve to the same runtime, so the send is no provider switch and
+	-- has no seam to frame.
+	app:click('role:button "Model"')
+	settle(app)
+	app:click(".folded")
+	settle(app)
+	app:click('role:option "DeepSeek V4 Pro Max"')
+	settle(app)
 
+	app:type('role:textbox "Message"', "Tear it to pieces")
+	app:key("Enter")
+	local id: string? = nil
+	local seams = 0
+	local ys: { number } = {}
+	local pill = false
+	for _ = 1, 60 do
+		app:frames(1)
+		if not id then
+			local ms = app:state("chat.messages")
+			local tail = ms[#ms]
+			if tail and tail.text == "Tear it to pieces" then
+				id = tail.id
+			end
+		end
+		for _, m in app:state("chat.messages") do
+			if m.role == "switch" then
+				seams += 1
+			end
+		end
+		if id then
+			local y = y_of_id(app, id)
+			if y then
+				table.insert(ys, y)
+			end
+		end
+		pill = pill or app:has('role:button "Jump to latest"')
+	end
+	-- The same runtime on both sides: no seam row is framed at any point.
+	expect(seams).to_be(0)
+	expect(eased(ys)).to_be_nil()
+	expect(pill).to_be(false)
+
+	-- After landing: the prompt sits cleanly inside the top of #transcript,
+	-- NOT clipped off the top.
+	local _, list_y = box(app, "#transcript")
+	local prompt_y = y_of_id(app, id :: string)
+	expect(prompt_y).never.to_be_nil()
+	expect((prompt_y :: number) >= list_y).to_be(true)
+	expect((prompt_y :: number) - list_y < 60).to_be(true)
+
+	-- Holds steady as the engine copy, reply, and tools arrive.
+	app:command("engine_copy")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("start_reply")
+	app:command("stream_words")
+	app:command("add_tool")
+	settle(app)
+	expect((y_of_id(app, id :: string) :: number) >= list_y).to_be(true)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+	app:command("end_reply")
+	settle(app)
+	expect(math.abs((y_of_id(app, id :: string) :: number) - (prompt_y :: number)) <= 2).to_be(true)
+end)
