@@ -227,11 +227,12 @@ mod tests {
         assert_eq!(names(&skills), ["plan", "review"]);
         let review = skills.iter().find(|s| s.name == "review").unwrap();
         assert_eq!(review.description, "Review the diff");
+        // Compared as a path, not a string: `display()` spells the OS
+        // separator, so a string expectation would assert the platform
+        // rather than which file the skill was read from.
         assert_eq!(
-            review.path,
-            root.join(".dsh/skills/review/SKILL.md")
-                .display()
-                .to_string()
+            Path::new(&review.path),
+            root.join(".dsh/skills/review/SKILL.md").as_path()
         );
         assert!(skills.iter().all(|s| s.enabled && s.command.is_none()));
     }

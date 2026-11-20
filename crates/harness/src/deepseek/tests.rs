@@ -1,4 +1,5 @@
 use super::*;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{mpsc, oneshot};
@@ -190,12 +191,11 @@ async fn a_workspace_lists_the_skills_dsh_would_load_for_it() {
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     assert_eq!(names, ["review", "tidy"]);
     assert_eq!(skills[0].description, "Review the pending diff");
+    // Compared as a path, not a string: `display()` spells the OS separator,
+    // and this test is about which file was loaded, not the separator.
     assert_eq!(
-        skills[0].path,
-        workspace
-            .join(".dsh/skills/review/SKILL.md")
-            .display()
-            .to_string()
+        Path::new(&skills[0].path),
+        workspace.join(".dsh/skills/review/SKILL.md").as_path()
     );
     assert!(skills[0].enabled);
     assert!(
