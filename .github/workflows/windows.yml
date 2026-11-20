@@ -90,27 +90,28 @@ jobs:
         # from its folder as scripts/package-windows.ps1 does.)
         env:
           LUAU_CXXFLAGS: -DNDEBUG
-          # `ort-sys` caches its extracted DirectML runtime in a directory that
-          # belongs to the runner, not to this job. `cache_dir()` skips the
-          # download whenever that directory merely *exists*, so a partially
-          # extracted cache makes the build script copy a DLL that isn't there
-          # and panic (`dynamic_link.rs:42`, `Os { code: 3, NotFound }`). Start
-          # each run from an empty, job-local cache (SUR-129).
+          # Keep `ort-sys`'s extracted DirectML runtime inside this job's temp
+          # directory instead of the runner's shared cache (SUR-129).
           ORT_CACHE_DIR: ${{ runner.temp }}\ort-cache
         run: |
-          # `rust-cache` restores `apps/zgx/target`, including the previous
-          # build's `ort-sys` OUT_DIR where `copy_dylibs` leaves `DirectML.dll`
-          # symlinks into the cache directory emptied above. A restored link
-          # whose target is gone makes the script's own copy fail at
-          # `dynamic_link.rs:42` (`Os { code: 3, NotFound }`), which is the
-          # failure #46 did not reach (SUR-129). Drop those build outputs so
-          # the script extracts and links afresh.
-          Remove-Item -Recurse -Force $env:ORT_CACHE_DIR -ErrorAction SilentlyContinue
-          Remove-Item -Recurse -Force apps\zgx\target\release\build\ort-sys-* -ErrorAction SilentlyContinue
+          # Cargo's build-dir layout v2 (default since Rust 1.100) nests build
+          # script `OUT_DIR`s one level deeper. `ort-sys`'s `copy_dylibs` walks
+          # three ancestors up from `OUT_DIR` to find the profile directory, so
+          # it now lands in `target\release\build` instead of
+          # `target\release`: it copies `DirectML.dll` into `build` and then
+          # into `build\examples` and `build\deps`. Those two directories do
+          # not exist on a cold cache, so the copy panics at
+          # `dynamic_link.rs:42` (`Os { code: 3, NotFound }`, SUR-129). Create
+          # them, so the copy always has a directory to land in.
+          New-Item -ItemType Directory -Force -Path apps\zgx\target\release\build\examples, apps\zgx\target\release\build\deps | Out-Null
           Push-Location apps/zgx
           try {
             cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
           } finally { Pop-Location }
+          # The same layout shift leaves the DLL one level down, in
+          # `target\release\build`. Windows loads it from beside the
+          # executable, which is where the pre-1.100 layout put it.
+          Copy-Item -Force -ErrorAction SilentlyContinue apps\zgx\target\release\build\*.dll apps\zgx\target\release\
       - name: GUI subsystem and redirected CLI output
         run: ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
