@@ -61,8 +61,14 @@ fn live(preload: &[Json]) -> Live {
         .unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(MockHarness { script: Vec::new() }));
-    let core = EngineCore::assemble(&data_dir, Arc::new(registry), HarnessId::Mock, None)
-        .expect("engine core assembles");
+    // `assemble` boots the workspace host, which spawns (`spawn_blocking`)
+    // and needs a Tokio context of its own — as the engine's tests get from
+    // `#[tokio::test]`; this plain test enters the runtime it keeps.
+    let core = {
+        let _enter = rt.enter();
+        EngineCore::assemble(&data_dir, Arc::new(registry), HarnessId::Mock, None)
+            .expect("engine core assembles")
+    };
     core.sessions.set_no_ipc_port();
     let client = Rc::new({
         let _enter = rt.enter();
