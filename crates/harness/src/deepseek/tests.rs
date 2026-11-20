@@ -128,6 +128,22 @@ fn plan_mode_is_passed_to_the_sidecar() {
 }
 
 #[test]
+fn a_resumed_run_keeps_the_plan_toggle_so_the_sidecar_can_leave_plan_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    request.resume = Some("saved".into());
+    // The shim sends `/plan off` when a start is a resume and the toggle is
+    // off: both keys have to survive into the start config for that to work.
+    let config = configuration(&request, dir.path(), "saved").unwrap();
+    assert_eq!(config["resume"], true);
+    assert_eq!(config["plan"], false);
+    request.plan = true;
+    let config = configuration(&request, dir.path(), "saved").unwrap();
+    assert_eq!(config["resume"], true);
+    assert_eq!(config["plan"], true);
+}
+
+#[test]
 fn plan_mode_is_advertised_now_that_the_sidecar_enters_it() {
     let dir = tempfile::tempdir().unwrap();
     let harness = DeepSeekHarness {

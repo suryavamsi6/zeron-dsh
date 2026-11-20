@@ -23,6 +23,7 @@ async function runtime(t, options = {}) {
   // The sidecar hands its child a filtered environment, so a test that wants
   // the fake peer to fail `/plan` leaves a file where that peer can read it.
   if (options.failPlan) await writeFile(join(home, 'plan-fails'), '');
+  if (options.failPlanOff) await writeFile(join(home, 'plan-off-fails'), '');
   const child = spawn(process.execPath, [shim, sdkRoot, ...(options.realRuntime ? [] : [fixture])], {
     env: { PATH: process.env.PATH, HOME: process.env.HOME, SystemRoot: process.env.SystemRoot,
       DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: options.baseURL ?? 'http://127.0.0.1:9/anthropic' },
@@ -240,7 +241,9 @@ test('actual SDK answers native structured questions', async t => {
 test('actual SDK stops by shutdown and resumes the saved identity in a fresh runtime', async t => {
   const home = await mkdtemp(join(tmpdir(), 'zeron-deepseek-resume-'));
   t.after(() => rm(home, { recursive: true, force: true }));
-  const first = await runtime(t, { home, sessionId: 'saved' });
+  // The first run is in plan mode, and the runtime stores that mode with the
+  // session, so the resumed run starts out still planning.
+  const first = await runtime(t, { home, sessionId: 'saved', plan: true });
   await first.next('ready');
   first.send({ type: 'prompt', prompt: 'wait-for-stop' });
   while (!(await first.next('notification')).params?.event?.type?.includes('turn/start')) {}
@@ -250,8 +253,41 @@ test('actual SDK stops by shutdown and resumes the saved identity in a fresh run
   assert.ok(!first.frames.some(f => f.type === 'done'));
   const second = await runtime(t, { home, sessionId: 'saved', resume: true });
   await second.next('ready');
+  const command = id => String(id).startsWith('plan-off-') ? '/plan off'
+    : String(id).startsWith('plan-') ? '/plan'
+    : String(id).startsWith('permission-') ? '/permission' : String(id);
+  const commands = second.frames
+    .filter(f => f.type === 'notification' && f.params?.event?.type === 'command/run')
+    .map(f => command(f.params.event.data.commandId));
+  assert.deepEqual(commands, ['/permission', '/plan off'],
+    'a resume that runs with the plan toggle off leaves the stored plan mode');
   second.send({ type: 'prompt', prompt: 'continued' });
   assert.equal((await second.next('done')).finalResponse, 'reply:continued');
+  const leaveAt = second.frames.findIndex(f => f.type === 'notification' && command(f.params?.event?.data?.commandId) === '/plan off');
+  const promptAt = second.frames.findIndex(f => f.type === 'notification' && f.params?.event?.type === 'turn/start');
+  assert.ok(leaveAt >= 0 && promptAt >= 0 && leaveAt < promptAt,
+    'plan mode is left before the prompt reaches the model');
+});
+
+test('a failed /plan off stops a resumed start before any prompt', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'zeron-deepseek-resume-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  // A persisted session is what the resume looks for; the mode it was left in
+  // is the runtime's, which is why a run that cannot leave it must not start.
+  const first = await runtime(t, { home, sessionId: 'saved', plan: true });
+  await first.next('ready');
+  first.send({ type: 'prompt', prompt: 'draft a change' });
+  await first.next('done');
+  first.send({ type: 'stop' });
+  await first.next('stopped');
+  await first.exited;
+  const second = await runtime(t, { home, sessionId: 'saved', resume: true, failPlanOff: true });
+  const error = await second.next('error');
+  assert.match(error.message, /Unable to leave DeepSeek plan mode/);
+  assert.equal((await second.exited).code, 1);
+  assert.ok(!second.frames.some(f => f.type === 'ready'), 'ready is never sent');
+  assert.ok(!second.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
+    'no prompt reaches the runtime');
 });
 
 test('plan mode enters through the same slash path as the permission preset, before the prompt', async t => {

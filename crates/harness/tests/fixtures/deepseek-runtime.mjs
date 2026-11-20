@@ -80,6 +80,18 @@ async function handle(request) {
     notify('session.query.completed', { sessionId, commandId, finalResponse: failed ? 'unavailable' : 'plan', finishReason: failed ? 'error' : 'completed' });
     return reply(id, { kind: 'command', execution: { commandId, result: failed ? { kind: 'error', text: 'unavailable' } : { kind: 'success', text: 'plan' } } });
   }
+  // Leaving is the same builtin with the `off` argument, and it succeeds even
+  // when the stored session was never in plan mode, so a resume may send it
+  // without knowing what the previous run left behind.
+  if (text === '/plan off') {
+    const commandId = `plan-off-${id}`;
+    let failed = false;
+    try { await readFile(join(process.env.DSH_HOME, 'plan-off-fails')); failed = true; } catch {}
+    event(sessionId, 'command/run', { commandId });
+    event(sessionId, 'command/done', { commandId });
+    notify('session.query.completed', { sessionId, commandId, finalResponse: failed ? 'unavailable' : 'off', finishReason: failed ? 'error' : 'completed' });
+    return reply(id, { kind: 'command', execution: { commandId, result: failed ? { kind: 'error', text: 'unavailable' } : { kind: 'success', text: 'Plan mode off.' } } });
+  }
   if (text === 'protocol-error') return reply(id, { kind: 'prompt' });
   const messageId = `input-${id}`;
   reply(id, { kind: 'prompt', messageId });
