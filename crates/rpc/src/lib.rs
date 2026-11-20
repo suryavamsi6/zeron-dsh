@@ -108,6 +108,11 @@ pub mod methods {
     pub const DSH_CANCEL_SIGN_IN: &str = "DshCancelSignIn";
     pub const DSH_SIGN_OUT: &str = "DshSignOut";
     pub const DSH_DISCOVER_MODELS: &str = "DshDiscoverModels";
+    /// The person's own stdio MCP servers, one list on this device: read
+    /// ({} -> `{servers: [{name, command, args, env}]}`) and replaced whole
+    /// ({servers} -> the saved list). Another device keeps its own list.
+    pub const MCP_SERVERS: &str = "McpServers";
+    pub const SET_MCP_SERVERS: &str = "SetMcpServers";
     /// The dsh bundles installed in this device's `sdk` profile ({} ->
     /// `{bundles: [{name, spec, active, version, enginesDsh, description}],
     /// pnpm}`), one installed ({spec} -> `{ok, exitCode, log, refusal}`) and
@@ -885,6 +890,10 @@ pub fn local_only(method: &str) -> bool {
             | methods::SCHEDULE_SAVE
             | methods::SCHEDULE_DELETE
             | methods::SCHEDULE_RUN_NOW
+            // The person's own MCP servers: one file on this device, read
+            // and replaced whole by this device's own window alone.
+            | methods::MCP_SERVERS
+            | methods::SET_MCP_SERVERS
             // Reading an answer aloud spends this device's DeepSeek key.
             | methods::READ_ALOUD
             // What a Cloud chat reaches: this device's app sets it, never
@@ -1202,6 +1211,15 @@ mod tests {
     #[test]
     fn what_a_cloud_chat_reaches_is_set_by_this_devices_app_alone() {
         for method in [methods::CLOUD_SET_REACH, methods::CLOUD_SESSION_SET_REACH] {
+            assert!(local_only(method), "{method}");
+            assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
+            assert!(!agent_allowed(method), "{method}");
+        }
+    }
+
+    #[test]
+    fn the_persons_own_mcp_servers_are_this_devices_alone() {
+        for method in [methods::MCP_SERVERS, methods::SET_MCP_SERVERS] {
             assert!(local_only(method), "{method}");
             assert!(peer_refused(method, &serde_json::Value::Null), "{method}");
             assert!(!agent_allowed(method), "{method}");

@@ -56,8 +56,6 @@ pub fn load(data_dir: &Path) -> Vec<McpServer> {
 }
 
 /// Replace this device's list: the whole file, owner-only, atomically.
-// (The settings page's save reaches it through SUR-73's SetMcpServers.)
-#[allow(dead_code)]
 pub fn save(data_dir: &Path, servers: &[McpServer]) -> std::io::Result<()> {
     let payload = serde_json::to_vec_pretty(&Stored {
         servers: servers.to_vec(),
@@ -100,7 +98,6 @@ pub fn save(data_dir: &Path, servers: &[McpServer]) -> std::io::Result<()> {
 
 /// Why a list can't be saved, in words the settings page shows beside its
 /// form: the driver's name rule, unique names, a command, and the ceiling.
-#[allow(dead_code)]
 pub fn validate(servers: &[McpServer]) -> Result<(), String> {
     if servers.len() > MAX_SERVERS {
         return Err(format!("At most {MAX_SERVERS} MCP servers"));
@@ -176,6 +173,14 @@ fn validate_one(server: &McpServer) -> Result<(), String> {
     }
     if server.command.trim().is_empty() {
         return Err(format!("\"{name}\" needs a command"));
+    }
+    // (This list is stdio: the file keeps a command to start. An HTTP entry
+    // would pass a save and then be dropped by `load`, so it is refused
+    // here instead — a successful set means the entry is in the list.)
+    if server.http.is_some() {
+        return Err(format!(
+            "\"{name}\" is a remote server; this list takes stdio servers only"
+        ));
     }
     Ok(())
 }
@@ -321,6 +326,17 @@ mod tests {
     fn validate_rejects_an_empty_command() {
         assert!(validate(&[server("a", "")]).is_err());
         assert!(validate(&[server("a", "  ")]).is_err());
+    }
+
+    #[test]
+    fn validate_rejects_an_http_server() {
+        let mut server = server("remote", "x");
+        server.http = Some(zeron_proto::McpHttp {
+            url: "https://example.test/mcp".into(),
+            ..Default::default()
+        });
+        let error = validate(&[server]).unwrap_err();
+        assert!(error.contains("remote server"), "{error}");
     }
 
     #[test]

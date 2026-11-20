@@ -69,13 +69,14 @@ use futures::StreamExt;
 use futures::stream::BoxStream;
 use serde::Deserialize;
 use std::collections::HashSet;
+use std::path::Path;
 use std::time::Duration;
 use tokio::sync::watch;
 
 use zeron_doc::{MessagePart, SessionCommandPayload};
 use zeron_proto::{
     AgentEvent, ChatConfig, CreateWorktreeOutcome, EngineInfo, HarnessId, HarnessUpdatePolicy,
-    ProjectActionDraft, Space, ToolCall, WorkspaceScope,
+    McpServer, ProjectActionDraft, Space, ToolCall, WorkspaceScope,
 };
 use zeron_rpc::{
     LinkCache, RpcError, RpcReply, RpcService, capability_errors, methods, parse_params,
@@ -2758,6 +2759,55 @@ fn warm_signed_out(
             .any(|account| account.harness == harness && account.active)
 }
 
+/// `McpServers` / `SetMcpServers`: this device's own list, read or replaced
+/// whole. The list is one file (`user_mcp`), so only this device's app may
+/// read or write it: a peer's relayed ask and an agent's are refused here,
+/// and `local_only` keeps the relay from carrying them in the first place.
+fn mcp_servers_call(
+    caller: &zeron_rpc::Caller,
+    method: &str,
+    params: &serde_json::Value,
+    data_dir: &Path,
+) -> Result<serde_json::Value, RpcError> {
+    if !caller.is_local() {
+        return Err(RpcError::Failed(format!(
+            "{method}: MCP servers are managed from this device's own window"
+        )));
+    }
+    match method {
+        methods::MCP_SERVERS => Ok(serde_json::json!({
+            "servers": crate::user_mcp::load(data_dir)
+        })),
+        methods::SET_MCP_SERVERS => {
+            // The shape is checked, never echoed: an `env` value is a token
+            // often enough that an error must not carry one. `validate`'s
+            // words name the server or the rule, never a value.
+            let servers: Vec<McpServer> = params
+                .get("servers")
+                .cloned()
+                .ok_or_else(|| RpcError::BadParams("servers is required".into()))
+                .and_then(|servers| {
+                    serde_json::from_value(servers).map_err(|_| {
+                        RpcError::BadParams(
+                            "servers: each server needs a name, a command, and string args and env"
+                                .into(),
+                        )
+                    })
+                })?;
+            crate::user_mcp::validate(&servers).map_err(RpcError::BadParams)?;
+            crate::user_mcp::save(data_dir, &servers).map_err(|error| {
+                // (An io error names the path at most; never an env value.)
+                RpcError::Failed(format!("Could not save the MCP servers: {error}"))
+            })?;
+            // What a run would now start: the file read back.
+            Ok(serde_json::json!({
+                "servers": crate::user_mcp::load(data_dir)
+            }))
+        }
+        other => Err(RpcError::UnknownMethod(other.into())),
+    }
+}
+
 fn forwardable(method: &str) -> bool {
     matches!(
         method,
@@ -3658,6 +3708,14 @@ impl RpcService for EngineRpc {
             let home = crate::agent_accounts::AgentAccountsConfig::detect(self.repos.data_dir())
                 .deepseek_home;
             let value = crate::read_aloud::call(self.credentials.as_ref(), &home, &params).await?;
+            return Ok(RpcReply::Value(value));
+        }
+        // The person's own stdio MCP servers: one file on this device,
+        // replaced whole by this device's own window (Settings → MCP
+        // servers). A peer's or an agent's ask is refused, never served.
+        if method == methods::MCP_SERVERS || method == methods::SET_MCP_SERVERS {
+            let value =
+                mcp_servers_call(&zeron_rpc::caller(), method, &params, self.repos.data_dir())?;
             return Ok(RpcReply::Value(value));
         }
         // Device-addressed routing: forward calls that target another device over its
@@ -7186,6 +7244,271 @@ mod tests {
         assert!(!is_stream_method(methods::POST_CHANGE_REQUEST_COMMENT));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST));
         assert!(!is_stream_method(methods::GET_CHANGE_REQUEST_DIFF));
+    }
+
+    #[test]
+    fn user_mcp_lists_stay_on_this_device() {
+        for method in [methods::MCP_SERVERS, methods::SET_MCP_SERVERS] {
+            assert!(zeron_rpc::local_only(method), "{method}");
+            assert!(
+                zeron_rpc::peer_refused(method, &serde_json::json!({})),
+                "{method}"
+            );
+            assert!(!forwardable(method), "{method}");
+            assert!(!zeron_rpc::agent_allowed(method), "{method}");
+            // A relayed call arrives here as a peer's (and an agent's token
+            // as an agent's): refused in dispatch, not served.
+            for caller in [
+                zeron_rpc::Caller::Peer { device: None },
+                zeron_rpc::Caller::Agent { chat: None },
+            ] {
+                let refused = mcp_servers_call(
+                    &caller,
+                    method,
+                    &serde_json::json!({ "servers": [] }),
+                    Path::new("/not-this-device"),
+                );
+                assert!(
+                    matches!(&refused, Err(RpcError::Failed(message)) if message.contains("this device's own window")),
+                    "{method}: {refused:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn user_mcp_servers_round_trip_with_args_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let servers = serde_json::json!([
+            {
+                "name": "files",
+                "command": "npx",
+                "args": ["-y", "server-filesystem"],
+                "env": { "NOTES": "a value" }
+            },
+            {
+                "name": "search_it",
+                "command": "/usr/bin/search",
+                "args": [],
+                "env": { "SEARCH_HOME": "/tmp/search" }
+            }
+        ]);
+        let saved = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({ "servers": servers }),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(saved, serde_json::json!({ "servers": servers }));
+        // Read back on the same device: the same list, args and env included.
+        let got = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::MCP_SERVERS,
+            &serde_json::json!({}),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(got, saved);
+    }
+
+    #[test]
+    fn a_refused_user_mcp_list_leaves_the_previous_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = serde_json::json!([
+            { "name": "files", "command": "npx", "args": [], "env": {} }
+        ]);
+        mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({ "servers": good }),
+            dir.path(),
+        )
+        .unwrap();
+        for bad in [
+            // A name the driver would refuse.
+            serde_json::json!([{ "name": "has space", "command": "npx" }]),
+            // Two servers with one name.
+            serde_json::json!([
+                { "name": "files", "command": "npx" },
+                { "name": "files", "command": "other" }
+            ]),
+            // No command.
+            serde_json::json!([{ "name": "files", "command": " " }]),
+            // Not a list at all.
+            serde_json::json!("nope"),
+        ] {
+            let refused = mcp_servers_call(
+                &zeron_rpc::Caller::Local,
+                methods::SET_MCP_SERVERS,
+                &serde_json::json!({ "servers": bad }),
+                dir.path(),
+            );
+            assert!(
+                matches!(&refused, Err(RpcError::BadParams(_))),
+                "{refused:?}"
+            );
+        }
+        let after = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::MCP_SERVERS,
+            &serde_json::json!({}),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(after, serde_json::json!({ "servers": good }));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_user_mcp_save_leaves_the_previous_list() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        // (A runner as root writes anyway: nothing here to refuse.)
+        if std::fs::metadata(dir.path()).unwrap().uid() == 0 {
+            return;
+        }
+        let good = serde_json::json!([
+            { "name": "files", "command": "npx", "args": [], "env": {} }
+        ]);
+        mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({ "servers": good }),
+            dir.path(),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(dir.path()).unwrap().permissions();
+        let original = permissions.clone();
+        permissions.set_mode(0o500);
+        std::fs::set_permissions(dir.path(), permissions).unwrap();
+        let refused = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({ "servers": [{ "name": "other", "command": "x" }] }),
+            dir.path(),
+        );
+        std::fs::set_permissions(dir.path(), original).unwrap();
+        assert!(
+            matches!(&refused, Err(RpcError::Failed(_))),
+            "{refused:?}"
+        );
+        let after = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::MCP_SERVERS,
+            &serde_json::json!({}),
+            dir.path(),
+        )
+        .unwrap();
+        assert_eq!(after, serde_json::json!({ "servers": good }));
+    }
+
+    #[test]
+    fn a_refused_user_mcp_server_never_names_an_env_value() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = "sk-a-real-looking-secret";
+        let refused = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({
+                "servers": [{
+                    "name": "has space",
+                    "command": "npx",
+                    "env": { "TOKEN": secret }
+                }]
+            }),
+            dir.path(),
+        )
+        .unwrap_err();
+        // It names the server the person must fix, and never its token.
+        let shown = format!("{refused}");
+        let debug = format!("{refused:?}");
+        assert!(shown.contains("has space"), "{shown}");
+        assert!(!shown.contains(secret) && !debug.contains(secret), "{debug}");
+        // A list that isn't a list fails on the shape too, values and all.
+        let refused = mcp_servers_call(
+            &zeron_rpc::Caller::Local,
+            methods::SET_MCP_SERVERS,
+            &serde_json::json!({ "servers": { "TOKEN": secret } }),
+            dir.path(),
+        )
+        .unwrap_err();
+        let shown = format!("{refused}");
+        let debug = format!("{refused:?}");
+        assert!(shown.contains("servers"), "{shown}");
+        assert!(!shown.contains(secret) && !debug.contains(secret), "{debug}");
+    }
+
+    /// The two methods are registered in dispatch, not merely classified:
+    /// a real `EngineRpc::handle` reads and replaces this device's list, and
+    /// an HTTP entry is refused instead of saved and then dropped.
+    #[tokio::test]
+    async fn the_mcp_servers_methods_are_served_by_the_engine_rpc() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let value = |reply: RpcReply| match reply {
+            RpcReply::Value(value) => value,
+            _ => panic!("a unary method answered with a stream"),
+        };
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": [] }),
+            "no file is no servers"
+        );
+        let saved = serde_json::json!([
+            {
+                "name": "files",
+                "command": "npx",
+                "args": ["-y", "server-filesystem"],
+                "env": { "NOTES": "a value" }
+            }
+        ]);
+        assert_eq!(
+            value(
+                rpc.handle(
+                    methods::SET_MCP_SERVERS,
+                    serde_json::json!({ "servers": saved })
+                )
+                .await
+                .unwrap()
+            ),
+            serde_json::json!({ "servers": saved })
+        );
+        // Read back through dispatch: the same list this device's file holds.
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": saved })
+        );
+        // An HTTP entry is refused, and the saved list stays as it was.
+        let refused = rpc
+            .handle(
+                methods::SET_MCP_SERVERS,
+                serde_json::json!({
+                    "servers": [
+                        { "name": "remote", "command": "x",
+                          "http": { "url": "https://example.test/mcp" } }
+                    ]
+                }),
+            )
+            .await;
+        let refused = refused.err().expect("an HTTP server must be refused");
+        assert!(
+            matches!(&refused, RpcError::BadParams(message) if message.contains("remote server")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": saved }),
+            "a refused set leaves the previous list"
+        );
+        core.shutdown().await;
     }
 
     /// Every forwardable unary method gets a bounded reply deadline —

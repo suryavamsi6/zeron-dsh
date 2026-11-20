@@ -18,6 +18,17 @@ pub fn install(host: &ScriptHost) {
     host.async_action("DshProviders", |_| async {
         answer(engine::get().call("DshProviders", json!({})).await)
     });
+    // The person's own MCP servers: one list on this device, read and
+    // replaced whole by the settings page (engine `user_mcp`). The full
+    // payload rides through: the engine names what it takes.
+    host.async_action("McpServers", |_| async {
+        answer(engine::get().call("McpServers", json!({})).await)
+    });
+    host.async_action("SetMcpServers", |args| async move {
+        let params: Json = serde_json::from_str(&args.to_json())
+            .map_err(|error| error.to_string())?;
+        answer(engine::get().call("SetMcpServers", params).await)
+    });
     host.async_action("DshCredentials", |args| {
         let refs = strings(args.field("refs"));
         async move {
