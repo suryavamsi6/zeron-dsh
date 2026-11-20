@@ -1006,10 +1006,10 @@ test("sending while composer shrinks and clamps scroll offset downward never han
 	app:command("catalog_grows")
 	settle(app)
 	open(app, "s1")
-	-- Switch provider and type a multi-line draft so clearing the composer on
+	-- Switch model and type a multi-line draft so clearing the composer on
 	-- send shrinks the foot padding and clamps max_scroll downward while the
 	-- send's glide starts.
-	app:set_state("chat_model", "gpt")
+	app:set_state("chat_model", "deepseek-v4-pro-max")
 	settle(app)
 	app:type('role:textbox "Message"', "Line 1")
 	for i = 2, 5 do
@@ -1025,7 +1025,7 @@ test("sending while composer shrinks and clamps scroll offset downward never han
 	app:resize(900, 820)
 	settle(app)
 	expect(app:wait('~"Testing"', { timeout_ms = 1000 })).to_be(true)
-	expect(app:wait('~"Codex"', { timeout_ms = 1000 })).to_be(true)
+	expect(app:wait('~"DeepSeek"', { timeout_ms = 1000 })).to_be(true)
 end)
 
 
