@@ -296,11 +296,6 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             "Invalid model for this provider route".into(),
         ));
     }
-    if request.plan {
-        return Err(HarnessError::Protocol(
-            "DeepSeek plan mode is not exposed by this integration".into(),
-        ));
-    }
     if session.is_empty()
         || session.len() > 256
         || !session
@@ -367,7 +362,7 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
     let mut config = json!({
         "type": "start", "sessionId": session, "resume": request.resume.is_some(),
         "dshHome": home, "cwd": cwd, "model": model, "provider": provider,
-        "sharedHome": shared_home, "access": request.access,
+        "sharedHome": shared_home, "access": request.access, "plan": request.plan,
         "sandbox": request.sandbox, "policySource": POLICY, "environmentSource": ENVIRONMENT,
         "mcp": request.mcp.iter().chain(request.extra_mcp.iter()).collect::<Vec<_>>()
     });
@@ -384,13 +379,18 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
 /// A title run's start config: the ordinary run's shape re-pointed at the
 /// tool-less `sdk-minimal` profile (`title` is the shim's switch), with the
 /// shared title instructions as its system prompt and a hard output cap.
-/// Plan mode stays refused by `configuration`; a title always opens a fresh
-/// session and takes no MCP servers or reasoning effort.
+/// Plan mode is refused here; a title always opens a fresh session and takes
+/// no MCP servers or reasoning effort.
 fn title_configuration(
     request: &RunRequest,
     home: &Path,
     session: &str,
 ) -> Result<Value, HarnessError> {
+    if request.plan {
+        return Err(HarnessError::Protocol(
+            "DeepSeek plan mode is not exposed by this integration".into(),
+        ));
+    }
     let mut config = configuration(request, home, session)?;
     config["title"] = true.into();
     config["systemPrompt"] = crate::TITLE_INSTRUCTIONS.into();

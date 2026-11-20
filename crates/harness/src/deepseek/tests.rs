@@ -113,6 +113,21 @@ fn only_verified_official_models_and_efforts_are_accepted() {
 }
 
 #[test]
+fn plan_mode_is_passed_to_the_sidecar() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    assert_eq!(
+        configuration(&request, dir.path(), "session").unwrap()["plan"],
+        false
+    );
+    request.plan = true;
+    assert_eq!(
+        configuration(&request, dir.path(), "session").unwrap()["plan"],
+        true
+    );
+}
+
+#[test]
 fn a_title_run_takes_a_tool_less_minimal_config_and_refuses_plan() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = request(dir.path());
