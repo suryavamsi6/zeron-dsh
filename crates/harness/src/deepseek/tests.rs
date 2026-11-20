@@ -156,6 +156,55 @@ fn plan_mode_is_advertised_now_that_the_sidecar_enters_it() {
     assert!(harness.supports_plan());
 }
 
+/// A `$` menu lists what dsh would load from disk for the chat's folder: a
+/// project bundle at its root, a flat file in the harness home, and a
+/// `user-invocable: false` skill kept in the list but switched off (SUR-56).
+#[tokio::test]
+async fn a_workspace_lists_the_skills_dsh_would_load_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = dir.path().join("work");
+    std::fs::create_dir_all(workspace.join(".git")).unwrap();
+    std::fs::create_dir_all(workspace.join(".dsh/skills/review")).unwrap();
+    std::fs::write(
+        workspace.join(".dsh/skills/review/SKILL.md"),
+        "---\nname: review\ndescription: Review the pending diff\n---\n\nBody.\n",
+    )
+    .unwrap();
+    let home = dir.path().join("dsh");
+    std::fs::create_dir_all(home.join("skills")).unwrap();
+    std::fs::write(
+        home.join("skills/tidy.md"),
+        "---\nname: tidy\ndescription: Tidy the tree\nuser-invocable: false\n---\n",
+    )
+    .unwrap();
+    let harness = DeepSeekHarness {
+        sdk_root: dir.path().to_path_buf(),
+        home: home.clone(),
+        test_runtime: None,
+    };
+    let skills = harness
+        .skills(&workspace)
+        .await
+        .unwrap()
+        .expect("a dsh harness lists skills");
+    let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
+    assert_eq!(names, ["review", "tidy"]);
+    assert_eq!(skills[0].description, "Review the pending diff");
+    assert_eq!(
+        skills[0].path,
+        workspace
+            .join(".dsh/skills/review/SKILL.md")
+            .display()
+            .to_string()
+    );
+    assert!(skills[0].enabled);
+    assert!(
+        !skills[1].enabled,
+        "user-invocable: false is listed, not offered"
+    );
+    assert_eq!(skills[0].command, None);
+}
+
 #[test]
 fn a_title_run_takes_a_tool_less_minimal_config_and_no_plan_flag() {
     let dir = tempfile::tempdir().unwrap();
