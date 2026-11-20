@@ -162,6 +162,9 @@ impl Normalizer {
                         command: input["command"].as_str().unwrap_or(arguments).into(),
                     },
                     "read" => ToolCall::ReadFile { path },
+                    // dsh's image read takes the same `file_path`; the image
+                    // itself rides the tool result, which this arm leaves be.
+                    "read_image" => ToolCall::ReadFile { path },
                     "write" => ToolCall::WriteFile {
                         path,
                         content: input["content"].as_str().map(str::to_owned),
@@ -433,6 +436,15 @@ mod tests {
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].text, "still here");
         assert_eq!(items[0].status(), TodoStatus::Pending);
+    }
+
+    #[test]
+    fn read_image_reads_as_a_file_read() {
+        let call = tool_call("read_image", json!({"file_path":"assets/screenshot.png"}));
+        match call {
+            ToolCall::ReadFile { path } => assert_eq!(path, "assets/screenshot.png"),
+            other => panic!("expected a file read, got {other:?}"),
+        }
     }
 
     #[test]
