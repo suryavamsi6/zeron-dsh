@@ -7439,6 +7439,78 @@ mod tests {
         assert!(!shown.contains(secret) && !debug.contains(secret), "{debug}");
     }
 
+    /// The two methods are registered in dispatch, not merely classified:
+    /// a real `EngineRpc::handle` reads and replaces this device's list, and
+    /// an HTTP entry is refused instead of saved and then dropped.
+    #[tokio::test]
+    async fn the_mcp_servers_methods_are_served_by_the_engine_rpc() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let value = |reply: RpcReply| match reply {
+            RpcReply::Value(value) => value,
+            _ => panic!("a unary method answered with a stream"),
+        };
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": [] }),
+            "no file is no servers"
+        );
+        let saved = serde_json::json!([
+            {
+                "name": "files",
+                "command": "npx",
+                "args": ["-y", "server-filesystem"],
+                "env": { "NOTES": "a value" }
+            }
+        ]);
+        assert_eq!(
+            value(
+                rpc.handle(
+                    methods::SET_MCP_SERVERS,
+                    serde_json::json!({ "servers": saved })
+                )
+                .await
+                .unwrap()
+            ),
+            serde_json::json!({ "servers": saved })
+        );
+        // Read back through dispatch: the same list this device's file holds.
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": saved })
+        );
+        // An HTTP entry is refused, and the saved list stays as it was.
+        let refused = rpc
+            .handle(
+                methods::SET_MCP_SERVERS,
+                serde_json::json!({
+                    "servers": [
+                        { "name": "remote", "command": "x",
+                          "http": { "url": "https://example.test/mcp" } }
+                    ]
+                }),
+            )
+            .await;
+        let refused = refused.err().expect("an HTTP server must be refused");
+        assert!(
+            matches!(&refused, RpcError::BadParams(message) if message.contains("HTTP")),
+            "{refused:?}"
+        );
+        assert_eq!(
+            value(rpc.handle(methods::MCP_SERVERS, serde_json::json!({})).await.unwrap()),
+            serde_json::json!({ "servers": saved }),
+            "a refused set leaves the previous list"
+        );
+        core.shutdown().await;
+    }
+
     /// Every forwardable unary method gets a bounded reply deadline —
     /// interactive calls fail fast, network-bound git/update calls get the
     /// long leash, and nothing awaits forever (the "Sending…" wedge).
