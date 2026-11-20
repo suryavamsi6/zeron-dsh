@@ -70,8 +70,19 @@ local schedule_delete = ui.state("settings_stub_schedule_delete", nil :: any)
 local schedule_run = ui.state("settings_stub_schedule_run", nil :: any)
 local schedule_calls = ui.state("settings_stub_schedule_calls", {} :: { any })
 -- What `McpServers` answers: nil (the two servers the `McpServers`
--- answer below carries), or a `{ servers = … }` a test sets.
+-- answer below carries), a `{ servers = … }` a test sets, a refusal's words
+-- (the read fails), or a landed `SetMcpServers` write (unless
+-- `settings_stub_mcp_reload_fails` is on, so the reload after a save
+-- fails). What `SetMcpServers` answers is `settings_stub_mcp_set`: nil
+-- (the write lands and `McpServers` answers it), "pending" (never
+-- settles), a refusal's words, or a table. The lists sent are in
+-- `settings_stub_mcp_calls` (`{ op = "set", servers }` each), so a test
+-- can compare a write against the list it expected.
 local mcp_servers_answer = ui.state("settings_stub_mcp_servers", nil :: any)
+local mcp_set_answer = ui.state("settings_stub_mcp_set", nil :: any)
+local mcp_reload_fails = ui.state("settings_stub_mcp_reload_fails", false)
+local mcp_saved = ui.state("settings_stub_mcp_saved", nil :: any)
+local mcp_calls = ui.state("settings_stub_mcp_calls", {} :: { any })
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -582,8 +593,17 @@ local answers: { [string]: (arg: any) -> any } = {
 	-- only, so each value here is markedly itself, for a test to find
 	-- nowhere.
 	["McpServers"] = function()
+		local saved = mcp_saved:peek()
+		if saved ~= nil then
+			if mcp_reload_fails:peek() then
+				return settled(nil, "the list can't be read")
+			end
+			return settled({ servers = saved })
+		end
 		local over = mcp_servers_answer:peek()
-		if over ~= nil then
+		if type(over) == "string" then
+			return settled(nil, over)
+		elseif over ~= nil then
 			return settled(over)
 		end
 		return settled({
@@ -602,6 +622,25 @@ local answers: { [string]: (arg: any) -> any } = {
 				},
 			},
 		})
+	end,
+	-- A write of the whole list: the page sends every entry, so the ones it
+	-- isn't adding or removing are the tables it read, `env` values and
+	-- all. A landed write is what `McpServers` answers next; a refusal
+	-- leaves the list as it was.
+	["SetMcpServers"] = function(arg: any)
+		local servers = if type(arg) == "table" and type(arg.servers) == "table" then arg.servers else {}
+		mcp_calls:push({ op = "set", servers = servers })
+		local over = mcp_set_answer:peek()
+		if over == "pending" then
+			-- (Still on its way: never settles.)
+			return { done = false, after = function() end }
+		elseif type(over) == "string" then
+			return settled(nil, over)
+		elseif type(over) == "table" then
+			return settled(over)
+		end
+		mcp_saved:set(servers)
+		return settled({ servers = servers })
 	end,
 	["DshChatgptAccounts"] = function(arg: any)
 		return settled({ provider = if unscoped_chatgpt:peek() then nil else arg.provider, accounts = (if arg.provider == "openai-codex" then codex_accounts:peek() else chatgpt_accounts:peek()) or {} })
