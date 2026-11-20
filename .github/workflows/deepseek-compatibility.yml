@@ -27,8 +27,22 @@ jobs:
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 10
+      # The sidecar is Rust, so the runtime test below needs the crate's
+      # toolchain and cargo-nextest, not just Node.
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: deepseek-compatibility
       - name: Install the pinned official SDK
         run: npm ci --prefix crates/harness/src/deepseek --ignore-scripts --no-audit --no-fund
+      # The one end-to-end check that the sidecar and the pinned runtime still
+      # agree on plan mode: `/plan off` on a resumed run has to leave the state
+      # the model is told about. Loopback-only (a local mock model), so it needs
+      # nothing outside the repo; named apart so a failure reads as a runtime/
+      # sidecar disagreement rather than a suite failure.
+      - name: The pinned runtime agrees with the sidecar on plan mode
+        env:
+          ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek
+        run: cargo nextest run --run-ignored ignored-only --locked -p zeron-harness -E 'test(sdk_runtime_round_trip_and_resume)'
       - name: Mock-backed SDK contract
         env:
           ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek

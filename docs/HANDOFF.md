@@ -60,6 +60,13 @@ Captains (SUR-97, plugin-first).
   `deepseek-compatibility`, `ios`, plus the aggregate **`CI result`**. The aggregate is the
   only required check, so merge when it is green. If one job fails on a known infra flake,
   rerun the failed jobs once before you look into it.
+- **DeepSeek runtime gate:** `deepseek-compatibility` runs the ignored
+  `sdk_runtime_round_trip_and_resume` after installing the pinned SDK, so a dependency bump
+  that disagrees with the sidecar's plan-mode start fails there instead of waiting for a
+  manual run. It is loopback-only (a local mock model), so it needs no network or key. To
+  run it by hand: `ZERON_DEEPSEEK_SDK_DIR=crates/harness/src/deepseek cargo nextest run
+  --run-ignored ignored-only --locked -p zeron-harness -E
+  'test(sdk_runtime_round_trip_and_resume)'`.
 - Linux system packages are installed with `scripts/ci/apt-install.sh`
   (`Acquire::Retries=3`, 15 s http timeout, `timeout 120` on `apt-get update`). Most apt
   failures are mirror flakes, so rerun before debugging.
