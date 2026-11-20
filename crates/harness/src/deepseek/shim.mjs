@@ -227,13 +227,22 @@ async function resume(id) {
   }
 }
 
+// A prompt may not type a slash command the run decides for itself. The
+// runtime resolves its localized token to the same builtin as the ASCII name
+// (`dsh-commands`' `builtin.ts`: `zh: { plan: '计划', permission: '权限' }`), so
+// both forms are refused: a guard that knows only `/plan` lets `/计划` through.
+function refusesCommand(prompt, names, message) {
+  const alternatives = names.map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')).join('|');
+  if (new RegExp(`^\\s*/(?:${alternatives})(?:\\s|$)`, 'u').test(prompt)) throw new Error(message);
+}
+
 async function prompt(command) {
   await startup;
   if (stopped) return;
-  if (/^\s*\/(permission|权限)(?:\s|$)/u.test(command.prompt)) throw new Error('Change permissions through Zeron access controls');
+  refusesCommand(command.prompt, ['permission', '权限'], 'Change permissions through Zeron access controls');
   // The same rule for plan: the run's flag is set once, at start, and a
-  // prompt that reads `/plan` would otherwise toggle the runtime's mode.
-  if (/^\s*\/plan(?:\s|$)/u.test(command.prompt)) throw new Error('Plan mode is set by Zeron when a run starts');
+  // prompt that reads the command would otherwise toggle the runtime's mode.
+  refusesCommand(command.prompt, ['plan', '计划'], 'Plan mode is set by Zeron when a run starts');
   const input = [{ type: 'text', text: command.prompt }];
   for (const path of command.attachments ?? []) {
     const extension = path.split('.').at(-1).toLowerCase();

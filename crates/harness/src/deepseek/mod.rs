@@ -380,7 +380,8 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
 /// tool-less `sdk-minimal` profile (`title` is the shim's switch), with the
 /// shared title instructions as its system prompt and a hard output cap.
 /// A title always opens a fresh session and takes no MCP servers, reasoning
-/// effort, or plan flag: the sidecar would read `/plan` as plain text there.
+/// effort, or plan flag: the `sdk-minimal` profile it runs carries no commands
+/// service, so a title run has nothing that could act on a plan command.
 fn title_configuration(
     request: &RunRequest,
     home: &Path,

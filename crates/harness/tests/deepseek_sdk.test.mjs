@@ -281,16 +281,20 @@ test('a failed /plan stops the start before any prompt reaches the runtime', asy
     'no prompt reaches the runtime');
 });
 
-test('a prompt cannot enter plan mode by starting with /plan', async t => {
-  const peer = await runtime(t);
-  await peer.next('ready');
-  peer.send({ type: 'prompt', prompt: '/plan' });
-  const error = await peer.next('error');
-  assert.match(error.message, /Plan mode is set by Zeron when a run starts/);
-  assert.equal((await peer.exited).code, 1);
-  assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
-    'a /plan prompt never becomes a command');
-});
+// The runtime resolves its localized token to the same command, so the guard
+// has to know both: `/计划` reaches the plan builtin exactly as `/plan` does.
+for (const prompt of ['/plan', '/plan off', '/计划', '/计划 off']) {
+  test(`a prompt cannot enter plan mode by starting with ${prompt}`, async t => {
+    const peer = await runtime(t);
+    await peer.next('ready');
+    peer.send({ type: 'prompt', prompt });
+    const error = await peer.next('error');
+    assert.match(error.message, /Plan mode is set by Zeron when a run starts/);
+    assert.equal((await peer.exited).code, 1);
+    assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
+      `a ${prompt} prompt never becomes a command`);
+  });
+}
 
 for (const prompt of ['protocol-error', 'malformed-event']) {
   test(`actual SDK rejects ${prompt} without successful completion`, async t => {

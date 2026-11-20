@@ -390,9 +390,6 @@ function M.view(): Node
 						error = typed_name_problem,
 						disabled = locked,
 					},
-					ds.Hint { tone = "danger", function(): string
-						return typed_name_problem() or ""
-					end },
 				},
 			},
 			ds.Settings.Row {
