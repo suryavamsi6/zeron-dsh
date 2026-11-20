@@ -264,6 +264,16 @@ async function prompt(command) {
   if (stopped) return;
   if (result.finishReason === null) throw new Error('SDK activity ended without a terminal outcome');
   await new Promise(resolveDrain => setImmediate(resolveDrain));
+  // A native command's direct output stays in the UI and never enters model
+  // history, so a state-only command (`/goal`, `/compact`) leaves no assistant
+  // message for the transcript. Forward its text once, before the turn ends;
+  // a command that started model activity already has that reply in the
+  // assistant stream, so its `finalResponse` must not be repeated here.
+  const ranCommand = result.events.some(event => event.type === 'command/run');
+  const answered = result.events.some(event => event.type === 'assistant/message');
+  if (ranCommand && !answered && result.finalResponse.trim() !== '') {
+    send({ type: 'notice', text: result.finalResponse });
+  }
   send({ type: 'done', sessionId: session.id, finishReason: result.finishReason, finalResponse: result.finalResponse });
 }
 
