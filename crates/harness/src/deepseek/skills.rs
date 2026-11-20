@@ -227,11 +227,16 @@ mod tests {
         assert_eq!(names(&skills), ["plan", "review"]);
         let review = skills.iter().find(|s| s.name == "review").unwrap();
         assert_eq!(review.description, "Review the diff");
+        // Joined, not concatenated: a `/`-separated string keeps its
+        // separators through `display()`, while `discover` returns the native
+        // ones (SUR-157).
         assert_eq!(
-            review.path,
-            root.join(".dsh/skills/review/SKILL.md")
-                .display()
-                .to_string()
+            Path::new(&review.path),
+            root.join(".dsh")
+                .join("skills")
+                .join("review")
+                .join("SKILL.md")
+                .as_path()
         );
         assert!(skills.iter().all(|s| s.enabled && s.command.is_none()));
     }
