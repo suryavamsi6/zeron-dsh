@@ -93,6 +93,7 @@ pub mod tool_output;
 mod transcript_history;
 mod update_trial;
 pub mod uploads;
+mod user_mcp;
 pub mod voice;
 pub mod workspace_files;
 pub mod workspace_host;
@@ -308,6 +309,8 @@ impl EngineCore {
         let store_for_import = store.clone();
         let journal = Arc::new(RunJournal::open(profile.store_root().join("journals"))?);
         let sessions = SessionsEngine::new(device_id.clone(), journal, registry.clone());
+        // Where the person's own MCP servers live (Settings → MCP servers).
+        sessions.use_data_dir(data_dir);
         let doc_host = DocHost::new(
             store.clone(),
             DocHostConfig {

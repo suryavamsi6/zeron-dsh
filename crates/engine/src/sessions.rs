@@ -272,6 +272,9 @@ struct Inner {
     /// Where this engine publishes its IPC bearer (`{data_dir}/ipc-token`),
     /// handed to the injected `zeron mcp` as a PATH, never the token itself.
     ipc_token_file: Mutex<Option<std::path::PathBuf>>,
+    /// This engine's data dir, once assembly knows it: where the person's own
+    /// MCP servers live ([`crate::user_mcp`]). Absent in bare tests.
+    data_dir: OnceLock<std::path::PathBuf>,
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
     mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
@@ -473,6 +476,7 @@ impl SessionsEngine {
                 ipc_ready: tokio::sync::Notify::new(),
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
+                data_dir: OnceLock::new(),
                 mcp_endpoint: Mutex::new(None),
                 viewers: Arc::default(),
                 journal,
@@ -501,6 +505,12 @@ impl SessionsEngine {
 
     pub(crate) fn voice_manager(&self) -> crate::voice::VoiceManager {
         self.inner.voice.clone()
+    }
+
+    /// Point the person's own MCP servers ([`crate::user_mcp`]) at this
+    /// engine's data dir. Once, at assembly.
+    pub fn use_data_dir(&self, dir: impl Into<std::path::PathBuf>) {
+        let _ = self.inner.data_dir.set(dir.into());
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -4569,6 +4579,23 @@ async fn drive_run(
         && let Some(server) = inner.schedule_mcp(&chat_id)
     {
         request.extra_mcp.push(server);
+    }
+    // The person's own servers (Settings → MCP servers), from this device's
+    // file: added after Zeron's and the plugins', never under a name one of
+    // them already uses — the driver refuses two servers with one name.
+    if let Some(data_dir) = inner.data_dir.get() {
+        let saved = crate::user_mcp::load(data_dir);
+        if !saved.is_empty() {
+            let existing: Vec<zeron_proto::McpServer> = request
+                .mcp
+                .iter()
+                .chain(request.extra_mcp.iter())
+                .cloned()
+                .collect();
+            request
+                .extra_mcp
+                .extend(crate::user_mcp::added(&existing, &saved));
+        }
     }
     // The MCP servers the agent starts from this run's config: the only
     // children it may hold when stopped idle (see the reaper).
