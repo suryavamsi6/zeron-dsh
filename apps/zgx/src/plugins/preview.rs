@@ -47,6 +47,7 @@ pub const BLOCKED: &[&str] = &[
     "terminal.write",
     "terminal.command",
     "account.",
+    "agents.cloud_key",
     "plugins.install",
     // (Deciding on and signing plugins are the consent window's alone, a
     // host of their own: never the main window's to refuse.)

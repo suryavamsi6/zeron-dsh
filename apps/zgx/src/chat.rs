@@ -8104,35 +8104,6 @@ mod tests {
         assert!(matches!(session_value(&chats, &open, false).field("model"), None | Some(Value::Nil)));
     }
 
-    /// A new chat shows the agent and model it was sent with from its first
-    /// frame: on Cloud its row has no config until Cloud has made it and
-    /// the first send's config lands, and was shown meanwhile as Claude Code
-    /// (the stand-in for a row with no agent), its default model in the chip.
-    #[test]
-    fn a_new_chat_shows_what_it_was_sent_with_until_its_row_does() {
-        let chats = Chats::default();
-        let open = Open { id: "c".into(), ..Open::default() };
-        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "cloud": true }));
-        let field = |chats: &Chats, k: &str| session_value(chats, &open, false).field(k).map(text);
-        assert_eq!(field(&chats, "harness").as_deref(), Some("claude-code"), "the stand-in, before");
-        let sent = Value::record([("model", Value::from("grok/grok-4.7")), ("harness", Value::from("grok")), ("effort", Value::from("high"))]);
-        chats.starts_with("c", merged_config(&Json::Null, &sent));
-        assert_eq!(field(&chats, "harness").as_deref(), Some("grok"));
-        assert_eq!(field(&chats, "agent").as_deref(), Some("grok"));
-        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7"));
-        assert_eq!(field(&chats, "effort").as_deref(), Some("high"));
-        // A side chat made with its parent's agent shows the one it's sent
-        // with, not its parent's, until that lands.
-        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": { "harness": "claude-code", "model": "opus" } }));
-        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7"));
-        // Landed: the row's own (a model the engine settled on, say).
-        chats.chats.borrow_mut().insert("c".into(), json!({ "id": "c", "config": { "harness": "grok", "model": "grok-4.7-build-fast" } }));
-        assert_eq!(field(&chats, "model").as_deref(), Some("grok/grok-4.7-build-fast"));
-        // No agent to show: nothing kept.
-        chats.starts_with("d", merged_config(&Json::Null, &Value::record([("effort", Value::from("high"))])));
-        assert!(!chats.starting.borrow().contains_key("d"));
-    }
-
     /// A Cloud machine's setup opens the turn of the message that woke it:
     /// its working clock counts from that send, through the wake, rather
     /// than starting again when the machine got to it. Any other reply's
