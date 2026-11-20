@@ -122,7 +122,6 @@ pub fn added(existing: &[McpServer], user: &[McpServer]) -> Vec<McpServer> {
     }
     out
 }
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Stored {
     #[serde(default)]
