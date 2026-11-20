@@ -123,6 +123,42 @@ test("MCP servers refuses an environment line that is not KEY=value", function()
 	expect(#writes(app)).to_be(0)
 end)
 
+test("MCP servers keeps adding off when the list failed to load", function()
+	local app = open("the engine is asleep")
+	expect(app:has(`{PAGE} >> "Can't list MCP servers"`)).to_be(true)
+	expect(app:has(`{PAGE} >> "The list didn't load, so adding is off. Retry above."`)).to_be(true)
+	expect(app:tree(`{PAGE} >> role:button "Save"`)).to_contain("disabled")
+	fill_server(app, "notes", "npx", "", "")
+	app:click(`{PAGE} >> role:button "Save"`)
+	app:frames(10)
+	expect(#writes(app)).to_be(0)
+end)
+
+test("MCP servers builds the next write on the saved answer when the reload fails", function()
+	local app = open()
+	-- The reload after the save fails: the write landed, the read didn't.
+	app:set_state("settings_stub_mcp_reload_fails", true)
+	fill_server(app, "notes", "npx", "", "")
+	app:click(`{PAGE} >> role:button "Save"`)
+	app:frames(20)
+	-- Saved: its row is listed even though the reload failed.
+	expect(app:has(`{PAGE} >> role:button "Remove notes"`)).to_be(true)
+	-- And the next write builds on the engine's answer, not the list before
+	-- the save: four servers, not three.
+	fill_server(app, "second", "uvx", "", "")
+	app:scroll(PAGE, 1000)
+	app:click(`{PAGE} >> role:button "Save"`)
+	app:frames(20)
+	local w = writes(app)
+	expect(#w).to_be(2)
+	local servers = w[2].servers
+	expect(#servers).to_be(4)
+	expect(servers[1].name).to_be("filesystem")
+	expect(servers[2].name).to_be("github")
+	expect(servers[3].name).to_be("notes")
+	expect(servers[4].name).to_be("second")
+end)
+
 test("MCP servers saves a new server, sending the whole list with untouched entries as they came", function()
 	local app = open()
 	fill_server(app, "notes", "npx", "-y\nnotes-server\n/work/notes", "NOTES_TOKEN=notes-token-value")

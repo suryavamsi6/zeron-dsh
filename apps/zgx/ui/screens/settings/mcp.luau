@@ -209,6 +209,11 @@ function M.view(): Node
 		end
 		return if res.status:get() == "failed" then "failed" else "loading"
 	end
+	-- A write is off until the list is known: Save sends the whole list, so
+	-- with none loaded it would send only the new server and drop the rest.
+	local function locked(): boolean
+		return saving:get() or res.data:get() == nil
+	end
 	-- The name as it is typed: said wrong only once there is something to
 	-- be wrong about — the engine's rule, or a name this list already has
 	-- (the engine would refuse that too; the person can see why before Save).
@@ -239,6 +244,11 @@ function M.view(): Node
 		host.call("SetMcpServers", { servers = next_servers }):after(function(answer: any)
 			saving:set(false)
 			if type(answer) == "table" and type(answer.servers) == "table" then
+				-- The engine's answer is the list now: keep it as the page's
+				-- data, so a write before the reload lands builds on it, and a
+				-- reload that fails leaves it rather than the list before
+				-- this save.
+				res.data:set(answer)
 				if landed then
 					landed()
 				end
@@ -253,6 +263,10 @@ function M.view(): Node
 	end
 	local function save()
 		if saving:peek() then
+			return
+		end
+		if res.data:peek() == nil then
+			problem:set("The server list hasn't loaded. Retry above, then add.")
 			return
 		end
 		local n = trim(draft_name:get())
@@ -374,7 +388,7 @@ function M.view(): Node
 						size = "sm",
 						w_full = true,
 						error = typed_name_problem,
-						disabled = saving,
+						disabled = locked,
 					},
 					ds.Hint { tone = "danger", function(): string
 						return typed_name_problem() or ""
@@ -390,7 +404,7 @@ function M.view(): Node
 					placeholder = "npx",
 					size = "sm",
 					w_full = true,
-					disabled = saving,
+					disabled = locked,
 				},
 			},
 			ds.Settings.Row {
@@ -406,7 +420,7 @@ function M.view(): Node
 					size = "sm",
 					mono = true,
 					w_full = true,
-					disabled = saving,
+					disabled = locked,
 				},
 			},
 			ds.Settings.Row {
@@ -422,13 +436,23 @@ function M.view(): Node
 					size = "sm",
 					mono = true,
 					w_full = true,
-					disabled = saving,
+					disabled = locked,
 				},
 			},
 			ui.row {
 				w_full = true,
 				gap = "$space.3",
 				items = "center",
+				ui.show(function(): boolean
+					return res.data:get() == nil
+				end, ds.Hint {
+					grow = 1,
+					function(): string
+						return if res.status:get() == "failed"
+							then "The list didn't load, so adding is off. Retry above."
+							else "The list is still loading."
+					end,
+				}),
 				ui.show(function(): boolean
 					return problem:get() ~= nil
 				end, ds.Hint {
@@ -442,7 +466,7 @@ function M.view(): Node
 					"Save",
 					size = "sm",
 					busy = saving,
-					disabled = saving,
+					disabled = locked,
 					on_click = save,
 				},
 			},

@@ -70,14 +70,17 @@ local schedule_delete = ui.state("settings_stub_schedule_delete", nil :: any)
 local schedule_run = ui.state("settings_stub_schedule_run", nil :: any)
 local schedule_calls = ui.state("settings_stub_schedule_calls", {} :: { any })
 -- What `McpServers` answers: nil (the two servers the `McpServers`
--- answer below carries), a `{ servers = … }` a test sets, or a landed
--- `SetMcpServers` write. What `SetMcpServers` answers is
--- `settings_stub_mcp_set`: nil (the write lands and `McpServers` answers
--- it), "pending" (never settles), a refusal's words, or a table. The
--- lists sent are in `settings_stub_mcp_calls` (`{ op = "set", servers }`
--- each), so a test can compare a write against the list it expected.
+-- answer below carries), a `{ servers = … }` a test sets, a refusal's words
+-- (the read fails), or a landed `SetMcpServers` write (unless
+-- `settings_stub_mcp_reload_fails` is on, so the reload after a save
+-- fails). What `SetMcpServers` answers is `settings_stub_mcp_set`: nil
+-- (the write lands and `McpServers` answers it), "pending" (never
+-- settles), a refusal's words, or a table. The lists sent are in
+-- `settings_stub_mcp_calls` (`{ op = "set", servers }` each), so a test
+-- can compare a write against the list it expected.
 local mcp_servers_answer = ui.state("settings_stub_mcp_servers", nil :: any)
 local mcp_set_answer = ui.state("settings_stub_mcp_set", nil :: any)
+local mcp_reload_fails = ui.state("settings_stub_mcp_reload_fails", false)
 local mcp_saved = ui.state("settings_stub_mcp_saved", nil :: any)
 local mcp_calls = ui.state("settings_stub_mcp_calls", {} :: { any })
 local signing_keys = {
@@ -592,10 +595,15 @@ local answers: { [string]: (arg: any) -> any } = {
 	["McpServers"] = function()
 		local saved = mcp_saved:peek()
 		if saved ~= nil then
+			if mcp_reload_fails:peek() then
+				return settled(nil, "the list can't be read")
+			end
 			return settled({ servers = saved })
 		end
 		local over = mcp_servers_answer:peek()
-		if over ~= nil then
+		if type(over) == "string" then
+			return settled(nil, over)
+		elseif over ~= nil then
 			return settled(over)
 		end
 		return settled({
