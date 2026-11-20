@@ -7300,6 +7300,116 @@ mod tests {
         }
     }
 
+    /// Records the run its engine stamped, so a test can read the request a
+    /// run actually got (the extra servers are assembled in the dispatch).
+    struct CaptureHarness {
+        seen: Arc<Mutex<Option<RunRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for CaptureHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::DeepSeek
+        }
+        fn display_name(&self) -> &str {
+            "Capture"
+        }
+        fn supports_steering(&self) -> bool {
+            false
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::TurnBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            _controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            *self.seen.lock().unwrap() = Some(request);
+            Ok(futures::stream::empty().boxed())
+        }
+    }
+
+    /// The person's own MCP servers reach the run the harness gets, after
+    /// whatever the host stamped there, and never under a name one of those
+    /// already uses (the driver refuses two servers with one name).
+    #[tokio::test]
+    async fn a_run_carries_the_person_s_saved_mcp_servers_last_and_never_a_taken_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let seen = Arc::new(Mutex::new(None));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(CaptureHarness { seen: seen.clone() }));
+        let core =
+            crate::EngineCore::assemble(dir.path(), Arc::new(registry), HarnessId::DeepSeek, None)
+                .unwrap();
+        let mut theirs = zeron_proto::McpServer {
+            name: "mine".into(),
+            command: "/bin/mine".into(),
+            ..Default::default()
+        };
+        theirs.env.insert("TOKEN".into(), "secret-value".into());
+        let shadow = zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "shadow".into(),
+            ..Default::default()
+        };
+        crate::user_mcp::save(dir.path(), &[shadow, theirs]).unwrap();
+        let mut run = request();
+        run.mcp = Some(zeron_proto::McpServer {
+            name: "zeron".into(),
+            command: "zeron".into(),
+            ..Default::default()
+        });
+        core.sessions
+            .dispatch("chat-user-mcp", HarnessId::DeepSeek, run, None)
+            .await
+            .unwrap();
+        let stamped = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Some(request) = seen.lock().unwrap().clone() {
+                    return request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the run reaches its harness");
+        let names: Vec<&str> = stamped
+            .extra_mcp
+            .iter()
+            .map(|server| server.name.as_str())
+            .collect();
+        assert_eq!(
+            names.last(),
+            Some(&"mine"),
+            "the person's server stands last: {names:?}"
+        );
+        assert!(
+            !names.contains(&"zeron"),
+            "the built-in server's name wins: {names:?}"
+        );
+        let mine = stamped
+            .extra_mcp
+            .iter()
+            .find(|server| server.name == "mine")
+            .expect("the saved server");
+        assert_eq!(mine.command, "/bin/mine");
+        assert_eq!(
+            mine.env.get("TOKEN").map(String::as_str),
+            Some("secret-value"),
+            "its env reaches the run as saved"
+        );
+    }
+
     // A tagged subagent event that folds to NO parts used to leave its sink
     // dirty forever: the commit branch's guard stayed true on a deadline in
     // the past and the run loop burned a core until real content arrived.
