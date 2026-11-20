@@ -379,18 +379,13 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
 /// A title run's start config: the ordinary run's shape re-pointed at the
 /// tool-less `sdk-minimal` profile (`title` is the shim's switch), with the
 /// shared title instructions as its system prompt and a hard output cap.
-/// Plan mode is refused here; a title always opens a fresh session and takes
-/// no MCP servers or reasoning effort.
+/// A title always opens a fresh session and takes no MCP servers, reasoning
+/// effort, or plan flag: the sidecar would read `/plan` as plain text there.
 fn title_configuration(
     request: &RunRequest,
     home: &Path,
     session: &str,
 ) -> Result<Value, HarnessError> {
-    if request.plan {
-        return Err(HarnessError::Protocol(
-            "DeepSeek plan mode is not exposed by this integration".into(),
-        ));
-    }
     let mut config = configuration(request, home, session)?;
     config["title"] = true.into();
     config["systemPrompt"] = crate::TITLE_INSTRUCTIONS.into();
@@ -398,6 +393,7 @@ fn title_configuration(
     config["mcp"] = json!([]);
     config["resume"] = false.into();
     config.as_object_mut().unwrap().remove("reasoningEffort");
+    config.as_object_mut().unwrap().remove("plan");
     Ok(config)
 }
 
@@ -410,6 +406,11 @@ impl Harness for DeepSeekHarness {
         "DeepSeek Harness"
     }
     fn supports_steering(&self) -> bool {
+        true
+    }
+    /// The shim enters the runtime's plan mode with `/plan` before the first
+    /// prompt, so the toggle this advertises does something (SUR-53).
+    fn supports_plan(&self) -> bool {
         true
     }
     fn steering_mode(&self) -> SteeringMode {

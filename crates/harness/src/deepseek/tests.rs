@@ -128,12 +128,26 @@ fn plan_mode_is_passed_to_the_sidecar() {
 }
 
 #[test]
-fn a_title_run_takes_a_tool_less_minimal_config_and_refuses_plan() {
+fn plan_mode_is_advertised_now_that_the_sidecar_enters_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let harness = DeepSeekHarness {
+        sdk_root: dir.path().to_path_buf(),
+        home: dir.path().join("dsh"),
+        test_runtime: None,
+    };
+    assert!(harness.supports_plan());
+}
+
+#[test]
+fn a_title_run_takes_a_tool_less_minimal_config_and_no_plan_flag() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = request(dir.path());
     request
         .env
         .insert("DEEPSEEK_API_KEY".into(), "synthetic-deepseek".into());
+    // A title run is asked for while the chat's plan toggle is on: the
+    // minimal profile has no commands service, so the flag must not ride.
+    request.plan = true;
     let config = title_configuration(&request, dir.path(), "session").unwrap();
     assert_eq!(config["title"], true);
     assert_eq!(config["systemPrompt"], crate::TITLE_INSTRUCTIONS);
@@ -141,11 +155,7 @@ fn a_title_run_takes_a_tool_less_minimal_config_and_refuses_plan() {
     assert_eq!(config["mcp"], json!([]));
     assert_eq!(config["resume"], false);
     assert!(config.get("reasoningEffort").is_none());
-    request.plan = true;
-    assert!(matches!(
-        title_configuration(&request, dir.path(), "session"),
-        Err(HarnessError::Protocol(_))
-    ));
+    assert!(config.get("plan").is_none());
 }
 
 #[test]
