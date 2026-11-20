@@ -87,6 +87,13 @@ pub fn save(data_dir: &Path, servers: &[McpServer]) -> std::io::Result<()> {
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temp);
+    } else {
+        // A crash after the rename must not lose the save: the directory's
+        // own sync makes the rename durable where the platform allows it.
+        #[cfg(unix)]
+        if let Ok(directory) = std::fs::File::open(dir) {
+            let _ = directory.sync_all();
+        }
     }
     result
 }
@@ -326,11 +333,19 @@ mod tests {
 
     #[test]
     fn added_keeps_the_engine_s_own_names_and_the_user_s_order() {
-        let existing = vec![server("zeron", "x"), server("plugin-native", "y")];
+        // Every source the stamp chains into `existing`: Zeron's own server,
+        // a plugin's native server, the schedule bridge, and an earlier user
+        // entry (the driver refuses two servers with one name).
+        let existing = vec![
+            server("zeron", "x"),
+            server("plugin-native", "y"),
+            server(crate::schedule_mcp::SERVER_NAME, "z"),
+        ];
         let user = vec![
             server("mine", "a"),
             server("zeron", "shadow"),
             server("plugin-native", "shadow"),
+            server(crate::schedule_mcp::SERVER_NAME, "shadow"),
             server("mine", "again"),
             server("second", "b"),
         ];
@@ -341,6 +356,51 @@ mod tests {
     fn added_with_nothing_taken_is_the_whole_list() {
         let user = vec![server("a", "x"), server("b", "y")];
         assert_eq!(added(&[], &user), user);
+    }
+
+    /// The corrupt-file warning must name where, never what: a token often
+    /// lives in an `env` value, and a log line is readable by anyone.
+    #[test]
+    fn a_corrupt_file_s_warning_carries_no_env_value() {
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        // Truncated on purpose: valid so far, the entry's own env included.
+        std::fs::write(
+            path(dir.path()),
+            r#"{"servers":[{"name":"a","command":"x","env":{"TOKEN":"secret-token-value"}}"#,
+        )
+        .unwrap();
+        let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let writer = {
+            let logs = logs.clone();
+            move || Capture(logs.clone())
+        };
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_writer(writer)
+            .finish();
+        let loaded = tracing::subscriber::with_default(subscriber, || load(dir.path()));
+        assert!(loaded.is_empty(), "a corrupt file is no servers");
+        let text = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        assert!(
+            text.contains("mcp servers"),
+            "the warning was written: {text}"
+        );
+        assert!(
+            !text.contains("secret-token-value"),
+            "no env value may reach a log line: {text}"
+        );
     }
 
     #[test]
