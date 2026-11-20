@@ -63,6 +63,13 @@ Captains (SUR-97, plugin-first).
 - Linux system packages are installed with `scripts/ci/apt-install.sh`
   (`Acquire::Retries=3`, 15 s http timeout, `timeout 120` on `apt-get update`). Most apt
   failures are mirror flakes, so rerun before debugging.
+- **Windows `ort-sys` (SUR-129):** the crate caches its extracted DirectML runtime in a
+  runner-owned directory and skips the download whenever that directory merely exists, so a stale
+  or partial cache makes `copy_dylibs` copy a DLL that was never written and the app build fails at
+  `dynamic_link.rs:42` (`Os { code: 3, NotFound }`). The Windows app build therefore starts from a
+  job-local, emptied `ORT_CACHE_DIR` (`${{ runner.temp }}\ort-cache`) and deletes
+  `apps\zgx\target\release\build\ort-sys-*` after `rust-cache` restores `target`: those restored
+  `OUT_DIR`s hold `DirectML.dll` links into the cache that was just emptied.
 - **zeron-v2 template rule:** if you change a default zgx file that has a copy under
   `apps/zgx/ui/templates/zeron-v2/` (listed in that template's `.base.json`), you must port the
   change into the copy **and** update its hash in `.base.json`. The hash is the Rust
