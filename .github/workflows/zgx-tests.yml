@@ -6,8 +6,9 @@ name: zgx tests
 #   apps/zgx's unit tests (`cargo test --bin zeron-zgx`: src/plugins/*_tests.rs
 #   among them), its integration tests (`cargo test --test '*'`:
 #   apps/zgx/tests/*.rs) and its Luau UI tests (`zgx test ui`, the zgx CLI at
-#   the rev apps/zgx/Cargo.toml pins), on macOS and Linux, the known failures let
-#   through (scripts/ci/test-zgx.sh, scripts/ci/zgx-known-failures.txt);
+#   the rev apps/zgx/Cargo.toml pins) — on Linux in their own `zgx-linux-ui`
+#   job, on macOS in `zgx-macos` — the known failures let through
+#   (scripts/ci/test-zgx.sh, scripts/ci/zgx-known-failures.txt);
 #   and on macOS the engine's plugin tests (its lib's `plugins::` tests and
 #   tests/plugin_services.rs), which core-tests runs on Linux.
 #
@@ -162,6 +163,58 @@ jobs:
           workspaces: apps/zgx -> target
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      - name: apps/zgx unit tests
+        run: scripts/ci/test-zgx.sh rust
+      - name: apps/zgx integration tests
+        if: ${{ !cancelled() }}
+        run: scripts/ci/test-zgx.sh tests
+      - name: Record the pass (CI skips this job while its inputs stay the same)
+        if: inputs.pass-key != ''
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: rust-toolchain.toml
+          key: ${{ inputs.pass-key }}-zgx-linux
+      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
+      # still running stop at once. The annotation names the failed step
+      # before the cancel takes this job down; `scripts/ci/first-red.sh`
+      # reads that step from the run's jobs. If the checkout itself is what
+      # failed, the fallback below keeps the job-only annotation. `|| true`
+      # keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash scripts/ci/first-red.sh || {
+            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+          }
+
+  # The Luau UI suite needs nothing zgx-linux's Rust steps build — only the
+  # cached zgx CLI — so it runs here, in parallel, instead of after them.
+  # No Swatinem/rust-cache: this job never builds the app; the CLI's own
+  # target dir is $RUNNER_TEMP, used only on a cache miss.
+  zgx-linux-ui:
+    permissions:
+      contents: read
+      actions: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: System packages (zgx-beta.yml's)
+        run: >-
+          bash scripts/ci/apt-install.sh
+          libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
+          libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev
+          pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev mold
+          mesa-vulkan-drivers
+      # (mesa-vulkan-drivers: lavapipe, a Vulkan device on the CPU, so agent
+      # visuals' shaders and scenes render here as on a machine with a GPU;
+      # src/visuals_tests.rs. The runner has none of its own.)
+      - name: Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
       - id: zgx-rev
         name: The zgx rev apps/zgx pins
         run: echo "rev=$(sed -n 's/^zgx = .*rev = "\([0-9a-f]*\)".*/\1/p' apps/zgx/Cargo.toml)" >> "$GITHUB_OUTPUT"
@@ -187,11 +240,6 @@ jobs:
         with:
           path: ~/zgx-cli
           key: zgx-cli-${{ runner.os }}-${{ runner.arch }}-${{ steps.zgx-rev.outputs.rev }}
-      - name: apps/zgx unit tests
-        run: scripts/ci/test-zgx.sh rust
-      - name: apps/zgx integration tests
-        if: ${{ !cancelled() }}
-        run: scripts/ci/test-zgx.sh tests
       - name: apps/zgx Luau UI tests
         if: ${{ !cancelled() }}
         run: scripts/ci/test-zgx.sh ui ~/zgx-cli/bin/zgx
@@ -200,7 +248,7 @@ jobs:
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: rust-toolchain.toml
-          key: ${{ inputs.pass-key }}-zgx-linux
+          key: ${{ inputs.pass-key }}-zgx-linux-ui
       # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
       # still running stop at once. The annotation names the failed step
       # before the cancel takes this job down; `scripts/ci/first-red.sh`
