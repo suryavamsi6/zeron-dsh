@@ -1204,6 +1204,11 @@ pub struct UserInputQuestion {
     /// knows the field can show it apart from what is asked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The body a plan review carries, when the agent sends one. Already
+    /// included in `question` for clients that only read text; a client that
+    /// knows the field can show the plan apart from what is asked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

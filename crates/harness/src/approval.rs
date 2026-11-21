@@ -32,6 +32,7 @@ pub fn allowed_without_asking(access: AccessMode, action: Action) -> bool {
 pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserInputQuestion {
     UserInputQuestion {
         note: None,
+        detail: None,
         id: uuid::Uuid::new_v4().to_string(),
         header: header.into(),
         question: question.into(),

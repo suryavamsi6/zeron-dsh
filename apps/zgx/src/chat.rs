@@ -6673,8 +6673,14 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
         .filter_map(Json::as_str)
         .map(|o| Value::record([("value", Value::from(o)), ("label", Value::from(o))]))
         .collect();
+    let asked = q["question"].as_str().unwrap_or_default();
+    let detail = q["detail"].as_str().filter(|d| !d.is_empty());
+    let text = match detail {
+        Some(d) => asked.strip_suffix(&format!("\n\n{d}")).unwrap_or(asked),
+        None => asked,
+    };
     let mut question = vec![
-        ("text", Value::from(q["question"].as_str().unwrap_or_default())),
+        ("text", Value::from(text)),
         ("options", Value::List(options.into())),
         ("multi", Value::Bool(q["multiSelect"].as_bool() == Some(true))),
         ("page", Value::Num((page + 1) as f64)),
@@ -6683,7 +6689,7 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
         question.push(("header", Value::from(h)));
     }
-    if let Some(d) = q["detail"].as_str().filter(|d| !d.is_empty()) {
+    if let Some(d) = detail {
         question.push(("detail", Value::from(d)));
     }
     Some(Value::record([
@@ -8254,6 +8260,61 @@ mod tests {
             assert_eq!(question.field("detail"), None, "detail {detail:?}");
             assert_eq!(question, &expected, "detail {detail:?}");
         }
+    }
+
+    /// The harness folds a question's `detail` into its text as the exact
+    /// suffix `"\n\n{detail}"`; the card must show the plan once, as its own
+    /// body, and the question without it (SUR-166).
+    #[test]
+    fn a_question_whose_folded_plan_is_its_suffix_loses_it() {
+        use super::{Value, ask_value};
+        use serde_json::json;
+        let detail = "# Plan\n\n1. Do the thing";
+        let part = json!({
+            "requestId": "q1",
+            "questions": [{
+                "question": format!("Approve this plan?\n\n{detail}"),
+                "header": "Plan review",
+                "options": ["Approve", "Reject"],
+                "detail": detail,
+            }],
+        });
+        let ask = ask_value(&part, 0).expect("a question");
+        let question = ask.field("question").expect("the question record");
+        assert_eq!(
+            question.field("text"),
+            Some(&Value::from("Approve this plan?")),
+            "the plan must not appear in the question text as well as in detail"
+        );
+        assert_eq!(question.field("detail"), Some(&Value::from(detail)));
+    }
+
+    /// Only the exact suffix comes off: a question that merely contains the
+    /// plan's words keeps them, so the strip cannot become a replace
+    /// (SUR-166).
+    #[test]
+    fn a_question_that_holds_the_plan_but_not_as_its_suffix_is_untouched() {
+        use super::{Value, ask_value};
+        use serde_json::json;
+        let detail = "# Plan\n\n1. Do the thing";
+        let asked = format!("{detail}\n\nApprove this plan?");
+        let part = json!({
+            "requestId": "q1",
+            "questions": [{
+                "question": &asked,
+                "header": "Plan review",
+                "options": ["Approve", "Reject"],
+                "detail": detail,
+            }],
+        });
+        let ask = ask_value(&part, 0).expect("a question");
+        let question = ask.field("question").expect("the question record");
+        assert_eq!(
+            question.field("text"),
+            Some(&Value::from(asked.as_str())),
+            "the plan is not the suffix, so nothing may be cut"
+        );
+        assert_eq!(question.field("detail"), Some(&Value::from(detail)));
     }
 
     #[test]
