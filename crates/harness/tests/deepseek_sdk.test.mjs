@@ -2,11 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { createInterface } from 'node:readline';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { apply, requiresApproval, assertRoute } from '../src/deepseek/policy.mjs';
 import { runtimeEnvironment, trustedToolEnvironment } from '../src/deepseek/environment.mjs';
 
@@ -17,6 +18,23 @@ const shim = resolve(here, '../src/deepseek/shim.mjs');
 const fixture = resolve(here, 'fixtures/deepseek-runtime.mjs');
 const policySource = await readFile(resolve(here, '../src/deepseek/policy.mjs'), 'utf8');
 const environmentSource = await readFile(resolve(here, '../src/deepseek/environment.mjs'), 'utf8');
+
+// The runtime resolves a builtin's localized token to the same command its
+// English name reaches, so the guard's cases are the catalog's, read from the
+// same installed package the sidecar boots: a token a new locale adds lands
+// in these lists without this file changing.
+const sdkRequire = createRequire(join(sdkRoot, 'package.json'));
+const { builtinCommandTokens } = await import(pathToFileURL(sdkRequire.resolve('@deepseek-ai/dsh-commands/builtin')).href);
+function builtinTokens(command) {
+  const tokens = new Set([command]);
+  for (const locale of Object.values(builtinCommandTokens)) {
+    if (typeof locale?.[command] === 'string') tokens.add(locale[command]);
+  }
+  return [...tokens];
+}
+const planTokens = builtinTokens('plan');
+const permissionTokens = builtinTokens('permission');
+const slashPrompts = (tokens, argument) => tokens.flatMap(token => [`/${token}`, `/${token} ${argument}`]);
 
 async function runtime(t, options = {}) {
   const home = options.home ?? await mkdtemp(join(tmpdir(), 'zeron-deepseek-test-'));
@@ -360,15 +378,33 @@ test("a failing command's own text is a notice exactly once", async t => {
   assert.equal(peer.seen.filter(type => type === 'notice').length, 1);
 });
 
-// The runtime resolves its localized token to the same command, so the guard
-// has to know both: `/计划` reaches the plan builtin exactly as `/plan` does.
-for (const prompt of ['/plan', '/plan off', '/计划', '/计划 off']) {
+// A list derived only as far as the English name would pass with the guard
+// knowing nothing else; the catalog must actually contribute locale tokens.
+test('the plan guard cases name at least two locale tokens from the SDK catalog', () => {
+  assert.ok(planTokens.length >= 2,
+    `the catalog read produced ${JSON.stringify(planTokens)}; a dropped read still passes with only 'plan'`);
+});
+
+for (const prompt of slashPrompts(planTokens, 'off')) {
   test(`a prompt cannot enter plan mode by starting with ${prompt}`, async t => {
     const peer = await runtime(t);
     await peer.next('ready');
     peer.send({ type: 'prompt', prompt });
     const error = await peer.next('error');
     assert.match(error.message, /Plan mode is set by Zeron when a run starts/);
+    assert.equal((await peer.exited).code, 1);
+    assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
+      `a ${prompt} prompt never becomes a command`);
+  });
+}
+
+for (const prompt of slashPrompts(permissionTokens, 'x')) {
+  test(`a prompt cannot change permissions by starting with ${prompt}`, async t => {
+    const peer = await runtime(t);
+    await peer.next('ready');
+    peer.send({ type: 'prompt', prompt });
+    const error = await peer.next('error');
+    assert.match(error.message, /Change permissions through Zeron access controls/);
     assert.equal((await peer.exited).code, 1);
     assert.ok(!peer.frames.some(f => f.type === 'notification' && f.params?.event?.type === 'turn/start'),
       `a ${prompt} prompt never becomes a command`);
