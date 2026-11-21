@@ -58,12 +58,12 @@ its `$` token is how it reaches a message. The DeepSeek SDK driver's own
 commands are a separate catalog: `commands()` in the same module advertises
 `/goal` and `/compact`. Mock (tests) reports none.
 
-Hosts advertise `composer-references-v1` for canonical reference delivery.
-Selecting a harness command for an older host inserts literal slash text.
-Sending an existing file, command, or skill chip to an unsupported host asks the
-user to update that device and preserves the draft and attachments; the same
-check applies when committing an edited queued message. Literal code examples
-do not require this capability.
+The `composer-references-v1` capability is defined and advertised
+(`crates/proto/src/workspace.rs`, `crates/engine/src/lib.rs`), but nothing in
+Zeron consumes it yet. A pick always stores the canonical reference link
+(`apps/zgx/ui/screens/chat/invocations.luau`), and the engine decodes invocation
+links without a capability check (`crates/engine/src/sessions.rs`), so there is
+no host-specific fallback.
 
 Provider references:
 
