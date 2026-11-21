@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 // This test drives the installed `dsh` CLI instead of importing it, so a
 // missing SDK directory or package manager skips rather than failing at import.
@@ -40,6 +42,31 @@ function run(args, options) {
 }
 
 const report = result => `exit ${result.code}${result.signal === null ? '' : ` (${result.signal})`}\n${result.stdout}\n${result.stderr}`;
+
+// A loopback Anthropic-shaped model: it records each request body so a test can
+// assert what the runtime actually sent, not what a plugin registered.
+async function mockModel(t) {
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push({ path: request.url, input });
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', { message: { id: 'msg-mock', type: 'message', role: 'assistant', model: input.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'CAPTAINS_ROLE_OK' } });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+    event('message_stop', {});
+    response.end();
+  });
+  await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+  t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
+  return { requests, baseURL: `http://127.0.0.1:${server.address().port}/anthropic` };
+}
 
 test('a bundle installed in the sdk profile composes its layer and loads', { timeout: 300000 }, async t => {
   if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
@@ -146,4 +173,70 @@ test('zeron-captains validates its row config', async () => {
   const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
   assert.equal(crew.captainId, 'c1');
   assert.equal(crew.role, 'crew');
+});
+
+// SUR-84: the role prompt is a system section, so the only assertion that
+// proves it works is the text inside the model request. A registration-only
+// check would pass even if the section never reached the model.
+test('Helm bundle adds the role prompt to model input', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-role-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-role-bundle-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const { requests, baseURL } = await mockModel(t);
+  const require_ = createRequire(join(sdkRoot, 'package.json'));
+  const { DeepSeekHarness } = await import(pathToFileURL(require_.resolve('@deepseek-ai/dsh-sdk-client')).href);
+
+  // The harness will override this row from the host-stamped chat role
+  // (SUR-104); until then the test supplies the same invocation patch so the
+  // plugin's half of the contract is pinned end to end.
+  const roles = {
+    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
+    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
+    none: { role: 'none' },
+  };
+  const sessions = { helm: 'dsh-session-a', crew: 'dsh-session-b', none: 'dsh-session-c' };
+  const systems = {};
+  for (const [role, config] of Object.entries(roles)) {
+    const patch = join(checkout, `captains-${role}.yml`);
+    await writeFile(patch, `- ${JSON.stringify({ id: 'zeron-captains', config })}\n`);
+    const start = requests.length;
+    const harness = new DeepSeekHarness({
+      profile: 'sdk', dshHome: home, cwd: checkout, processCwd: checkout, model: 'deepseek-flash',
+      env: { ...env, DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: baseURL },
+      patches: [patch],
+    });
+    harness.client.start();
+    try {
+      await harness.start();
+      const result = await harness.session(sessions[role]).run('Name the role you are running as.');
+      assert.equal(result.finishReason, 'completed', `the ${role} run did not finish: ${result.finishReason ?? result}`);
+    } finally {
+      await harness.client.close();
+    }
+    const messages = requests.slice(start).filter(request => request.path.endsWith('/messages'));
+    assert.equal(messages.length, 1, `the ${role} run sent ${messages.length} model requests`);
+    const system = messages[0].input.system;
+    systems[role] = typeof system === 'string' ? system : JSON.stringify(system);
+  }
+
+  assert.match(systems.helm, /<captain name="Helm">/, 'the captain row did not add the role section');
+  assert.match(systems.helm, /## Needs you/, 'the role section is not the captain prompt');
+  assert.match(systems.helm, /\/tmp\/drive\/helm/, 'the role section does not name the Drive');
+  // Crew rules arrive from CREW.md on the engine side (SUR-85); this bundle
+  // registers the Captain's own section and nothing else.
+  for (const role of ['crew', 'none']) {
+    assert.doesNotMatch(systems[role], /<captain/, `the ${role} row registered a captain section`);
+    assert.doesNotMatch(systems[role], /## Needs you/, `the ${role} row carried the captain prompt`);
+  }
 });
