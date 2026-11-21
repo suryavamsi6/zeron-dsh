@@ -208,6 +208,7 @@ fn transcript_one(text: &str) -> TranscriptInput {
 fn question_chip_reads_what_was_answered() {
     let question = |id: &str, header: &str| zeron_proto::UserInputQuestion {
         note: None,
+        detail: None,
         id: id.into(),
         header: header.into(),
         question: format!("{header}?"),

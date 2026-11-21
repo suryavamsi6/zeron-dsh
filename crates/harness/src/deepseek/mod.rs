@@ -820,6 +820,7 @@ fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError
                 prefill: None,
                 multiline: false,
                 note: None,
+                detail: q["detail"].as_str().filter(|d| !d.is_empty()).map(str::to_owned),
             })
         })
         .collect()

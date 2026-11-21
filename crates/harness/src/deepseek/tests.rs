@@ -582,3 +582,31 @@ async fn http_body(socket: &mut tokio::net::TcpStream) -> Option<Vec<u8>> {
         data.extend_from_slice(&chunk[..read]);
     }
 }
+
+/// A plan review's body reaches the client as its own field **and** stays
+/// folded into the question text, so a text-only client sees what it always
+/// did while a client that knows `detail` can draw the plan apart (SUR-166).
+#[test]
+fn host_questions_carries_a_detail_field_and_keeps_the_folded_text() {
+    let params = json!({
+        "questions": [{
+            "id": "q1",
+            "header": "Plan review",
+            "question": "Approve this plan?",
+            "options": [{ "label": "Approve" }, { "label": "Reject" }],
+            "detail": "# Plan\n\n1. Do the thing",
+        }]
+    });
+    let questions = host_questions(&params).expect("a question");
+    assert_eq!(questions.len(), 1);
+    let q = &questions[0];
+    assert_eq!(
+        q.detail.as_deref(),
+        Some("# Plan\n\n1. Do the thing"),
+        "the plan must be its own field, not only text"
+    );
+    assert_eq!(
+        q.question, "Approve this plan?\n\n# Plan\n\n1. Do the thing",
+        "a text-only client must still see the plan folded in"
+    );
+}

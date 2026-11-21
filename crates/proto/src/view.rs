@@ -1314,6 +1314,7 @@ mod input_outcome_tests {
     fn question(id: &str, header: &str, text: &str, options: &[&str]) -> UserInputQuestion {
         UserInputQuestion {
             note: None,
+            detail: None,
             id: id.into(),
             header: header.into(),
             question: text.into(),

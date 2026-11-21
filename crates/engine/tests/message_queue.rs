@@ -111,6 +111,7 @@ impl Harness for HeldHarness {
             // question has to go through controls rather than the stream.
             (controls.request_input)(vec![UserInputQuestion {
                 note: None,
+                detail: None,
                 id: "q1".into(),
                 header: "Choose".into(),
                 question: "which one?".into(),
