@@ -31,6 +31,23 @@ class PlanTests(unittest.TestCase):
         suites = plan.plan(files("crates/mcp/src/lib.rs", patch="+let width = 3;"), "full")
         self.assertEqual(selected(suites), {"core", "windows", "android"})
 
+    def test_harness_path_joins_run_windows_without_a_platform_token(self):
+        """SUR-157: a `Path::join` change names no platform, but only breaks off Linux."""
+        one = files("crates/harness/src/deepseek/skills.rs",
+                    patch='+assert_eq!(Path::new(&review.path), root.join(".dsh").as_path());')
+        self.assertTrue(plan.plan(one, "fast")["windows"], "one harness file")
+
+        sur_157 = files("crates/harness/src/deepseek/skills.rs",
+                        "crates/harness/src/deepseek/tests.rs",
+                        patch='+assert_eq!(Path::new(&skills[0].path), workspace.join(".dsh").as_path());')
+        suites = plan.plan(sur_157, "fast")
+        counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
+        self.assertGreaterEqual(counts["windows"], 1, "the SUR-157 diff")
+
+        docs = plan.plan(files("README.md", "docs/ci.md"), "fast")
+        self.assertFalse(docs["windows"])
+        self.assertEqual(plan.reservation(plan.jobs_to_run(docs), "pull_request", "refs/pull/1/merge")["windows"], 0)
+
     def test_platform_code_selects_its_platform(self):
         windows = plan.plan(files("crates/term/src/pty.rs", patch='+#[cfg(windows)]\n+fn f() {}'), "fast")
         self.assertTrue(windows["windows"])

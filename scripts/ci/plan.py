@@ -26,8 +26,10 @@ Windows and voice jobs that passed while the others did not.
 Tiers. Every suite has a broad path list (what used to trigger its workflow).
 On the full tier a suite runs when any changed file matches it. On the fast
 tier the expensive platform suites (Windows, voice, Android) only run when
-the change can plausibly be platform specific: their own files, or
-Rust/script hunks that mention the platform (cfg(windows), target_os...).
+the change can plausibly be platform specific: their own files, Rust/script
+hunks that mention the platform (cfg(windows), target_os...), or any change
+under crates/harness/ (path handling that can break on another platform
+without naming one: `Path::join` against a `/`-built expectation, SUR-157).
 Linux, iOS (already selective) and the cheap suites run as on the full tier.
 Changes to CI itself run everything.
 
@@ -141,6 +143,12 @@ FAST_PATHS: dict[str, list[str]] = {
                         "apps/ios/Zeron/Fonts/**", "apps/ios/Zeron/Assets.xcassets/**",
                         ".github/workflows/android.yml"],
 }
+
+# Fast tier: the harness builds paths that Windows joins differently. A
+# path-joining hunk carries no platform token to match (`Path::new("...")`,
+# `format!("{root}/skills")`), so the whole directory is platform-relevant
+# there; the existing markers still count too (SUR-157, SUR-158).
+HARNESS_PATHS = ["crates/harness/**"]
 
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
 # On the full tier everything runs.
@@ -257,7 +265,10 @@ def select(files: list[dict] | None, tier: str, mobile: list[str] | None,
                 continue
             fast = any(matches(p, FAST_PATHS[suite]) for p in paths)
             if not fast and suite == "windows":
-                fast = windows_specific(files)
+                # Platform markers count, and so does a change under the
+                # harness: its path handling can break on Windows without
+                # mentioning it (SUR-157), which no token predicate can see.
+                fast = windows_specific(files) or any(matches(p, HARNESS_PATHS) for p in paths)
             suites[suite] = fast
     return suites
 
