@@ -35,14 +35,18 @@ class PlanTests(unittest.TestCase):
         """SUR-157: a `Path::join` change names no platform, but only breaks off Linux."""
         one = files("crates/harness/src/deepseek/skills.rs",
                     patch='+assert_eq!(Path::new(&review.path), root.join(".dsh").as_path());')
-        self.assertTrue(plan.plan(one, "fast")["windows"], "one harness file")
+        self.assertEqual(selected(plan.plan(one, "fast")), {"core", "deepseek", "windows"},
+                         "one harness file")
 
         sur_157 = files("crates/harness/src/deepseek/skills.rs",
                         "crates/harness/src/deepseek/tests.rs",
                         patch='+assert_eq!(Path::new(&skills[0].path), workspace.join(".dsh").as_path());')
         suites = plan.plan(sur_157, "fast")
-        counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        self.assertGreaterEqual(counts["windows"], 1, "the SUR-157 diff")
+        # The same gating the planner applies: no prior passes on a fresh PR,
+        # so only the jobs this change does not need are skipped.
+        off, _ = plan.gated(sur_157, "fast", suites)
+        counts = plan.reservation(plan.jobs_to_run(suites, off), "pull_request", "refs/pull/1/merge")
+        self.assertEqual(counts, {"linux": 4, "windows": 1, "macos": 0}, "the SUR-157 diff")
 
         docs = plan.plan(files("README.md", "docs/ci.md"), "fast")
         self.assertFalse(docs["windows"])
