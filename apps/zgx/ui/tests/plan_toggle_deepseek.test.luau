@@ -37,6 +37,29 @@ test("the plan toggle stands in a DeepSeek chat's composer, named", function()
 	expect(app:tree()).to_contain("Explore and propose a plan before changing anything.")
 end)
 
+test("no plan toggle for an agent whose catalog entry reports no plan mode", function()
+	local app = open("go_s2")
+	-- The row is there for the agent it reports plan for...
+	app:click('role:button "Access"')
+	app:frames(20)
+	expect(app:has(TOGGLE)).to_be(true)
+	-- ...and goes when the same chat's agent reports it cannot enter plan
+	-- mode: its catalog entry with `supportsPlan = false` (the host carries
+	-- that field from ListHarnesses; an older engine leaves it out, read as
+	-- false).
+	local catalog = app:state("chat.catalog")
+	local harness = catalog.harnesses[1]
+	app:set_state("chat.catalog", {
+		state = catalog.state,
+		complete = catalog.complete,
+		harnesses = { { id = harness.id, label = harness.label, mark = harness.mark, supportsPlan = false } },
+		models = catalog.models,
+	})
+	app:frames(20)
+	expect(app:has(TOGGLE)).to_be(false)
+	expect(app:tree()).never.to_contain("Plan mode")
+end)
+
 test("turning plan mode on for a chat writes it to the chat's config", function()
 	local app = open("go_s2")
 	app:click('role:button "Access"')

@@ -136,6 +136,22 @@ function M.offers_auto(model: string?): boolean
 	end
 	return true
 end
+
+-- Whether the agent can enter plan mode (the catalog's `supportsPlan`): only
+-- then does the composer draw the plan toggle. Unlike Auto, an agent the
+-- catalog does not list — or one from an engine predating the field — has not
+-- said it can, so it gets no toggle (SUR-156).
+function M.supports_plan(agent: string?): boolean
+	if not agent then
+		return false
+	end
+	for _, h in (M.catalog:get() :: any).harnesses do
+		if h.id == agent then
+			return h.supportsPlan == true
+		end
+	end
+	return false
+end
 -- A call nothing waits on: its failure lands in the session's notice (the
 -- host sets it), so the script needn't hear it.
 local function quietly(p: any)

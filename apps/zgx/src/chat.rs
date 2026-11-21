@@ -2242,6 +2242,9 @@ fn catalog_of(listed: &[Json], by: &HashMap<String, Vec<Json>>, done: bool, devi
                 "auto",
                 Value::Bool(h["accessModes"].as_array().is_some_and(|m| m.iter().any(|x| x == "auto"))),
             ),
+            // Whether it can enter plan mode: the composer draws the toggle
+            // only for an agent that reports it (SUR-156).
+            ("supportsPlan", Value::Bool(h["supportsPlan"].as_bool() == Some(true))),
         ]));
         for m in list {
             models.push(model_value(id, m));

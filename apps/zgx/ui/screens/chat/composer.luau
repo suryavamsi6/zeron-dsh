@@ -873,6 +873,11 @@ local function Composer(): Node
 	local function agent(): string?
 		return Completions.agent_of(model:get(), if session_id:get() then open() else nil)
 	end
+	-- Whether the chat's agent reports plan mode: only then is the toggle
+	-- drawn (a harness that cannot enter plan mode must not offer it).
+	local function plan_supported(): boolean
+		return store.supports_plan(agent())
+	end
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands
 	-- (Zeron's composer.rs `completion_trigger`).
@@ -1412,6 +1417,7 @@ local function Composer(): Node
 				return store.offers_auto(model:get())
 			end,
 			plan = plan,
+			plan_supported = plan_supported,
 			model = model,
 			effort = effort,
 			fast = fast,

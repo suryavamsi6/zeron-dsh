@@ -144,6 +144,9 @@ export type Props = {
 	-- auto-review): the picker offers Auto.
 	access_auto: (() -> boolean)?,
 	plan: State<boolean>?,
+	-- Whether the chat's agent reports plan mode (the catalog's
+	-- `supportsPlan`): the row is drawn only while it does (SUR-156).
+	plan_supported: (() -> boolean)?,
 	-- The model (a ModelPicker: its agents' tabs, its models, its reasoning,
 	-- Fast mode and its other options' picks).
 	model: State<string?>,
@@ -1566,15 +1569,17 @@ return ui.component(function(props: Props): Node
 	local access: Node? = nil
 	if props.access then
 		local plan = props.plan
+		local supported = props.plan_supported
+		local plan_on = if plan
+			then function(): boolean
+				return plan:get() and (supported == nil or supported())
+			end
+			else nil
 		access = Dropdown {
 			fold = function()
 				return math.min(left_fold(fold:get()), 2)
 			end,
-			accent = if plan
-				then function()
-					return plan:get()
-				end
-				else nil,
+			accent = plan_on,
 			value = props.access,
 			items = function(): { Dropdown.Item }
 				local chosen = props.access and props.access:get()
@@ -1584,12 +1589,16 @@ return ui.component(function(props: Props): Node
 			label = locale.t("ds.composer.access.label") :: any,
 			search = false,
 			width = 300,
-			detail = if plan
-				then function()
-					return if plan:get() then locale.s("ds.composer.plan.short") else ""
+			detail = if plan_on
+				then function(): string
+					return if plan_on() then locale.s("ds.composer.plan.short") else ""
 				end
 				else nil,
-			extra = if plan then plan_row(plan) else nil,
+			-- An agent that cannot enter plan mode has no row: `ui.show`
+			-- mounts the row only while it reports that it can.
+			extra = if plan
+				then (if supported then ui.show(supported, plan_row(plan)) else plan_row(plan))
+				else nil,
 			placement = { side = "bottom", align = "start", offset = 6 },
 		}
 	end
