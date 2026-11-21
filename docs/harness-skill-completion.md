@@ -18,10 +18,11 @@ are shown only in an existing chat.
 | `/rename` | Open the conversation rename dialog |
 | `/stop` | Interrupt the current run |
 
-DeepSeek Harness exposes no native command catalog to Zeron, so the deepseek
-agent contributes no native command catalog; the Zeron actions above are the slash
-picker's entries. This never changes what the agent can do in its own terminal:
-only commands backed by a protocol or a Zeron action are advertised.
+The slash picker carries both the Zeron actions in the table above and the
+DeepSeek driver's own two commands, `/goal` and `/compact`, advertised from
+`commands()` in `crates/harness/src/deepseek/mod.rs`. This never changes what
+the agent can do in its own terminal: only commands backed by a protocol or a
+Zeron action are advertised.
 
 Any legacy harness id still decodes so historical sessions render, but it has
 no runtime, no command catalog, and cannot be selected for a new run.
