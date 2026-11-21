@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
-import { cp, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -146,4 +146,99 @@ test('zeron-captains validates its row config', async () => {
   const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
   assert.equal(crew.captainId, 'c1');
   assert.equal(crew.role, 'crew');
+});
+
+// SUR-104: the role rides the host-stamped environment, and zeron's own shim
+// has to turn it into the invocation-patch row that overrides the bundle's
+// config. This case drives the real sidecar and inspects the patch the SDK
+// loads, which is the only place the hand-off can be observed before the
+// plugin grows a prompt of its own.
+async function sidecar(context, sdkRoot, checkout, home, captains, sessionId) {
+  const shim = resolve(context.here, '../src/deepseek/shim.mjs');
+  const [policySource, environmentSource] = await Promise.all([
+    readFile(resolve(context.here, '../src/deepseek/policy.mjs'), 'utf8'),
+    readFile(resolve(context.here, '../src/deepseek/environment.mjs'), 'utf8'),
+  ]);
+  const child = spawn(process.execPath, [shim, sdkRoot], { cwd: checkout, stdio: ['pipe', 'pipe', 'pipe'],
+    env: { ...context.env, DEEPSEEK_API_KEY: 'synthetic-not-live' } });
+  let errors = '';
+  child.stderr.on('data', chunk => { errors += chunk; });
+  const lines = [];
+  const result = await new Promise((resolveRun, rejectRun) => {
+    let buffer = '';
+    const timer = setTimeout(() => { child.kill('SIGKILL'); rejectRun(new Error(`the sidecar did not settle: ${errors}`)); }, 60000);
+    child.stdout.on('data', chunk => {
+      buffer += chunk;
+      for (;;) {
+        const end = buffer.indexOf('\n');
+        if (end < 0) break;
+        const line = buffer.slice(0, end);
+        buffer = buffer.slice(end + 1);
+        lines.push(line);
+        let frame;
+        try { frame = JSON.parse(line); } catch { continue; }
+        if (frame.type === 'ready' || frame.type === 'error') { clearTimeout(timer); resolveRun(frame); return; }
+      }
+    });
+    child.once('exit', code => { clearTimeout(timer); rejectRun(new Error(`the sidecar exited ${code}: ${errors}`)); });
+    child.stdin.write(`${JSON.stringify({
+      type: 'start', sessionId, resume: false, dshHome: home, cwd: checkout,
+      model: 'deepseek-flash', provider: 'deepseek-official', sharedHome: false,
+      access: 'supervised', plan: false, sandbox: 'workspace-write', policySource, environmentSource,
+      mcp: [], webSearch: false, ...(captains === undefined ? {} : { captains }),
+    })}\n`);
+  });
+  try {
+    const [runtime] = (await readdir(home)).filter(name => name.startsWith('.zeron-runtime-'));
+    const patch = runtime === undefined ? '' : await readFile(join(home, runtime, 'cordis.patch.yml'), 'utf8');
+    return { frame: result, patch, lines };
+  } finally {
+    if (child.exitCode === null) {
+      child.stdin.write('{"type":"stop"}\n');
+      await new Promise(done => child.once('exit', done));
+    }
+  }
+}
+
+test('the sidecar stamps the host role into the captains row', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-stamp-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-stamp-bundle-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const context = { here, env };
+  const stamped = await sidecar(context, sdkRoot, checkout, home, role, 'dsh-session-a');
+  assert.equal(stamped.frame.type, 'ready', `the stamped run did not start: ${stamped.lines.join('\n')}`);
+  const row = stamped.patch.split('\n').map(line => line.trim()).filter(line => line.startsWith('- {'))
+    .map(line => JSON.parse(line.slice(2))).find(entry => entry.id === 'zeron-captains');
+  assert.ok(row, `the sidecar did not stamp the row: ${stamped.patch}`);
+  assert.deepEqual(row.config, role, 'the stamped row did not carry the host role verbatim');
+
+  // A control run without the stamp keeps the bundle's own inert default: no
+  // override row at all.
+  const control = await sidecar(context, sdkRoot, checkout, home, undefined, 'dsh-session-control');
+  assert.equal(control.frame.type, 'ready', `the control run did not start: ${control.lines.join('\n')}`);
+  assert.doesNotMatch(control.patch, /zeron-captains/, 'an ordinary chat stamped a captains row');
+
+  // The override row wins over the bundle layer when the profile composes: that
+  // is the answer to "does cordis accept an override for an inserted id".
+  const patchFile = join(checkout, 'stamped-row.yml');
+  await writeFile(patchFile, stamped.patch);
+  const dumped = await run([dshBin, '--profile', 'sdk', '--patch', patchFile, '--dump-config'], { cwd: checkout, env, timeout: 120000 });
+  assert.equal(dumped.code, 0, `the stamped row does not compose: ${report(dumped)}`);
+  const block = dumped.stdout.split(/\n(?=- id: )/).find(part => part.startsWith('- id: zeron-captains'));
+  assert.ok(block, `the composed tree lost the captains row: ${dumped.stdout.slice(-2000)}`);
+  assert.match(block, /^ {2}config:$/m);
+  assert.match(block, /^ {4}role: captain$/m, `the override did not win: ${block}`);
+  assert.match(block, /^ {4}chatId: zeron-helm-a$/m, `the chat id did not reach the row: ${block}`);
 });

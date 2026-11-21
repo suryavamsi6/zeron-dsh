@@ -610,3 +610,75 @@ fn host_questions_carries_a_detail_field_and_keeps_the_folded_text() {
         "a text-only client must still see the plan folded in"
     );
 }
+
+#[test]
+fn helm_configuration_is_scoped_to_sdk_chat_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut request = request(dir.path());
+    // A run the host did not stamp carries no Captains key at all: absent, not
+    // null, so the bundle keeps its own inert default.
+    let plain = configuration(&request, dir.path(), "dsh-session-a").unwrap();
+    assert!(
+        plain.get("captains").is_none(),
+        "an unstamped run carried a captains key: {plain}"
+    );
+
+    // The host stamp is copied verbatim; the shim turns it into the row override.
+    let role = json!({
+        "role": "captain",
+        "chatId": "zeron-helm-a",
+        "captainId": "zeron-helm-a",
+        "captainName": "Helm",
+        "driveRoot": "/tmp/drive/helm",
+    });
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), role.to_string());
+    let stamped = configuration(&request, dir.path(), "dsh-session-a").unwrap();
+    assert_eq!(stamped["captains"], role, "the role blob was not copied");
+
+    // Anything the bundle would refuse is refused here first: the host owns the
+    // stamp, so a half-written role must never reach a plugin.
+    let mut bad_role = role.clone();
+    bad_role["role"] = "boss".into();
+    let mut relative = role.clone();
+    relative["driveRoot"] = "relative/drive".into();
+    let mut missing_name = role.clone();
+    missing_name.as_object_mut().unwrap().remove("captainName");
+    let mut numeric_chat = role.clone();
+    numeric_chat["chatId"] = 7.into();
+    let mut silent = role.clone();
+    silent["role"] = "none".into();
+    for bad in [bad_role, relative, missing_name, numeric_chat, silent] {
+        request
+            .env
+            .insert("ZERON_DEEPSEEK_CAPTAINS".into(), bad.to_string());
+        match configuration(&request, dir.path(), "dsh-session-a") {
+            Err(HarnessError::Protocol(message)) => {
+                assert_eq!(message, "Invalid Captains configuration", "{bad}")
+            }
+            other => panic!("{bad} was accepted: {other:?}"),
+        }
+    }
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), "not json".into());
+    assert_eq!(
+        match configuration(&request, dir.path(), "dsh-session-a") {
+            Err(HarnessError::Protocol(message)) => message,
+            other => panic!("malformed JSON was accepted: {other:?}"),
+        },
+        "Invalid Captains configuration"
+    );
+
+    // A title run is a background summary of the chat, not the chat: the role
+    // must not ride it.
+    request
+        .env
+        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), role.to_string());
+    let title = title_configuration(&request, dir.path(), "dsh-session-a").unwrap();
+    assert!(
+        title.get("captains").is_none(),
+        "a title run carried the chat's role: {title}"
+    );
+}

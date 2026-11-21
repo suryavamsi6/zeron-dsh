@@ -168,6 +168,12 @@ async function start(config) {
     for (const value of Object.values(mcp.env ?? {})) if (value) secrets.add(value);
     yaml += `- insert:\n    - id: zeron-mcp-${index}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config: !!js JSON.parse(process.env.${variable})\n`;
   }
+  // The host-stamped Captain role is the invocation layer's override row: it
+  // lands after the bundle's own `role: none` row and wins, with no fallback
+  // for an id cordis does not know — a rejection should surface.
+  if (typeof config.captains === 'object' && config.captains !== null) {
+    yaml += `- ${JSON.stringify({ id: 'zeron-captains', config: config.captains })}\n`;
+  }
   // The gateway's route registrations (the Providers page's writes) land in
   // the `web` profile; this run's is `sdk`, so a route configured there has
   // no adapter here ("no adapter registered for provider"). Carry the pi-ai
