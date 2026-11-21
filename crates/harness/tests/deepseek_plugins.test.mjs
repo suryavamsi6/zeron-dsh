@@ -83,3 +83,67 @@ test('a bundle installed in the sdk profile composes its layer and loads', { tim
   assert.match(loaded.stdout, /^hello-plugin$/m);
   assert.match(loaded.stdout, /^\[hello-plugin\] plugin loaded!$/m);
 });
+
+// SUR-98: the Captains bundle is zeron's own package under `plugins/`, so this
+// case installs the real directory (not a fixture copy of its shape) and the
+// composed profile has to carry its row with the inert default role.
+test('the captains bundle installs and composes on rc.3', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-bundle-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  // pnpm links the checkout it is given, so install a copy and leave the
+  // repository's plugins directory untouched.
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const profile = join(home, 'profiles', 'sdk');
+  const manifest = JSON.parse(await readFile(join(profile, 'package.json'), 'utf8'));
+  assert.ok(manifest.dependencies?.['zeron-dsh-captains'], `the profile records the dependency: ${JSON.stringify(manifest.dependencies)}`);
+  const bundles = manifest.dsh?.profile?.bundles ?? [];
+  assert.ok(bundles.includes('zeron-dsh-captains'), `dsh.profile.bundles lists the bundle: ${JSON.stringify(bundles)}`);
+  assert.equal(bundles.at(-1), 'zeron-dsh-captains', 'an installed bundle is appended after the template bundles');
+
+  // A Captain bundle loads in every DeepSeek chat, so its default row has to be
+  // inert: role none is what makes a plain chat behave like a plain chat.
+  const dumped = await run([dshBin, '--profile', 'sdk', '--dump-config'], { cwd: checkout, env, timeout: 120000 });
+  assert.equal(dumped.code, 0, `dsh --dump-config failed: ${report(dumped)}`);
+  assert.match(dumped.stdout, /^# == zeron-dsh-captains$/m, 'the composed tree names the captains bundle layer');
+  assert.match(dumped.stdout, /^- id: zeron-captains$/m);
+  assert.match(dumped.stdout, /^ {2}name: zeron-dsh-captains$/m);
+  assert.match(dumped.stdout, /^ {4}role: none$/m, 'the bundled row defaults to the inert role');
+
+  // The layer names a package, so the profile has to resolve it by name and its
+  // entry point has to apply without a real host context at the inert role.
+  const loaded = await run(['--input-type=module', '-e',
+    "const plugin = await import('zeron-dsh-captains'); console.log(plugin.name); plugin.apply({}, { role: 'none' }); console.log('no-op');"], { cwd: profile, env, timeout: 60000 });
+  assert.equal(loaded.code, 0, `the installed bundle does not load: ${report(loaded)}`);
+  assert.match(loaded.stdout, /^zeron-captains$/m);
+  assert.match(loaded.stdout, /^no-op$/m);
+});
+
+// The row config is the only thing that turns Captain behaviour on, so the
+// validation is the security boundary: an unknown role or a relative Drive root
+// must throw before any registration runs.
+test('zeron-captains validates its row config', async () => {
+  const module = await import(new URL('../../../plugins/dsh-captains/index.js', import.meta.url).href);
+  assert.equal(module.name, 'zeron-captains');
+  assert.equal(module.normalizeConfig({}).role, 'none');
+  assert.equal(module.normalizeConfig(undefined).role, 'none');
+  assert.throws(() => module.normalizeConfig({ role: 'boss' }), /unknown role/);
+  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: 'rel' }), /driveRoot/);
+  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c2', captainName: 'B', driveRoot: '/tmp/d' }), /captainId/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: '', driveRoot: '/tmp/d' }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c 2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' }), /chatId/);
+  const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
+  assert.equal(crew.captainId, 'c1');
+  assert.equal(crew.role, 'crew');
+});
