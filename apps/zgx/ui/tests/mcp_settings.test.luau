@@ -235,6 +235,14 @@ test("MCP servers shows the engine's words without the RPC envelope", function()
 	app:click(`{PAGE} >> role:button "Save"`)
 	app:frames(10)
 	expect(app:has(`{PAGE} >> "Could not save the MCP servers: disk full"`)).to_be(true)
+	-- `Closed` is a sentence of its own, not an envelope: `crates/rpc`'s
+	-- Display is `connection closed`, with no `prefix: ` in front of it, so
+	-- nothing may be mistaken for one and cut off it.
+	app:set_state("settings_stub_mcp_set", "connection closed")
+	fill_server(app, "notes", "npx", "", "")
+	app:click(`{PAGE} >> role:button "Save"`)
+	app:frames(10)
+	expect(app:has(`{PAGE} >> "connection closed"`)).to_be(true)
 end)
 
 -- The load path takes the same `say()`: a list that fails on a transport
