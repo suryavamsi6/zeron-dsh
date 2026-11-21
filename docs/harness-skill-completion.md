@@ -47,9 +47,13 @@ text retain their meaning.
 ## Discovery and delivery
 
 Discovery runs on the selected host in the project directory. The DeepSeek SDK
-driver has no native skill or command catalog: it reports none rather than
-inventing entries from files on disk. Zeron's workspace actions therefore remain
-the only completions the deepseek agent contributes. Mock (tests) reports the
+driver has no native command catalog of its own, and skills are not invented
+either: Zeron reads the same files dsh would load (`<root>/<name>/SKILL.md`, or
+a flat `<root>/<name>.md`, one level deep) from the project's `.dsh/skills`,
+then `.agents/skills`, then the harness home's `skills`, the first root winning
+a duplicate name (`crates/harness/src/deepseek/skills.rs`). A skill marked
+`user-invocable: false` is listed but not offered, and a provider-advertised
+slash command rides along when the driver has one. Mock (tests) reports the
 same empty catalog.
 
 Hosts advertise `composer-references-v1` for canonical reference delivery.
