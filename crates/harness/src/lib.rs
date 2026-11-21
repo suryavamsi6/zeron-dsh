@@ -1041,3 +1041,5 @@ mod stderr_tests {
         assert!(snapshot.ends_with("last stderr line"));
     }
 }
+
+// canary for the fast-tier admission rule (2026-11-21)
