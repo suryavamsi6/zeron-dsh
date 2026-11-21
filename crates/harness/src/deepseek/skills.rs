@@ -1,6 +1,8 @@
-//! The skills dsh loads from disk for a workspace (SUR-56).
+//! The workspace skills this scanner reads from disk (SUR-56).
 //!
-//! dsh's filesystem provider scans three roots in rank order and accepts a
+//! dsh's filesystem provider scans five default roots plus its bundled
+//! catalog; this scanner covers three of them in rank order — project
+//! `.dsh`, project `.agents`, and the harness home's `skills`. It accepts a
 //! skill as a `<root>/<name>/SKILL.md` bundle or a flat `<root>/<name>.md`,
 //! one level deep. Reading the same files here means the composer's `$` menu
 //! can offer them before a chat starts, with no runtime to ask.
@@ -13,7 +15,8 @@ use std::{
 
 use zeron_proto::invocation::Skill;
 
-/// The skills dsh would load for `cwd`, sorted by name, the first root
+/// The skills this scanner (SUR-56) reads for `cwd` — three of the roots
+/// dsh's provider scans, not all it loads — sorted by name, the first root
 /// winning a duplicate (project `.dsh`, project `.agents`, then the harness
 /// home's `skills`). An unreadable root or file is skipped, never fatal: one
 /// bad entry must not hide the rest of the menu.
@@ -79,12 +82,21 @@ fn scan(root: &Path, skip_system: bool) -> Vec<Skill> {
     files.iter().filter_map(|path| read_skill(path)).collect()
 }
 
-/// A skill file's frontmatter as the menu needs it; anything dsh would skip
-/// is skipped here too, so the composer never offers a skill a run would not
-/// load.
+/// A skill file's frontmatter as this parser reads it; it is not dsh's full
+/// reader, and an entry it cannot read is skipped rather than guessed.
 fn read_skill(path: &Path) -> Option<Skill> {
     let raw = fs::read_to_string(path).ok()?;
     let fields = frontmatter(&raw)?;
+    // dsh rejects these spellings outright rather than reading them, so a
+    // skill carrying one never loads there.
+    if fields.iter().any(|(key, _)| {
+        matches!(
+            key.as_str(),
+            "userInvocable" | "modelInvocable" | "disableModelInvocation"
+        )
+    }) {
+        return None;
+    }
     let name = field(&fields, "name")?;
     // dsh accepts only kebab-case names.
     let kebab = name.split('-').all(|part| {
@@ -107,10 +119,28 @@ fn read_skill(path: &Path) -> Option<Skill> {
     })
 }
 
+/// A frontmatter value with its YAML scalar kind kept, so `name` and
+/// `description` can be held to dsh's strings-only rule while a flag like
+/// `user-invocable` still reads any kind.
+enum Value {
+    /// Unquoted, with a trailing YAML comment already removed.
+    Plain(String),
+    Quoted(String),
+    Block(String),
+}
+
+impl Value {
+    fn text(&self) -> &str {
+        match self {
+            Value::Plain(text) | Value::Quoted(text) | Value::Block(text) => text,
+        }
+    }
+}
+
 /// The `key: value` frontmatter between the first two `---` lines. Quoted
 /// scalars are unwrapped and `|`/`>` block scalars are joined onto one line:
 /// a menu row shows a sentence, not a document.
-fn frontmatter(raw: &str) -> Option<Vec<(String, String)>> {
+fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
     let lines: Vec<&str> = raw.lines().collect();
     if lines.first().copied()? != "---" {
         return None;
@@ -130,7 +160,7 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, String)>> {
         };
         let value = value.trim();
         let Some(marker) = value.chars().next().filter(|c| matches!(c, '|' | '>')) else {
-            fields.push((key.trim().to_string(), unquote(value)));
+            fields.push((key.trim().to_string(), scalar(value)));
             continue;
         };
         // A block scalar's lines are the more-indented ones that follow; its
@@ -149,26 +179,145 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, String)>> {
         } else {
             parts.join("\n")
         };
-        fields.push((key.trim().to_string(), text.trim().to_string()));
+        fields.push((
+            key.trim().to_string(),
+            Value::Block(text.trim().to_string()),
+        ));
     }
     Some(fields)
 }
 
-fn field<'a>(fields: &'a [(String, String)], key: &str) -> Option<&'a str> {
+/// A single-line scalar: a value wrapped in matching quotes stays a string
+/// under the existing unquote rules, and a comment after the closing quote
+/// is dropped; anything else is plain.
+fn scalar(value: &str) -> Value {
+    if let Some(end) = quoted_end(value) {
+        let rest = value[end..].trim_start();
+        if rest.is_empty() || rest.starts_with('#') {
+            return Value::Quoted(unquote(&value[..end]));
+        }
+    }
+    Value::Plain(strip_comment(value))
+}
+
+/// The byte index just past an opening quote's matching close, or `None`
+/// when `value` does not open with a quote or the quote never closes. Inside
+/// `"…"` a backslash escapes the byte after it; inside `'…'` a doubled `''`
+/// is an escaped quote, not the close.
+fn quoted_end(value: &str) -> Option<usize> {
+    let quote = match value.as_bytes().first()? {
+        &quote @ (b'"' | b'\'') => quote,
+        _ => return None,
+    };
+    let bytes = value.as_bytes();
+    let mut index = 1;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\\' if quote == b'"' => index += 2,
+            byte if byte == quote => {
+                if quote == b'\'' && bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                } else {
+                    return Some(index + 1);
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// A plain scalar ends at the first `#` that starts the value or follows a
+/// space or tab; a `#` inside a word is text.
+fn strip_comment(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let cut = (0..bytes.len())
+        .find(|&i| bytes[i] == b'#' && (i == 0 || matches!(bytes[i - 1], b' ' | b'\t')));
+    match cut {
+        Some(i) => value[..i]
+            .trim_end_matches(|c| c == ' ' || c == '\t')
+            .to_string(),
+        None => value.to_string(),
+    }
+}
+
+fn field<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a str> {
     fields
         .iter()
         .find(|(field, _)| field == key)
-        .map(|(_, value)| value.as_str())
+        .and_then(|(_, value)| match value {
+            Value::Plain(text) if !plain_is_string(text) => None,
+            _ => Some(value.text()),
+        })
         .filter(|value| !value.is_empty())
+}
+
+/// Whether a plain scalar is a YAML string rather than a null, bool, or
+/// number — the kinds dsh's `stringField` check drops are not offered here.
+fn plain_is_string(text: &str) -> bool {
+    if text.is_empty()
+        || matches!(
+            text,
+            "~" | "null" | "Null" | "NULL" | "true" | "True" | "TRUE" | "false" | "False" | "FALSE"
+        )
+    {
+        return false;
+    }
+    !plain_is_number(text)
+}
+
+/// The YAML number spellings: unsigned `0x` hex and `0o` octal, and an
+/// optional sign then digits with an optional fraction or exponent, or the
+/// `.inf`/`.nan` spellings.
+fn plain_is_number(text: &str) -> bool {
+    if let Some(hex) = text.strip_prefix("0x") {
+        return !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+    }
+    if let Some(oct) = text.strip_prefix("0o") {
+        return !oct.is_empty() && oct.bytes().all(|b| matches!(b, b'0'..=b'7'));
+    }
+    let body = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    if body.eq_ignore_ascii_case(".inf") || body.eq_ignore_ascii_case(".nan") {
+        return true;
+    }
+    let (mantissa, exponent) = match body.find(|c| c == 'e' || c == 'E') {
+        Some(i) => (&body[..i], Some(&body[i + 1..])),
+        None => (body, None),
+    };
+    let mut digits = 0;
+    let mut dots = 0;
+    for byte in mantissa.bytes() {
+        match byte {
+            b'0'..=b'9' => digits += 1,
+            b'.' => dots += 1,
+            _ => return false,
+        }
+    }
+    if digits == 0 || dots > 1 {
+        return false;
+    }
+    match exponent {
+        None => true,
+        Some(exp) => {
+            let exp = exp
+                .strip_prefix('+')
+                .or_else(|| exp.strip_prefix('-'))
+                .unwrap_or(exp);
+            !exp.is_empty() && exp.bytes().all(|b| b.is_ascii_digit())
+        }
+    }
 }
 
 /// `user-invocable` in dsh's boolean grammar: omitted permits the surface,
 /// the spellings it accepts decide, and one it rejects drops the skill.
-fn invocation_flag(fields: &[(String, String)], key: &str) -> Option<bool> {
+fn invocation_flag(fields: &[(String, Value)], key: &str) -> Option<bool> {
     let Some(value) = fields
         .iter()
         .find(|(field, _)| field == key)
-        .map(|(_, value)| value.to_ascii_lowercase())
+        .map(|(_, value)| value.text().to_ascii_lowercase())
     else {
         return Some(true);
     };
@@ -389,5 +538,82 @@ mod tests {
             "---\nname: Review It\ndescription: Nope\n---\n",
         );
         assert!(discover(&root, &home).is_empty());
+    }
+
+    #[test]
+    fn a_legacy_camel_case_invocation_key_is_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // dsh rejects the camelCase spellings of the invocation fields rather
+        // than reading them, so a skill carrying one never loads there and
+        // must not be offered here.
+        write(
+            &home.join("skills/legacy/SKILL.md"),
+            "---\nname: legacy\ndescription: Legacy\nuserInvocable: false\n---\n",
+        );
+        write(
+            &home.join("skills/legacy-model/SKILL.md"),
+            "---\nname: legacy-model\ndescription: Legacy model\nmodelInvocable: true\n---\n",
+        );
+        write(
+            &home.join("skills/legacy-disable/SKILL.md"),
+            "---\nname: legacy-disable\ndescription: Legacy disable\ndisableModelInvocation: false\n---\n",
+        );
+        assert!(discover(&root, &home).is_empty());
+    }
+
+    #[test]
+    fn a_name_or_description_that_is_not_a_string_is_not_offered() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // YAML reads these as a number and a boolean; dsh requires strings and
+        // drops the skill, so it is not offered here either.
+        write(
+            &home.join("skills/number-name/SKILL.md"),
+            "---\nname: 123\ndescription: Numeric name\n---\n",
+        );
+        write(
+            &home.join("skills/boolean-description/SKILL.md"),
+            "---\nname: boolean-description\ndescription: true\n---\n",
+        );
+        assert!(discover(&root, &home).is_empty());
+    }
+
+    #[test]
+    fn an_inline_comment_is_not_shown_in_a_description() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // dsh's YAML parse ends a plain scalar at a `#` that follows a space;
+        // the menu shows the same sentence it would.
+        write(
+            &home.join("skills/commented/SKILL.md"),
+            "---\nname: commented\ndescription: Review the diff # keep in step with dsh\n---\n",
+        );
+        // A quoted `#` is text, not a comment.
+        write(
+            &home.join("skills/quoted/SKILL.md"),
+            "---\nname: quoted\ndescription: \"Review #1 first\"\n---\n",
+        );
+        // A comment after a quoted scalar is still a comment.
+        write(
+            &home.join("skills/quoted-commented/SKILL.md"),
+            "---\nname: quoted-commented\ndescription: \"Review #2 first\" # keep\n---\n",
+        );
+        let skills = discover(&root, &home);
+        assert_eq!(names(&skills), ["commented", "quoted", "quoted-commented"]);
+        let description = |name: &str| {
+            skills
+                .iter()
+                .find(|skill| skill.name == name)
+                .unwrap()
+                .description
+                .as_str()
+        };
+        assert_eq!(description("commented"), "Review the diff");
+        assert_eq!(description("quoted"), "Review #1 first");
+        assert_eq!(description("quoted-commented"), "Review #2 first");
     }
 }
