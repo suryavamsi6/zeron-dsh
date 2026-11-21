@@ -58,12 +58,13 @@ its `$` token is how it reaches a message. The DeepSeek SDK driver's own
 commands are a separate catalog: `commands()` in the same module advertises
 `/goal` and `/compact`. Mock (tests) reports none.
 
-The `composer-references-v1` capability is defined and advertised
-(`crates/proto/src/workspace.rs`, `crates/engine/src/lib.rs`), but nothing in
-Zeron consumes it yet. A pick always stores the canonical reference link
-(`apps/zgx/ui/screens/chat/invocations.luau`), and the engine decodes invocation
-links without a capability check (`crates/engine/src/sessions.rs`), so there is
-no host-specific fallback.
+A pick stores the canonical reference link
+(`apps/zgx/ui/screens/chat/invocations.luau`), and the engine decodes
+invocation links without a capability check
+(`crates/engine/src/sessions.rs`). The canonical link is the only shape, so
+there is no host-specific fallback and nothing to negotiate. A capability
+returns only together with the consumer that acts on it, when a second host
+or engine exists.
 
 Provider references:
 
