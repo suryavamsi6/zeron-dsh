@@ -31,6 +31,9 @@ jobs:
   # with different package sets each recompiled the shared dependency graph
   # (they used to be three jobs, ~20 min each, almost all of it compiling).
   tests:
+    permissions:
+      contents: read
+      actions: write
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022
     timeout-minutes: 60
@@ -67,7 +70,23 @@ jobs:
           key: ${{ inputs.pass-key }}-tests
 
   # Restores the cache `tests` saves: the same dependencies, built with the same profile.
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # The annotation goes first: the cancel takes this job down with it, so
+      # `::error` is the only place the failing job stays readable on the run
+      # page. `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
   app:
+    permissions:
+      contents: read
+      actions: write
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'app') }}
     runs-on: windows-2022
     timeout-minutes: 45
@@ -155,3 +174,16 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-app
+      # SUR-152: a red pull-request leg cancels the run, so the legs still
+      # running stop at once instead of finishing for a verdict already known.
+      # The annotation goes first: the cancel takes this job down with it, so
+      # `::error` is the only place the failing job stays readable on the run
+      # page. `|| true` keeps a failed cancel from masking this failure.
+      - name: Cancel the run's other legs (SUR-152)
+        if: failure() && github.event_name == 'pull_request'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true

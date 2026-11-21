@@ -123,6 +123,9 @@ jobs:
   linux-core:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).core
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/ui-tests.yml
     with:
       core: true
@@ -131,6 +134,9 @@ jobs:
   deepseek:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).deepseek
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/deepseek-compatibility.yml
     with:
       rust-tests: false
@@ -139,6 +145,9 @@ jobs:
   edge:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).edge
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/preview-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
@@ -146,6 +155,9 @@ jobs:
   installer:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).installer
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/linux-installer.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).installer || '' }}
@@ -153,6 +165,9 @@ jobs:
   voice:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).voice
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/voice-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).voice || '' }}
@@ -161,6 +176,9 @@ jobs:
   windows:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).windows
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/windows.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).windows || '' }}
@@ -169,6 +187,9 @@ jobs:
   ios:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).ios
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/macos.yml
     with:
       native: false
@@ -179,6 +200,9 @@ jobs:
   android:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).android
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/android.yml
     # Only what android.yml uses, and only on pushes to main, which publish: pull
     # requests and the merge queue (code not on main yet) sign with a debug key.
@@ -194,6 +218,9 @@ jobs:
   zgx:
     needs: [plan, admit]
     if: fromJSON(needs.plan.outputs.suites).zgx
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/zgx-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
