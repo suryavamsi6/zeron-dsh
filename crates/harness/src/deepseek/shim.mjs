@@ -85,7 +85,11 @@ async function start(config) {
   // The store is the authority once it is shared; a fenced run has only the
   // environment to read its key from.
   if (!shared && !process.env.DEEPSEEK_API_KEY?.trim()) throw new Error('Set DEEPSEEK_API_KEY before starting DeepSeek Harness');
-  if (config.reasoningEffort && !['low', 'high', 'max'].includes(config.reasoningEffort)) throw new Error('Unsupported DeepSeek reasoning effort');
+  // Every level the pinned DSH names, not only the official route's three: a
+  // gateway model's catalog says which it accepts (the picker offers that
+  // intersection), and DSH itself refuses one the model lacks. Refusing the
+  // rest here made a Mistral model's own default (`medium`) a run failure.
+  if (config.reasoningEffort && !['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].includes(config.reasoningEffort)) throw new Error('Unsupported DeepSeek reasoning effort');
   if (config.maxTokens !== undefined && (!Number.isSafeInteger(config.maxTokens) || config.maxTokens <= 0)) throw new Error('Invalid maxTokens');
   const require = createRequire(join(sdkRoot, 'package.json'));
   for (const name of ['dsh-sdk-client', 'dsh', 'dsh-sdk-protocol']) {

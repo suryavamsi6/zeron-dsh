@@ -224,23 +224,36 @@ local function key_row(item: any, remote: () -> boolean, creds: State<any>): Nod
 		save_err:set(nil)
 		note:set(nil)
 		host.call("DshSetCredential", { ref = ref, value = value }):after(function()
+			local function saved()
+				saving:set(false)
+				if key:peek() == value then
+					key:set("")
+				end
+				creds:set_key(ref, { configured = true })
+				note:set(ui.t("settings.providers.routes.key.saved"):get())
+			end
 			-- A stored key alone does nothing: pi-ai resolves the route's
 			-- `profile.apiKeyEnv` through the credential store, and falls back
 			-- to the environment variable when the profile names none
 			-- (`dsh-llm-pi-ai`: MISSING_CREDENTIAL). One leaf-addressed set
 			-- names it without touching the rest of the route's profile.
+			--
+			-- Awaited before "saved": until this write lands the route is not
+			-- configured, so a person who saved and picked straight away got a
+			-- model list without the route (the gateway and the run read the
+			-- settings store, not the field). A failed write is shown rather
+			-- than reported as success.
 			if item.settings_ns == "llm-pi-ai" then
 				host.call("DshMutateSettings", {
 					ns = item.settings_ns,
 					ops = { { op = "set", path = { "providers", item.id, "apiKeyEnv" }, value = ref } },
-				})
+				}):after(saved, function(err: any)
+					saving:set(false)
+					save_err:set(ui.t("settings.providers.routes.key.failed", { says = say(err) }):get())
+				end)
+			else
+				saved()
 			end
-			saving:set(false)
-			if key:peek() == value then
-				key:set("")
-			end
-			creds:set_key(ref, { configured = true })
-			note:set(ui.t("settings.providers.routes.key.saved"):get())
 		end, function(err: any)
 			saving:set(false)
 			save_err:set(ui.t("settings.providers.routes.key.failed", { says = say(err) }):get())
