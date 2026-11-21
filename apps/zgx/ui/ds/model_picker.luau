@@ -42,13 +42,16 @@ export type Option = { id: string, label: string, default: string, choices: { Ch
 export type Provider = { id: string, name: string }
 -- A model: its agent, its reasoning levels (low to high) and the one it
 -- starts on, whether it offers Fast mode, its other options, whether it's
--- its agent's default (what a chat that names no model runs), and its
--- provider.
+-- its agent's default (what a chat that names no model runs), its provider,
+-- and — when the engine could not ask the account and fell back to the
+-- shipped catalog — the sentence saying so, which the row shows instead of
+-- the provider.
 export type Model = {
 	value: string,
 	label: string,
 	harness: string,
 	provider: Provider?,
+	description: string?,
 	efforts: { EffortSlider.Level }?,
 	effort: string?,
 	fast: boolean?,
@@ -330,9 +333,13 @@ return ui.component(function(props: Props): Node
 	end)
 
 	-- The models as the dropdown's items, each in its agent's mark. A model
-	-- with a provider (Pi's, OpenCode's, Hermes's: agents that reach models
-	-- through providers) has its name as the row's hint, always: which GPT-6
-	-- Luna is which, and where one comes from even when it's the only one.
+	-- that carries a description came in from a list other than the
+	-- account's own — the shipped catalog, after a refused or missing key —
+	-- and that sentence is the row's hint, over its provider's name: the
+	-- person learns why this list. Else a model with a provider (Pi's,
+	-- OpenCode's, Hermes's: agents that reach models through providers) has
+	-- its name as the row's hint, always: which GPT-6 Luna is which, and
+	-- where one comes from even when it's the only one.
 	local items = ui.computed(function(): { Dropdown.Item }
 		local out: { Dropdown.Item } = {}
 		local by_agent = agents:get()
@@ -345,8 +352,12 @@ return ui.component(function(props: Props): Node
 				mark = if agent then agent.mark else nil,
 				svg = if agent then agent.icon else nil,
 				svg_seed = m.harness,
-				hint = if m.provider then m.provider.name else nil,
-				-- (Always: where a model comes from is part of which it is.)
+				-- (Always: where a model comes from — or why it is this list —
+				-- is part of which it is.)
+				hint = if m.description
+					then m.description
+					elseif m.provider then m.provider.name
+					else nil,
 				hint_when_found = nil,
 			})
 		end
