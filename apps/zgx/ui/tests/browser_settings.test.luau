@@ -41,11 +41,23 @@ local function settings(page: string?): any
 	return app
 end
 
+-- The start of `at`'s day, on this Mac's clock — as the screen derives it
+-- (`screens/settings/browser_history.luau`'s `day_of`), so the two boundary
+-- rows below land either side of midnight whatever the hour.
+local function day_start(at: number): number
+	local d = os.date("*t", at) :: any
+	d.hour, d.min, d.sec = 0, 0, 0
+	return os.time(d)
+end
+
 local function seed(app: any)
 	local now = os.time()
+	local today = day_start(now)
 	app:set_state("browser_history", {
 		[ADA] = {
-			{ url = "https://react.dev/learn", title = "Quick Start – React", at = now - 60, count = 2 },
+			-- (A minute back, but never before today: within a minute of
+			-- midnight that would be yesterday's, and no Today to draw.)
+			{ url = "https://react.dev/learn", title = "Quick Start – React", at = math.max(today, now - 60), count = 2 },
 			{ url = "https://zeron.sh/", title = "Zeron", at = now - 1800, count = 1 },
 			{ url = "https://example.com/", title = "Example Domain", at = now - 3 * 86400, count = 1 },
 		},
@@ -116,6 +128,34 @@ test("Browser settings: history lists, filters, and lets one page go in place", 
 	expect(node(app, PAGE, "Zeron")).to_be(zeron)
 	local kept = (app:state("browser_history") :: any)[ADA]
 	expect(#kept).to_be(2)
+end)
+
+test("Browser settings: history's days turn over at this Mac's midnight", function()
+	local app = settings("History")
+	local today = day_start(os.time())
+	app:set_state("browser_history", {
+		[ADA] = {
+			-- The first second of today: Today's, not Yesterday's.
+			{ url = "https://midnight.example/", title = "Midnight page", at = today, count = 1 },
+			-- The last second of yesterday: Yesterday's, not Today's.
+			{ url = "https://eleven.example/", title = "Last second", at = today - 1, count = 1 },
+		},
+	})
+	app:frames(20)
+	expect(app:wait(`{PAGE} >> "Midnight page"`, { timeout_ms = 5000 })).to_be(true)
+	-- (A day's name stands over its card, so the tree's order says which card
+	-- holds which page: Today's, then Yesterday's.)
+	local tree = app:tree(PAGE)
+	local function at(label: string): number
+		return tree:find(`"{label}"`, 1, true) or 0
+	end
+	local today_name, page_today = at("Today"), at("Midnight page")
+	local yesterday_name, page_yesterday = at("Yesterday"), at("Last second")
+	expect(today_name > 0 and yesterday_name > 0).to_be(true)
+	-- The first second of today is under Today, above Yesterday's name.
+	expect(today_name < page_today and page_today < yesterday_name).to_be(true)
+	-- The last second of yesterday is under Yesterday, not cut into today.
+	expect(yesterday_name < page_yesterday).to_be(true)
 end)
 
 test("Browser settings: Clear history clears the span chosen, then all of it", function()
