@@ -1,8 +1,9 @@
 //! The workspace skills this scanner reads from disk (SUR-56).
 //!
-//! dsh's filesystem provider scans five default roots plus its bundled
-//! catalog; this scanner covers three of them in rank order — project
-//! `.dsh`, project `.agents`, and the harness home's `skills`. It accepts a
+//! dsh's filesystem provider scans four default roots plus a configurable
+//! custom list (empty by default) and its bundled catalog; this scanner
+//! covers three of the roots in rank order — project `.dsh`, project
+//! `.agents`, and the harness home's `skills`. It accepts a
 //! skill as a `<root>/<name>/SKILL.md` bundle or a flat `<root>/<name>.md`,
 //! one level deep. Reading the same files here means the composer's `$` menu
 //! can offer them before a chat starts, with no runtime to ask.
@@ -137,9 +138,17 @@ impl Value {
     }
 }
 
-/// The `key: value` frontmatter between the first two `---` lines. Quoted
-/// scalars are unwrapped and `|`/`>` block scalars are joined onto one line:
-/// a menu row shows a sentence, not a document.
+/// The leading spaces/tabs on a frontmatter line. A key nested deeper than
+/// the root mapping is part of the key above it, not a top-level field.
+fn indent_of(line: &str) -> usize {
+    line.chars().take_while(|c| matches!(c, ' ' | '\t')).count()
+}
+
+/// The `key: value` frontmatter between the first two `---` lines. Only keys
+/// at the root mapping's own indent are fields; a more- or less-indented line
+/// belongs to the entry above it and is skipped. Quoted scalars are unwrapped
+/// and `|`/`>` block scalars are joined onto one line: a menu row shows a
+/// sentence, not a document.
 fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
     let lines: Vec<&str> = raw.lines().collect();
     if lines.first().copied()? != "---" {
@@ -148,11 +157,19 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
     let closing = lines.iter().skip(1).position(|line| *line == "---")? + 1;
     let mut fields = Vec::new();
     let mut index = 1;
+    // The root mapping's indent, from its first key: usually none, but a
+    // document may indent its whole root mapping.
+    let mut base: Option<usize> = None;
     while index < closing {
         let line = lines[index];
         index += 1;
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let indent = indent_of(line);
+        let base = *base.get_or_insert(indent);
+        if indent != base {
             continue;
         }
         let Some((key, value)) = trimmed.split_once(':') else {
@@ -168,7 +185,7 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         let mut parts = Vec::new();
         while index < closing {
             let next = lines[index];
-            if !next.trim().is_empty() && !next.starts_with(' ') && !next.starts_with('\t') {
+            if !next.trim().is_empty() && indent_of(next) <= base {
                 break;
             }
             index += 1;
@@ -615,5 +632,47 @@ mod tests {
         assert_eq!(description("commented"), "Review the diff");
         assert_eq!(description("quoted"), "Review #1 first");
         assert_eq!(description("quoted-commented"), "Review #2 first");
+    }
+
+    #[test]
+    fn a_nested_invocation_key_is_not_a_top_level_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // `metadata` is a nested mapping: its `userInvocable` is not the
+        // top-level field dsh rejects, so the skill stays.
+        write(
+            &home.join("skills/nested/SKILL.md"),
+            "---\nname: nested\ndescription: Nested\nmetadata:\n  userInvocable: false\n---\n",
+        );
+        assert_eq!(names(&discover(&root, &home)), ["nested"]);
+    }
+
+    #[test]
+    fn a_nested_name_is_not_the_top_level_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // The nested `name: 123` belongs to `metadata`; the top-level name is
+        // `foo`, so the skill is offered as foo (dsh reads the same).
+        write(
+            &home.join("skills/nested/SKILL.md"),
+            "---\nmetadata:\n  name: 123\nname: foo\ndescription: Foo\n---\n",
+        );
+        let skills = discover(&root, &home);
+        assert_eq!(names(&skills), ["foo"]);
+    }
+
+    #[test]
+    fn a_key_inside_a_block_scalar_is_not_a_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = project(dir.path());
+        let home = dir.path().join("home");
+        // A block scalar's content is text, not frontmatter keys.
+        write(
+            &home.join("skills/block/SKILL.md"),
+            "---\nname: block\ndescription: |\n  userInvocable: false\n---\n",
+        );
+        assert_eq!(names(&discover(&root, &home)), ["block"]);
     }
 }
