@@ -246,14 +246,14 @@ test('Helm bundle adds the role prompt to model input', { timeout: 300000 }, asy
 // config. This case drives the real sidecar and inspects the patch the SDK
 // loads, which is the only place the hand-off can be observed before the
 // plugin grows a prompt of its own.
-async function sidecar(context, sdkRoot, checkout, home, captains, sessionId) {
+async function sidecar(context, sdkRoot, checkout, home, captains, sessionId, options = {}) {
   const shim = resolve(context.here, '../src/deepseek/shim.mjs');
   const [policySource, environmentSource] = await Promise.all([
     readFile(resolve(context.here, '../src/deepseek/policy.mjs'), 'utf8'),
     readFile(resolve(context.here, '../src/deepseek/environment.mjs'), 'utf8'),
   ]);
   const child = spawn(process.execPath, [shim, sdkRoot], { cwd: checkout, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { ...context.env, DEEPSEEK_API_KEY: 'synthetic-not-live' } });
+    env: { ...context.env, DEEPSEEK_API_KEY: 'synthetic-not-live', ...(options.env ?? {}) } });
   let errors = '';
   child.stderr.on('data', chunk => { errors += chunk; });
   const lines = [];
@@ -270,7 +270,20 @@ async function sidecar(context, sdkRoot, checkout, home, captains, sessionId) {
         lines.push(line);
         let frame;
         try { frame = JSON.parse(line); } catch { continue; }
-        if (frame.type === 'ready' || frame.type === 'error') { clearTimeout(timer); resolveRun(frame); return; }
+        if (frame.type === 'error') { clearTimeout(timer); resolveRun(frame); return; }
+        if (frame.type === 'request') {
+          const result = frame.method === 'approval/request' ? { outcome: 'allowed-once' } : { answers: [] };
+          child.stdin.write(`${JSON.stringify({ type: 'answer', id: frame.id, result })}\n`);
+        }
+        if (frame.type === 'ready' && options.prompt === undefined) { clearTimeout(timer); resolveRun(frame); return; }
+        if (frame.type === 'ready') { child.stdin.write(`${JSON.stringify({ type: 'prompt', prompt: options.prompt })}\n`); }
+        if (frame.type === 'done') {
+          // A subagent runs beside the turn that started it: give the child its
+          // own model step before the sidecar is stopped.
+          clearTimeout(timer);
+          setTimeout(() => resolveRun(frame), 4000);
+          return;
+        }
       }
     });
     child.once('exit', code => { clearTimeout(timer); rejectRun(new Error(`the sidecar exited ${code}: ${errors}`)); });
@@ -334,4 +347,95 @@ test('the sidecar stamps the host role into the captains row', { timeout: 300000
   assert.match(block, /^ {2}config:$/m);
   assert.match(block, /^ {4}role: captain$/m, `the override did not win: ${block}`);
   assert.match(block, /^ {4}chatId: zeron-helm-a$/m, `the chat id did not reach the row: ${block}`);
+});
+
+// SUR-104 blocker 1: the row is process-wide, so a plugin that registers at
+// load time also reaches native child sessions. The captain row belongs to the
+// root session only; a subagent must see neither the prompt nor its markers.
+test('the captain row stays out of a native child session', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-child-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-child-bundle-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  // Scripted loopback: the root asks for a subagent, the child answers text,
+  // the root then answers text. The child is the request whose system prompt
+  // names the delegation.
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const input = JSON.parse(Buffer.concat(chunks).toString());
+    requests.push(input);
+    const text = typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
+    const child = text.includes('delegated by agent');
+    const followUp = JSON.stringify(input.messages ?? '').includes('tool_result');
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    event('message_start', { message: { id: 'msg-mock', type: 'message', role: 'assistant', model: input.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+    if (!child && !followUp) {
+      event('content_block_start', { index: 0, content_block: { type: 'tool_use', id: 'toolu_child', name: 'subagent', input: {} } });
+      event('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify({ description: 'child notes review', prompt: 'child task' }) } });
+      event('content_block_stop', { index: 0 });
+      event('message_delta', { delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } });
+    } else {
+      event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+      event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: child ? 'CHILD_OK' : 'PARENT_OK' } });
+      event('content_block_stop', { index: 0 });
+      event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+    }
+    event('message_stop', {});
+    response.end();
+  });
+  await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+  t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
+
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const result = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a', {
+    prompt: 'delegate this to a subagent',
+    env: { DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` },
+  });
+  assert.equal(result.frame.type, 'done', `the run did not finish: ${JSON.stringify(result.frame).slice(0, 300)}\n${result.lines.slice(-4).join('\n')}`);
+
+  const system = input => typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
+  const root = requests.find(input => system(input).includes('<captain name="Helm">'));
+  assert.ok(root, 'the root session never carried the captain prompt');
+  // A child session's first user turn is the delegated task, not the person's ask.
+  const child = requests.find(input => JSON.stringify((input.messages ?? [])[0] ?? '').includes('child task'));
+  assert.ok(child, 'the subagent never ran');
+  assert.doesNotMatch(system(child), /<captain|## Needs you/, 'a native child inherited the captain prompt');
+});
+
+// SUR-104 blocker 2: an override row for an id no bundle inserted is dropped by
+// cordis with only a warning, so a stamped role would run captainless. The
+// sidecar has to refuse before it starts.
+test('the sidecar refuses a captains row without the bundle', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-nobundle-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-nobundle-cwd-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const refused = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a');
+  assert.equal(refused.frame.type, 'error', `a captains row without the bundle started: ${refused.lines.join('\n')}`);
+  assert.match(refused.frame.message, /bundle|zeron-captains/i, `the refusal did not name the missing bundle: ${refused.frame.message}`);
+
+  // An ordinary chat in the same home still starts: only a stamped role needs
+  // the bundle, and the inert path must never pay for it.
+  const ordinary = await sidecar({ here, env }, sdkRoot, checkout, home, undefined, 'dsh-session-b');
+  assert.equal(ordinary.frame.type, 'ready', `an ordinary chat was refused: ${ordinary.lines.join('\n')}`);
 });

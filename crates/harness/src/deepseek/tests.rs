@@ -624,12 +624,16 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
     );
 
     // The host stamp is copied verbatim; the shim turns it into the row override.
+    // The drive root must be absolute on every platform the suite runs on: a
+    // hard-coded "/tmp/..." is not absolute on Windows, and the host rule is
+    // right to refuse it there.
+    let drive_root = std::env::temp_dir().join("drive").join("helm");
     let role = json!({
         "role": "captain",
         "chatId": "zeron-helm-a",
         "captainId": "zeron-helm-a",
         "captainName": "Helm",
-        "driveRoot": "/tmp/drive/helm",
+        "driveRoot": drive_root.to_string_lossy(),
     });
     request
         .env
