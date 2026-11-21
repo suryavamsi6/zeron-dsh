@@ -887,6 +887,10 @@ mod tests {
         assert_eq!(reopened(&store).1, 7);
     }
 
+    /// Written by the crash child after its first save, so the parent's kill
+    /// clock starts from saved state rather than from process spawn.
+    const CRASH_READY: &str = "child-saved-one";
+
     /// Child of [`a_kill_mid_save_loses_and_doubles_nothing`]: streams
     /// numbered ops into a doc, saving after each (deltas, and whole saves
     /// whenever a budget is reached), until it is killed.
@@ -895,6 +899,7 @@ mod tests {
         let Some(dir) = std::env::var_os("ZERON_DELTA_CRASH_DIR") else {
             return;
         };
+        let dir = std::path::PathBuf::from(dir);
         let store = Arc::new(DocsStore::open(&dir).unwrap());
         let doc = Arc::new(SessionDoc::init("crash").unwrap());
         // Offline (no runtime): every change saves at once.
@@ -904,6 +909,11 @@ mod tests {
             text.insert(text.len_unicode(), &format!("{op},")).unwrap();
             doc.doc().commit();
             persistence.applied(op, false);
+            if op == 1 {
+                // The parent waits for this instead of guessing how long a
+                // first save takes on a loaded runner.
+                std::fs::write(dir.join(CRASH_READY), b"1").unwrap();
+            }
         }
     }
 
@@ -922,6 +932,18 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .spawn()
                 .unwrap();
+            // Start the round's clock at the child's first save, not at spawn:
+            // a loaded runner can take longer than 40 ms to get there, and then
+            // the kill lands before anything is on disk.
+            let ready = dir.path().join(CRASH_READY);
+            let ready_by = std::time::Instant::now() + Duration::from_secs(30);
+            while !ready.exists() {
+                assert!(
+                    std::time::Instant::now() < ready_by,
+                    "round {round}: the child never saved its first op"
+                );
+                std::thread::sleep(Duration::from_millis(2));
+            }
             std::thread::sleep(Duration::from_millis(kill_after_ms));
             unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
             child.wait().unwrap();
@@ -1501,8 +1523,14 @@ mod tests {
         }
         assert!(persistence.compaction_due.load(Ordering::Acquire), "the fixture never passed the budget");
         assert_eq!(whole(), first, "a whole save landed while commits kept arriving");
-        // 2. A pause: folded in within the quiet window.
-        std::thread::sleep(QUIET_FOR_COMPACTION + Duration::from_millis(1_500));
+        // 2. A pause: folded in within the quiet window. Wait for the fold
+        // rather than betting that a fixed wall clock is enough on a loaded
+        // runner -- the assertion is that the fold happens, so observe the
+        // event; the bound only keeps a broken fold from hanging the suite.
+        let fold_by = std::time::Instant::now() + QUIET_FOR_COMPACTION + Duration::from_secs(15);
+        while whole() == first && std::time::Instant::now() < fold_by {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(whole(), first + 1, "the deltas weren't folded in when the chat went quiet");
         assert_eq!(store.snapshot_delta_stats("stream").unwrap(), (0, 0));
         // 3. Streaming far past the cap: it forces a whole save mid-stream.
