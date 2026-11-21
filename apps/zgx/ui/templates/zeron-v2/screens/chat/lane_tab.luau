@@ -370,7 +370,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		if not out.harness and type(m) == "string" then
 			out.harness = string.match(m, "^([^/]+)/")
 		end
-		if store.reports_plan(out.harness) == false then
+		if not store.supports_plan(out.harness) then
 			out.plan = false
 		end
 		return out

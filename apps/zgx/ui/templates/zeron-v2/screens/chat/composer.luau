@@ -563,9 +563,9 @@ local function Composer(): Node
 			if (req :: any).harness == nil then
 				return nil
 			end
-			-- An agent that reports it cannot plan takes no plan, even if one
-			-- was chosen before its catalog entry said so.
-			if store.reports_plan((req :: any).harness) == false then
+			-- An agent the catalog says cannot plan, or does not list at
+			-- all, takes no plan, even if one was chosen beforehand.
+			if not store.supports_plan((req :: any).harness) then
 				req.plan = false
 			end
 			(req :: any).cwd = p.cwd;
@@ -1145,7 +1145,7 @@ local function Composer(): Node
 				req.harness = m.harness
 			end
 		end
-		if store.reports_plan(req.harness) == false then
+		if not store.supports_plan(req.harness) then
 			req.plan = false
 		end
 		-- Nowhere it can start (a project no longer there): the line above
