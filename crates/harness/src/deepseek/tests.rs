@@ -190,12 +190,16 @@ async fn a_workspace_lists_the_skills_dsh_would_load_for_it() {
     let names: Vec<&str> = skills.iter().map(|skill| skill.name.as_str()).collect();
     assert_eq!(names, ["review", "tidy"]);
     assert_eq!(skills[0].description, "Review the pending diff");
+    // The expected path is joined, not concatenated, so its separators are
+    // native on every platform (SUR-157).
     assert_eq!(
-        skills[0].path,
+        std::path::Path::new(&skills[0].path),
         workspace
-            .join(".dsh/skills/review/SKILL.md")
-            .display()
-            .to_string()
+            .join(".dsh")
+            .join("skills")
+            .join("review")
+            .join("SKILL.md")
+            .as_path()
     );
     assert!(skills[0].enabled);
     assert!(
