@@ -2351,6 +2351,11 @@ fn model_value(harness: &str, m: &Json) -> Value {
             ));
         }
     }
+    // Why the list is what it is, when the host said: the picker's row hint
+    // (`Shipped catalog — 401` for a read that could not answer).
+    if let Some(description) = m["description"].as_str().filter(|d| !d.is_empty()) {
+        fields.push(("description", Value::from(description)));
+    }
     if !efforts.is_empty() {
         fields.push(("efforts", Value::List(efforts.into())));
     }
@@ -7742,6 +7747,88 @@ mod tests {
         let open = Open { id: "c".into(), ..Open::default() };
         let model = session_value(&chats, &open, false).field("model").map(text);
         assert_eq!(model.as_deref(), Some("deepseek/opencode/gpt-6-luna"));
+    }
+
+    /// A model the engine labeled with why its list is what it is keeps that
+    /// reason all the way to the picker row; one it did not has no
+    /// `description` at all — the field is the only thing carrying it.
+    #[test]
+    fn a_models_description_reaches_the_picker_and_a_plain_one_adds_nothing() {
+        let described = serde_json::json!({
+            "id": "mistral-medium-3",
+            "label": "Mistral Medium 3",
+            "provider": { "id": "openrouter", "name": "OpenRouter" },
+            "description": "Shipped catalog — 401",
+        });
+        let value = super::model_value("deepseek", &described);
+        assert_eq!(
+            value.field("description").map(|v| v.to_json()),
+            Some("\"Shipped catalog — 401\"".into()),
+            "the fallback's reason must reach the picker, not only the wire"
+        );
+        // The same model without the field: no key appears, and nothing else
+        // moved — the described record minus its description is it exactly.
+        let mut sans = described.clone();
+        sans.as_object_mut().unwrap().remove("description");
+        let plain = super::model_value("deepseek", &sans);
+        assert!(plain.field("description").is_none());
+        let stripped = value
+            .set_path(
+                &[zgx_script::PathKey::Key("description".into())],
+                Value::Nil,
+            )
+            .expect("a record's field");
+        assert_eq!(
+            stripped, plain,
+            "the description is all that sets them apart"
+        );
+    }
+
+    /// A model the runtime lists itself — DeepSeek's own, no route, no
+    /// reason — builds the record it always did: value, label, harness,
+    /// Fast, its efforts and where they start, and its default mark.
+    #[test]
+    fn a_deepseek_model_is_unchanged() {
+        let model = serde_json::json!({
+            "id": "deepseek-chat",
+            "label": "DeepSeek Chat",
+            "reasoningLevels": ["low", "high"],
+            "options": [
+                { "id": "speed", "label": "Speed", "defaultChoice": "standard",
+                  "choices": [{ "id": "standard", "label": "Standard" }, { "id": "fast", "label": "Fast" }] },
+            ],
+            "default": true,
+        });
+        let value = super::model_value("deepseek", &model);
+        assert!(value.field("description").is_none());
+        assert_eq!(
+            value,
+            Value::record([
+                ("value", Value::from("deepseek/deepseek-chat")),
+                ("label", Value::from("DeepSeek Chat")),
+                ("harness", Value::from("deepseek")),
+                ("fast", Value::Bool(true)),
+                (
+                    "efforts",
+                    Value::List(
+                        vec![
+                            Value::record([
+                                ("value", Value::from("low")),
+                                ("label", Value::from("Low")),
+                            ]),
+                            Value::record([
+                                ("value", Value::from("high")),
+                                ("label", Value::from("High")),
+                            ]),
+                        ]
+                        .into()
+                    ),
+                ),
+                ("effort", Value::from("high")),
+                ("default", Value::Bool(true)),
+            ]),
+            "no provider, no description: the record is the one it always built"
+        );
     }
 
     #[test]

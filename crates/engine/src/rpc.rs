@@ -1011,7 +1011,16 @@ impl EngineRpc {
                 }
             }
         }
-        crate::dsh_providers::route_models(gateway, &signed_in, &oauth_signed_in).await
+        crate::dsh_providers::route_models(
+            gateway,
+            &signed_in,
+            &oauth_signed_in,
+            &crate::dsh_providers::GatewayAccountModels::new(
+                gateway.clone(),
+                harness.home().to_path_buf(),
+            ),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)] // engine assembly seam, not a public API

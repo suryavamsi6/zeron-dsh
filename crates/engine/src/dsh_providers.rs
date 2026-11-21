@@ -24,6 +24,9 @@ pub struct GatewayProvider {
     /// The env-shaped credential ref (`apiKeyEnv`) an API-key route reads,
     /// e.g. `DEEPSEEK_API_KEY` or `OPENCODE_API_KEY`.
     pub api_key_env: Option<String>,
+    /// The endpoint the catalog answers for this route (`defaultBaseURL`),
+    /// used when the stored profile names no `baseURL` of its own.
+    pub default_base_url: Option<String>,
     /// Whether the route signs in through DSH's own account flow.
     pub account: bool,
     /// Whether the route is one someone declared by hand rather than one pi-ai
@@ -44,6 +47,275 @@ impl GatewayProvider {
     }
 }
 
+/// The models a provider's own API serves to a route's saved key.
+#[async_trait::async_trait]
+pub trait AccountModels: Send + Sync {
+    /// The account's models for a route, or why they could not be read
+    /// (no key stored, refused, unreachable, a body that is not a list).
+    async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String>;
+}
+
+/// An account read that never answers: every route falls back to the SDK's
+/// discovered catalog. For assemblies and tests without a credential store
+/// to read; the app's picker wires [`GatewayAccountModels`].
+pub struct NoAccountModels;
+
+#[async_trait::async_trait]
+impl AccountModels for NoAccountModels {
+    async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String> {
+        Err(format!("{}: the account model read is not wired", route.id))
+    }
+}
+
+/// Where a route's picker list came from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelSource {
+    /// The provider's own API answered for the route's saved key.
+    Account,
+    /// The route keeps discovery — it never reads an account (a native
+    /// route, the ChatGPT subscription, an oauth route with no stored ref) —
+    /// so its list is not a catalog fallback and carries no label.
+    Discovery,
+    /// The account read was attempted and did not answer (a refusal, a
+    /// transport failure, or an empty list).
+    CatalogFallback(String),
+}
+
+/// The models a configured route's picker shows: the account's own list when
+/// the provider's API answers for its key, the SDK's discovered catalog when
+/// the account read cannot answer. The catalog stands in with the refusal it
+/// answered for carried verbatim — an account that answers with nothing is a
+/// fallback too, never a silent `Account`.
+pub fn account_or_catalog(
+    account: Result<Vec<ModelChoice>, String>,
+    catalog: Vec<ModelChoice>,
+) -> (Vec<ModelChoice>, ModelSource) {
+    match account {
+        Ok(models) if !models.is_empty() => (models, ModelSource::Account),
+        Ok(_) => (catalog, ModelSource::CatalogFallback("empty".to_string())),
+        Err(reason) => (catalog, ModelSource::CatalogFallback(reason)),
+    }
+}
+
+/// The credential file the gateway writes every save into
+/// (`credentials` in the shim's `dsh web` profile, mode 0600).
+const CREDENTIALS_FILE: &str = ".credentials.yaml";
+
+/// A saved key, read back out of the gateway's credential store on every
+/// ask. The store's `refs:` block maps each env-shaped reference to its
+/// value; `records:` above it holds the store's own session material, none of
+/// which is a ref. `Option`, not `Result`: an unreadable file, a missing ref
+/// and an empty value are the same "no key" to the caller, and the value
+/// never travels inside an error string.
+pub fn stored_key(home: &std::path::Path, reference: &str) -> Option<String> {
+    let body = std::fs::read_to_string(home.join(CREDENTIALS_FILE)).ok()?;
+    let mut in_refs = false;
+    for line in body.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if in_refs {
+            if !line.starts_with([' ', '\t']) {
+                break;
+            }
+            if let Some((name, value)) = line.trim().split_once(':')
+                && name.trim() == reference
+            {
+                let value = value.trim().trim_matches(['"', '\'']);
+                return (!value.is_empty()).then(|| value.to_string());
+            }
+        } else {
+            in_refs = line.trim_end() == "refs:";
+        }
+    }
+    None
+}
+
+/// The models endpoint under a route's base URL. Catalog and declared
+/// endpoints already carry the API's version segment (`.../v1`, `.../v4`,
+/// `.../v1beta`), so only a bare host like `https://api.mistral.ai` takes the
+/// OpenAI `/v1` prefix; appending it twice would 404.
+fn models_url(base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    let versioned = base.rsplit('/').next().is_some_and(|segment| {
+        segment.len() > 1 && segment.starts_with('v') && segment[1..].chars().next().is_some_and(|c| c.is_ascii_digit())
+    });
+    if versioned {
+        format!("{base}/models")
+    } else {
+        format!("{base}/v1/models")
+    }
+}
+
+/// The HTTP client the account reads share: one build, the picker's ~10 s
+/// ceiling on every call.
+static ACCOUNT_HTTP: std::sync::LazyLock<reqwest::Client> = std::sync::LazyLock::new(|| {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_default()
+});
+
+/// The live account list. Nothing is cached in process memory: the key is
+/// read back out of `<home>/.credentials.yaml` and the endpoint out of the
+/// gateway's settings on every call, so a picker opened days after a save —
+/// a cold start — still sees the account's own models.
+pub struct GatewayAccountModels {
+    gateway: std::sync::Arc<zeron_harness::deepseek::gateway::Gateway>,
+    home: std::path::PathBuf,
+    /// The `settings/describe` answer, fetched once per picker pass: a
+    /// declared route's `providers.<route>.baseURL` override lives there.
+    settings: tokio::sync::OnceCell<Option<Value>>,
+}
+
+impl GatewayAccountModels {
+    pub fn new(
+        gateway: std::sync::Arc<zeron_harness::deepseek::gateway::Gateway>,
+        home: std::path::PathBuf,
+    ) -> Self {
+        Self {
+            gateway,
+            home,
+            settings: tokio::sync::OnceCell::new(),
+        }
+    }
+
+    async fn settings(&self) -> Option<&Value> {
+        self.settings
+            .get_or_init(|| async {
+                self.gateway.call("settings/describe", json!({})).await.ok()
+            })
+            .await
+            .as_ref()
+    }
+}
+
+#[async_trait::async_trait]
+impl AccountModels for GatewayAccountModels {
+    async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String> {
+        let key = route
+            .credential_ref()
+            .and_then(|reference| stored_key(&self.home, reference))
+            .ok_or_else(|| "no key".to_string())?;
+        // A declared route's profile baseURL wins; a catalog route answers
+        // on its `defaultBaseURL`.
+        let base = self
+            .settings()
+            .await
+            .and_then(|store| {
+                settings_namespaces(store)
+                    .into_iter()
+                    .find(|(ns, _)| *ns == PI_AI_NS)
+                    .and_then(|(_, value)| {
+                        value["providers"][route.id.as_str()]["baseURL"]
+                            .as_str()
+                            .map(str::to_string)
+                    })
+            })
+            .or_else(|| route.default_base_url.clone())
+            .ok_or_else(|| "no endpoint".to_string())?;
+        let response = ACCOUNT_HTTP
+            .get(models_url(&base))
+            .bearer_auth(key)
+            .send()
+            .await
+            .map_err(|_| "offline".to_string())?;
+        if !response.status().is_success() {
+            return Err(response.status().as_u16().to_string());
+        }
+        let body: Value = response
+            .json()
+            .await
+            .map_err(|_| "unreadable".to_string())?;
+        Ok(account_chat_models(&body))
+    }
+}
+
+/// The account's chat-capable models: id/label parsing is `parse_models`',
+/// then each row's `capabilities.completion_chat` flag decides — `false`
+/// drops. `true`, absent or a non-boolean value keeps the row, including
+/// rows the discovered catalog has never heard of: the flag drops what the
+/// provider marks non-chat and nothing else, because the picker must not
+/// narrow the account's list to the shipped catalog.
+fn account_chat_models(value: &Value) -> Vec<ModelChoice> {
+    let rows = value.as_array().or_else(|| {
+        ["models", "items", "data"]
+            .iter()
+            .find_map(|key| value[key].as_array())
+    });
+    let chat: std::collections::HashMap<&str, Option<bool>> = rows
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some((
+                row["id"].as_str()?,
+                row["capabilities"]["completion_chat"].as_bool(),
+            ))
+        })
+        .collect();
+    parse_models(value)
+        .into_iter()
+        .filter(|choice| !matches!(chat.get(choice.id.as_str()), Some(Some(false))))
+        .collect()
+}
+
+/// Whether a configured route's picker reads the account's own models — the
+/// provider's API answering for the route's saved key — rather than the
+/// discovered catalog.
+fn reads_the_account(route: &GatewayProvider, credential_ready: bool) -> bool {
+    route.settings_ns == PI_AI_NS
+        && credential_ready
+        && route.credential_ref().is_some()
+        // The ChatGPT subscription has no `nativeAuth.env` ref — the check
+        // above already excludes it — and must keep discovery; the explicit
+        // guard stays so no future shape of it takes the account path.
+        && !route.chatgpt
+}
+
+/// What one route's picker list is: its discovered catalog, or the account's
+/// own models with the catalog as a labelled fallback.
+fn route_choices(
+    route: &GatewayProvider,
+    credential_ready: bool,
+    account: Result<Vec<ModelChoice>, String>,
+    discovered: Vec<ModelChoice>,
+) -> (Vec<ModelChoice>, ModelSource) {
+    if reads_the_account(route, credential_ready) {
+        return account_or_catalog(account, discovered);
+    }
+    // The account read is not this route's to make — discovery is its
+    // picker list outright, not a fallback — so `account`, whatever the
+    // caller passes for a read that never happened, is set aside.
+    (discovered, ModelSource::Discovery)
+}
+
+/// The hint a source's rows carry: `None` for the account's own list and for
+/// a route that keeps discovery; `Shipped catalog — {reason}` only when the
+/// account read was attempted and did not answer.
+fn description_of(source: &ModelSource) -> Option<String> {
+    match source {
+        ModelSource::Account | ModelSource::Discovery => None,
+        ModelSource::CatalogFallback(reason) => Some(format!("Shipped catalog — {reason}")),
+    }
+}
+
+/// One route's rows, with the hint each carries: `None` for the account's own
+/// list and for a route that never read one; `Shipped catalog — {reason}` only
+/// when the account read was attempted and did not answer.
+pub(crate) fn route_rows(
+    route: &GatewayProvider,
+    credential_ready: bool,
+    account: Result<Vec<ModelChoice>, String>,
+    discovered: Vec<ModelChoice>,
+) -> Vec<(ModelChoice, Option<String>)> {
+    let (choices, source) = route_choices(route, credential_ready, account, discovered);
+    let description = description_of(&source);
+    choices
+        .into_iter()
+        .map(|choice| (choice, description.clone()))
+        .collect()
+}
+
 /// The models the gateway's configured routes offer, for the model picker.
 ///
 /// A route counts as configured when its `apiKeyEnv` reference is stored, or
@@ -54,6 +326,7 @@ pub async fn route_models(
     gateway: &zeron_harness::deepseek::gateway::Gateway,
     chatgpt_signed_in: &std::collections::HashSet<String>,
     oauth_signed_in: &std::collections::HashSet<String>,
+    account: &dyn AccountModels,
 ) -> Vec<zeron_proto::Model> {
     use zeron_proto::{Model, ModelProvider};
 
@@ -104,9 +377,10 @@ pub async fn route_models(
     let mut catalogs: std::collections::HashMap<String, std::collections::HashMap<String, Vec<ReasoningLevel>>> =
         std::collections::HashMap::new();
     for route in &routes {
-        let ready = route
+        let credential_ready = route
             .credential_ref()
-            .is_some_and(|key| describe.as_ref().is_some_and(|d| credential_configured(d, key)))
+            .is_some_and(|key| describe.as_ref().is_some_and(|d| credential_configured(d, key)));
+        let ready = credential_ready
             || (route.chatgpt && chatgpt_signed_in.contains(&route.id))
             || (route.oauth && oauth_signed_in.contains(&route.id));
         if !ready {
@@ -131,7 +405,7 @@ pub async fn route_models(
             }
             settings = gateway.call("settings/describe", json!({})).await.ok();
         }
-        let Ok(found) = gateway
+        let found = gateway
             .call(
                 "llm/discoverModels",
                 serde_json::json!({
@@ -140,23 +414,33 @@ pub async fn route_models(
                 }),
             )
             .await
-        else {
-            continue;
+            .unwrap_or(Value::Null);
+        let discovered = parse_models(&found);
+        // A pi-ai route answering on its own saved key lists the account's
+        // models; the discovered catalog stands in only when that read
+        // cannot, labeled with why it is the catalog. The stored credential
+        // ref gates the read, not the oauth flag: a route can carry both a
+        // browser sign-in and a saved apiKeyEnv, and the Mistral route is
+        // exactly that. DeepSeek and ChatGPT keep the discovered list.
+        let read = if reads_the_account(route, credential_ready) {
+            account.list(route).await
+        } else {
+            // The read is never made for a route that keeps discovery:
+            // `route_choices` reports `Discovery` and sets this aside.
+            Ok(Vec::new())
         };
-        let Some(list) = found.as_array() else { continue };
-        for entry in list {
-            let Some(id) = entry["id"].as_str() else { continue };
+        for (choice, description) in route_rows(route, credential_ready, read, discovered) {
             models.push(Model {
-                id: id.to_string(),
-                label: entry["name"].as_str().unwrap_or(id).to_string(),
-                description: None,
+                id: choice.id.clone(),
+                label: choice.label,
+                description,
                 provider: Some(ModelProvider {
                     id: route.id.clone(),
                     name: route.display_name.clone(),
                 }),
                 reasoning_levels: route_reasoning_levels(
                     route,
-                    id,
+                    &choice.id,
                     settings.as_ref(),
                     &catalog_dir,
                     &mut catalogs,
@@ -373,6 +657,9 @@ pub fn parse_provider_catalog(value: &Value) -> Vec<GatewayProvider> {
                 id,
                 settings_ns,
                 api_key_env,
+                default_base_url: entry["defaultBaseURL"]
+                    .as_str()
+                    .map(str::to_string),
                 account,
                 declared: entry["declared"].as_bool().unwrap_or(false),
                 chatgpt,
@@ -1442,6 +1729,7 @@ mod tests {
             display_name: id.to_string(),
             settings_ns: ns.to_string(),
             api_key_env: None,
+            default_base_url: None,
             account: false,
             declared: false,
             chatgpt: false,
@@ -1563,6 +1851,285 @@ mod tests {
             route_reasoning_levels(&deepseek, "deepseek-v4-pro", Some(&disabled), &dir, &mut catalogs)
                 .await
                 .is_empty()
+        );
+    }
+
+    /// The SDK discovery answer the account's list is measured against: the
+    /// installed catalog's 34 entries.
+    fn catalog_34() -> Vec<ModelChoice> {
+        (1..=34)
+            .map(|index| ModelChoice {
+                id: format!("catalog-model-{index}"),
+                label: format!("Catalog Model {index}"),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_configured_route_lists_the_accounts_models_not_the_catalog() {
+        let account = vec![
+            ModelChoice { id: "mistral-medium-3".into(), label: "Mistral Medium 3".into() },
+            ModelChoice { id: "zai-glm-5".into(), label: "ZAI GLM-5".into() },
+        ];
+        let (models, source) = account_or_catalog(Ok(account), catalog_34());
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["mistral-medium-3", "zai-glm-5"],
+            "the route's saved key serves the account's own models — this account's API \
+             answers 62, including these — not the installed catalog's 34"
+        );
+        assert_eq!(
+            source,
+            ModelSource::Account,
+            "an answered account read is the picker's list, not a fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_account_read_falls_back_to_the_catalog_with_its_reason() {
+        let catalog = catalog_34();
+        let (models, source) = account_or_catalog(Err("401".to_string()), catalog.clone());
+        assert_eq!(
+            models, catalog,
+            "the account's refusal leaves the SDK's discovered catalog in place"
+        );
+        assert_eq!(
+            source,
+            ModelSource::CatalogFallback("401".to_string()),
+            "the refusal is carried, not dropped: the picker can say why this is the catalog"
+        );
+    }
+
+    #[test]
+    fn a_route_that_can_oauth_still_reads_its_saved_key() {
+        // Mistral's catalog entry parses to a route carrying both a browser
+        // sign-in and a stored apiKeyEnv; the ChatGPT subscription's carries
+        // only the oauth shape — no env ref to read an account with.
+        let routes = parse_provider_catalog(&json!([
+            { "provider": "mistral", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "env": ["MISTRAL_API_KEY"], "oauth": true } },
+            { "provider": "openai", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "oauth": true } },
+        ]));
+        let mistral = &routes[0];
+        assert_eq!(mistral.credential_ref(), Some("MISTRAL_API_KEY"));
+        assert!(mistral.oauth && !mistral.chatgpt);
+        // The picker's own decision — the code path route_models takes, not
+        // a restated condition — reads the account for a route whose key is
+        // stored, browser sign-in or none.
+        let (models, source) = route_choices(
+            mistral,
+            true,
+            Ok(vec![ModelChoice { id: "mistral-medium-3".into(), label: "Mistral Medium 3".into() }]),
+            catalog_34(),
+        );
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["mistral-medium-3"],
+            "a browser sign-in layered on a saved key must not hide the account's models"
+        );
+        assert_eq!(source, ModelSource::Account);
+        // The ChatGPT subscription carries no ref and keeps discovery,
+        // whatever its credential flag reads.
+        let chatgpt = &routes[1];
+        assert!(chatgpt.chatgpt && chatgpt.credential_ref().is_none());
+        for credential_ready in [false, true] {
+            let (models, source) =
+                route_choices(chatgpt, credential_ready, Err("no key".to_string()), catalog_34());
+            assert_eq!(models, catalog_34());
+            assert_eq!(
+                source,
+                ModelSource::Discovery,
+                "a route with no saved ref keeps discovery — never the account, and no \
+                 fallback label"
+            );
+        }
+    }
+
+    /// DeepSeek's own route, the ChatGPT subscription and an oauth route
+    /// with no stored ref never read an account — discovery is their list
+    /// outright, nothing was attempted and nothing failed — so none of
+    /// their rows carry a hint, whatever `account` holds for the read that
+    /// never happened.
+    #[test]
+    fn a_route_that_never_reads_an_account_carries_no_label() {
+        let routes = parse_provider_catalog(&json!([
+            { "provider": "deepseek-official", "displayName": "DeepSeek", "settingsNs": "llm-deepseek" },
+            { "provider": "openai", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "oauth": true } },
+            { "provider": "mistral", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "env": ["MISTRAL_API_KEY"], "oauth": true } },
+        ]));
+        let deepseek = &routes[0];
+        assert!(!deepseek.chatgpt && deepseek.credential_ref().is_none());
+        let chatgpt = &routes[1];
+        assert!(chatgpt.chatgpt && chatgpt.credential_ref().is_none());
+        let mistral = &routes[2];
+        assert!(mistral.oauth && mistral.credential_ref() == Some("MISTRAL_API_KEY"));
+        // `credential_ready: false`: DeepSeek and ChatGPT carry no env ref
+        // at all, mistral's is not stored — the read was never attempted.
+        // A refusal, an empty answer, even models: whatever `account` holds
+        // for a route that never asked, it is set aside, not labelled.
+        let accounts: [Result<Vec<ModelChoice>, String>; 3] = [
+            Ok(Vec::new()),
+            Err("no key".to_string()),
+            Ok(vec![ModelChoice { id: "a".into(), label: "A".into() }]),
+        ];
+        for route in [deepseek, chatgpt, mistral] {
+            for account in accounts.clone() {
+                let rows = route_rows(route, false, account, catalog_34());
+                assert_eq!(
+                    rows.iter().map(|(choice, _)| choice.clone()).collect::<Vec<_>>(),
+                    catalog_34(),
+                    "{}: the discovered catalog is the route's list outright: {rows:?}",
+                    route.id,
+                );
+                assert!(
+                    rows.iter().all(|(_, hint)| hint.is_none()),
+                    "{}: a route that never read an account labels nothing: {rows:?}",
+                    route.id,
+                );
+            }
+        }
+    }
+
+    /// A route that reads its saved key and is refused — or is answered
+    /// with nothing — shows the discovered catalog labelled with why it is
+    /// not the account's list. The account's own answer labels nothing.
+    #[test]
+    fn a_refused_account_read_labels_the_catalog() {
+        let routes = parse_provider_catalog(&json!([
+            { "provider": "mistral", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "env": ["MISTRAL_API_KEY"], "oauth": true } },
+        ]));
+        let mistral = &routes[0];
+        let cases: [(Result<Vec<ModelChoice>, String>, &str); 2] = [
+            (Err("401".to_string()), "Shipped catalog — 401"),
+            (Ok(Vec::new()), "Shipped catalog — empty"),
+        ];
+        for (account, hint) in cases {
+            let rows = route_rows(mistral, true, account, catalog_34());
+            assert_eq!(rows.len(), 34);
+            assert!(
+                rows.iter().all(|(_, row)| row.as_deref() == Some(hint)),
+                "every catalog row carries the reason it is not the account's list: {rows:?}"
+            );
+        }
+        let account_models = vec![
+            ModelChoice { id: "mistral-medium-3".into(), label: "Mistral Medium 3".into() },
+            ModelChoice { id: "zai-glm-5".into(), label: "ZAI GLM-5".into() },
+        ];
+        let rows = route_rows(mistral, true, Ok(account_models.clone()), catalog_34());
+        assert_eq!(
+            rows,
+            account_models
+                .into_iter()
+                .map(|choice| (choice, None))
+                .collect::<Vec<(ModelChoice, Option<String>)>>(),
+            "the account's own list carries no hint"
+        );
+    }
+
+    /// A route that keeps discovery — DeepSeek's own, the ChatGPT
+    /// subscription, an oauth route with no saved ref — is not a catalog
+    /// fallback: its rows carry no "Shipped catalog" label.
+    #[test]
+    fn a_route_that_keeps_discovery_is_not_labelled_a_catalog_fallback() {
+        let routes = parse_provider_catalog(&json!([
+            { "provider": "deepseek", "settingsNs": "llm-deepseek" },
+            { "provider": "openai", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "oauth": true } },
+            { "provider": "mistral", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "oauth": true } },
+        ]));
+        let discovered = vec![
+            ModelChoice { id: "catalog-a".into(), label: "Catalog A".into() },
+            ModelChoice { id: "catalog-b".into(), label: "Catalog B".into() },
+        ];
+        for route in &routes {
+            let (models, source) =
+                route_choices(route, true, Err("not read".to_string()), discovered.clone());
+            assert_eq!(models, discovered, "{} keeps its discovery list", route.id);
+            if let ModelSource::CatalogFallback(reason) = source {
+                panic!(
+                    "{}: a route that keeps discovery was labelled a catalog fallback: {reason}",
+                    route.id
+                );
+            }
+        }
+    }
+
+    /// Only a catalog fallback carries a hint: the account's own list and a
+    /// route that keeps discovery say nothing extra.
+    #[test]
+    fn only_a_catalog_fallback_carries_a_label() {
+        assert_eq!(description_of(&ModelSource::Account), None);
+        assert_eq!(description_of(&ModelSource::Discovery), None);
+        assert_eq!(
+            description_of(&ModelSource::CatalogFallback("401".to_string())),
+            Some("Shipped catalog — 401".to_string())
+        );
+    }
+
+    /// The picker is a chat picker: `capabilities.completion_chat` decides.
+    /// Only an explicit `false` drops a row — an unflagged row, or one whose
+    /// flag is not a boolean, is the account's until the payload says
+    /// otherwise, whether or not the discovered catalog names its id.
+    #[test]
+    fn a_non_chat_account_model_is_not_offered() {
+        let payload = json!({ "data": [
+            { "id": "chat-model", "capabilities": { "completion_chat": true } },
+            { "id": "embed-model", "capabilities": { "completion_chat": false } },
+            { "id": "unflagged-known" },
+            { "id": "unflagged-stray" },
+            { "id": "flagged-nonbool", "capabilities": { "completion_chat": "yes" } },
+        ] });
+        let models = account_chat_models(&payload);
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["chat-model", "unflagged-known", "unflagged-stray", "flagged-nonbool"],
+            "an unflagged row is the account's until the payload says otherwise",
+        );
+    }
+
+    #[tokio::test]
+    async fn a_saved_credential_is_read_back_on_a_cold_start() {
+        let home = tempfile::tempdir().expect("a temp home");
+        let marker = "cold-start-marker-9f4b2e";
+        std::fs::write(
+            home.path().join(".credentials.yaml"),
+            format!(
+                "version: 1\n\
+                 records:\n  client-connection/browser-session:\n    kind: mention\n    payload:\n      version: 1\n      secret: not-{marker}\n\
+                 refs:\n  MARKER_ACCOUNT_API_KEY: {marker}\n  QUOTED_KEY: \"quoted-{marker}\"\n  EMPTY_KEY:\n"
+            ),
+        )
+        .expect("the credential store the gateway leaves behind");
+        // The reader is the cold-start path: no process holds the key, the
+        // file is all there is.
+        assert_eq!(
+            stored_key(home.path(), "MARKER_ACCOUNT_API_KEY").as_deref(),
+            Some(marker),
+            "a ref saved under refs: reads back verbatim"
+        );
+        assert_eq!(
+            stored_key(home.path(), "QUOTED_KEY").as_deref(),
+            Some(format!("quoted-{marker}").as_str()),
+            "a quoted scalar reads back unquoted"
+        );
+        assert_eq!(stored_key(home.path(), "EMPTY_KEY"), None, "an empty value is no key");
+        // Nothing outside refs: is a ref, whatever it is called.
+        assert_eq!(stored_key(home.path(), "secret"), None);
+        assert_eq!(stored_key(home.path(), "client-connection/browser-session"), None);
+        // A miss and a missing file are both a plain None, so no error
+        // string exists for the marker to ride out in.
+        let miss = stored_key(home.path(), "ABSENT_API_KEY");
+        assert_eq!(miss, None);
+        assert!(!format!("{miss:?}").contains(marker));
+        assert_eq!(
+            stored_key(&home.path().join("never-written"), "MARKER_ACCOUNT_API_KEY"),
+            None,
+            "a cold start with no store file is no key, not an error"
         );
     }
 }
