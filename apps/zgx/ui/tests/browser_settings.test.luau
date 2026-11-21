@@ -45,7 +45,7 @@ end
 -- (`screens/settings/browser_history.luau`'s `day_of`), so the two boundary
 -- rows below land either side of midnight whatever the hour.
 local function day_start(at: number): number
-	local d = os.date("*t", at) :: any
+	local d = os.date("*t", math.floor(at)) :: any
 	d.hour, d.min, d.sec = 0, 0, 0
 	return os.time(d)
 end
@@ -143,6 +143,9 @@ test("Browser settings: history's days turn over at this Mac's midnight", functi
 	})
 	app:frames(20)
 	expect(app:wait(`{PAGE} >> "Midnight page"`, { timeout_ms = 5000 })).to_be(true)
+	-- (The second day's card is painted after the first: wait for its row too,
+	-- or the reads below race the paint.)
+	expect(app:wait(`{PAGE} >> "Last second"`, { timeout_ms = 5000 })).to_be(true)
 	-- (A day's name stands over its card, so the tree's order says which card
 	-- holds which page: Today's, then Yesterday's.)
 	local tree = app:tree(PAGE)
