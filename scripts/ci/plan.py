@@ -63,7 +63,7 @@ SUITE_JOBS: dict[str, list[tuple[str, str]]] = {
     "windows": [("tests", "windows"), ("app", "windows")],  # windows.yml
     "ios": [("ios-core", "linux"), ("ios-tests", "macos")],  # macos.yml (+ android publish below)
     "android": [("apk", "linux")],  # android.yml (+ publish on main, added below)
-    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux")],  # zgx-tests.yml
+    "zgx": [("zgx-macos", "macos"), ("zgx-linux", "linux"), ("zgx-linux-ui", "linux")],  # zgx-tests.yml
 }
 # Run only nightly, manually or with `ci:full` (see the module docstring): voice
 # (the AEC3 audio stack and the packaged Windows media runtime; no failures of
