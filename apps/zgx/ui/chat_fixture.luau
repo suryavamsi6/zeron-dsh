@@ -22,7 +22,7 @@ local EFFORT = {
 	{ value = "high", label = "High" },
 }
 -- The one runtime this build runs, as the host lists it.
-local HARNESS = { id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" }
+local HARNESS = { id = "deepseek", label = "DeepSeek", mark = "provider-deepseek", supportsPlan = true }
 store.catalog:set {
 	state = "ready",
 	harnesses = { HARNESS },
@@ -59,7 +59,7 @@ local TRANSCRIPTS: { [string]: { any } } = {
 }
 local META: { [string]: any } = {
 	s1 = { title = "Long chat", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false },
-	s2 = { title = "Short chat", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "edits", plan = false },
+	s2 = { title = "Short chat", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "edits", plan = false, agent = "deepseek" },
 	-- A chat saved on a gateway model, before its route rode with it.
 	s3 = { title = "Gateway chat", project = "atlas", model = "deepseek/gpt-6-luna", effort = "high", access = "full", plan = false },
 }

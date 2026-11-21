@@ -88,7 +88,7 @@ end }
 store.catalog:set({
 	state = "ready",
 	harnesses = {
-		{ id = "deepseek", label = "DeepSeek", mark = "provider-deepseek" },
+		{ id = "deepseek", label = "DeepSeek", mark = "provider-deepseek", supportsPlan = true },
 	},
 	models = {
 		{ value = "deepseek/deepseek-v4-pro", label = "DeepSeek V4 Pro", harness = "deepseek" },

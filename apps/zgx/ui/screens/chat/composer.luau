@@ -583,6 +583,11 @@ local function Composer(): Node
 			if (req :: any).harness == nil then
 				return nil
 			end
+			-- An agent the catalog says cannot plan, or does not list at
+			-- all, takes no plan, even if one was chosen beforehand.
+			if not store.supports_plan((req :: any).harness) then
+				req.plan = false
+			end
 			(req :: any).cwd = p.cwd;
 			(req :: any).device = p.device
 			return req
@@ -873,6 +878,18 @@ local function Composer(): Node
 	local function agent(): string?
 		return Completions.agent_of(model:get(), if session_id:get() then open() else nil)
 	end
+	-- Whether the chat's agent reports plan mode: only then is the toggle
+	-- drawn (a harness that cannot enter plan mode must not offer it).
+	local function plan_supported(): boolean
+		return store.supports_plan(agent())
+	end
+	-- A stale "on" cannot outlive that report: when the catalog says the
+	-- agent cannot plan, the stored choice goes too, so a send carries none.
+	ui.effect(function()
+		if plan:peek() and store.reports_plan(agent()) == false then
+			plan:set(false)
+		end
+	end)
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands
 	-- (Zeron's composer.rs `completion_trigger`).
@@ -1158,6 +1175,9 @@ local function Composer(): Node
 				req.harness = m.harness
 			end
 		end
+		if not store.supports_plan(req.harness) then
+			req.plan = false
+		end
 		-- Nowhere it can start (a project no longer there): the line above
 		-- says why, and the draft stays.
 		if where.blocked:peek() then
@@ -1412,6 +1432,7 @@ local function Composer(): Node
 				return store.offers_auto(model:get())
 			end,
 			plan = plan,
+			plan_supported = plan_supported,
 			model = model,
 			effort = effort,
 			fast = fast,
