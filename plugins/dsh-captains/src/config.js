@@ -20,7 +20,7 @@ export function normalizeConfig(raw) {
   if (typeof captainId !== 'string' || !idPattern.test(captainId)) {
     throw new Error('zeron-captains: captainId must be 1-128 characters of [A-Za-z0-9_-]');
   }
-  if (typeof captainName !== 'string' || captainName.length < 1 || captainName.length > 80) {
+  if (typeof captainName !== 'string' || captainName.length < 1 || captainName.length > 80 || /[\r\n]/.test(captainName)) {
     throw new Error('zeron-captains: captainName must be a string of 1-80 characters');
   }
   if (typeof driveRoot !== 'string' || !isAbsolute(driveRoot)) {
