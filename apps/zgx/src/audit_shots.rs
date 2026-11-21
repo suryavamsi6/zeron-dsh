@@ -15,7 +15,9 @@
 //! a node's box) and `!<command>` / `=<state>:<json>` / `^<target>` (a click) /
 //! `&<target>@<text>` (a field filled) / `+<ms>` (a wait)
 //! steps, joined by `|`:
-//! `gallery:composer|#gallery-demo@1240x820`. `AUDIT_SCALE` (2) is the
+//! `gallery:composer|#gallery-demo@1240x820`. Steps are apart at `|`
+//! outside `"…"`, so a target or typed text may hold one, and a part no
+//! prefix claims is an error. `AUDIT_SCALE` (2) is the
 //! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
 //! What's transparent (the window's glass) is laid on `AUDIT_BACKDROP`
 //! (`#e9e9ee` light, `#1d1d22` dark), the same under both. `AUDIT_WAIT_MS`
@@ -85,8 +87,28 @@ fn ui_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui")
 }
 
+/// Splits `text` at `separator` outside `"…"`, so a target or a typed
+/// value can hold one.
+fn split_outside_quotes(text: &str, separator: char) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                current.push(c);
+            }
+            _ if c == separator && !quoted => parts.push(std::mem::take(&mut current)),
+            _ => current.push(c),
+        }
+    }
+    parts.push(current);
+    parts
+}
+
 fn parse(spec: &str, dark: bool) -> Shot {
-    let mut parts = spec.split('|');
+    let mut parts = split_outside_quotes(spec, '|').into_iter();
     let head = parts.next().unwrap_or_default();
     let (head, size, explicit_size) = match head.split_once('@') {
         Some((h, s)) => {
@@ -97,7 +119,7 @@ fn parse(spec: &str, dark: bool) -> Shot {
                 true,
             )
         }
-        None => (head, (1240., 820.), false),
+        None => (head.as_str(), (1240., 820.), false),
     };
     let mut steps = Vec::new();
     let mut crop = None;
@@ -141,6 +163,8 @@ fn parse(spec: &str, dark: bool) -> Shot {
             steps.push(Step::Wait(ms.parse().expect("+<milliseconds>")));
         } else if let Some(label) = part.strip_prefix('~') {
             name = format!("{name}-{label}");
+        } else {
+            panic!("part `{part}` in spec `{spec}` matches no step prefix");
         }
     }
     Shot {
@@ -503,20 +527,7 @@ fn audit_shots() {
     let shots = std::env::var("AUDIT_SHOTS").expect("AUDIT_SHOTS: the shots, comma-separated");
     let mut failed = Vec::new();
     // (Shots apart at commas outside quotes: a target may hold one.)
-    let mut specs: Vec<String> = Vec::new();
-    let mut current = String::new();
-    let mut quoted = false;
-    for c in shots.chars() {
-        match c {
-            '"' => {
-                quoted = !quoted;
-                current.push(c);
-            }
-            ',' if !quoted => specs.push(std::mem::take(&mut current)),
-            _ => current.push(c),
-        }
-    }
-    specs.push(current);
+    let specs = split_outside_quotes(&shots, ',');
     for spec in specs.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
         let shot = parse(spec, dark);
         match take(&shot, &out, scale, dark) {
@@ -528,4 +539,50 @@ fn audit_shots() {
         }
     }
     assert!(failed.is_empty(), "{failed:#?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Steps are apart at `|`, but a `|` inside the text a step types is
+    // text: this shell command must be typed whole, not cut at the pipe.
+    #[test]
+    fn a_pipe_inside_quoted_type_text_is_typed_whole() {
+        let spec = "mcp_live|&role:textbox \"Command\"@sh -c \"a|b\"|^role:button \"Save\"";
+        let shot = parse(spec, true);
+        let typed: Vec<(&str, &str)> = shot
+            .steps
+            .iter()
+            .filter_map(|step| match step {
+                Step::Type(target, text) => Some((target.as_str(), text.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(typed, [("role:textbox \"Command\"", "sh -c \"a|b\"")]);
+        assert!(
+            shot.steps.iter().any(
+                |step| matches!(step, Step::Click(target) if target == "role:button \"Save\"")
+            ),
+            "the step after the quoted text is still a step"
+        );
+    }
+
+    // A part no prefix claims must stop the run and say which part and
+    // which spec, rather than vanishing from the shot.
+    #[test]
+    fn an_unmatched_part_fails_naming_the_part_and_the_spec() {
+        let spec = "mcp_live|%not-a-step";
+        let payload = match std::panic::catch_unwind(|| parse(spec, true)) {
+            Ok(_) => panic!("an unmatched part must fail, not vanish"),
+            Err(payload) => payload,
+        };
+        let message = payload
+            .downcast_ref::<String>()
+            .cloned()
+            .or_else(|| payload.downcast_ref::<&str>().map(|s| s.to_string()))
+            .unwrap_or_default();
+        assert!(message.contains("%not-a-step"), "names the part: {message}");
+        assert!(message.contains(spec), "names the spec: {message}");
+    }
 }
