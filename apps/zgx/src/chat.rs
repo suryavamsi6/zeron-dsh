@@ -6683,6 +6683,9 @@ fn ask_value(part: &Json, answered: usize) -> Option<Value> {
     if let Some(h) = q["header"].as_str().filter(|h| !h.is_empty()) {
         question.push(("header", Value::from(h)));
     }
+    if let Some(d) = q["detail"].as_str().filter(|d| !d.is_empty()) {
+        question.push(("detail", Value::from(d)));
+    }
     Some(Value::record([
         ("request", Value::from(request)),
         ("kind", Value::from("question")),
@@ -8178,6 +8181,79 @@ mod tests {
         assert_eq!(open.answers.len(), 1, "the page before stays answered");
         assert_eq!(open.back_a_page("c", "q"), Some(vec!["fix".to_owned()]));
         assert_eq!(open.back_a_page("c", "q"), None, "on the first page");
+    }
+
+    /// A plan review's body reaches the record: the SDK carries the plan in
+    /// the question's `detail`, and the card can only draw it if `ask_value`
+    /// keeps it (SUR-166).
+    #[test]
+    fn a_question_carries_a_plans_detail_when_the_sdk_sends_one() {
+        use super::{Value, ask_value};
+        use serde_json::json;
+        let part = json!({
+            "requestId": "q1",
+            "questions": [{
+                "question": "Approve this plan?",
+                "header": "Plan review",
+                "options": ["Approve", "Reject"],
+                "detail": "# Plan\n\n1. Do the thing",
+            }],
+        });
+        let ask = ask_value(&part, 0).expect("a question");
+        assert_eq!(ask.field("kind"), Some(&Value::from("question")));
+        let question = ask.field("question").expect("the question record");
+        assert_eq!(
+            question.field("detail"),
+            Some(&Value::from("# Plan\n\n1. Do the thing")),
+            "the plan's body must reach the card, not only the question"
+        );
+    }
+
+    /// A question with no body — absent, or present but empty — has no
+    /// `detail` key at all, and the record keeps exactly the fields it had
+    /// before (SUR-166). The map is sorted by key, so "the same keys in the
+    /// same order" is the same record, not a coincidence of insertion.
+    #[test]
+    fn a_question_without_detail_keeps_its_fields_unchanged() {
+        use super::{Value, ask_value};
+        use serde_json::json;
+        let expected = Value::record([
+            ("text", Value::from("Which branch?")),
+            (
+                "options",
+                Value::List(
+                    vec![
+                        Value::record([
+                            ("value", Value::from("main")),
+                            ("label", Value::from("main")),
+                        ]),
+                        Value::record([
+                            ("value", Value::from("dev")),
+                            ("label", Value::from("dev")),
+                        ]),
+                    ]
+                    .into(),
+                ),
+            ),
+            ("multi", Value::Bool(false)),
+            ("page", Value::Num(1.)),
+            ("pages", Value::Num(1.)),
+        ]);
+        for detail in [None, Some("")] {
+            let mut q = json!({
+                "question": "Which branch?",
+                "options": ["main", "dev"],
+                "multiSelect": false,
+            });
+            if let Some(detail) = detail {
+                q["detail"] = json!(detail);
+            }
+            let part = json!({ "requestId": "q1", "questions": [q] });
+            let ask = ask_value(&part, 0).expect("a question");
+            let question = ask.field("question").expect("the question record");
+            assert_eq!(question.field("detail"), None, "detail {detail:?}");
+            assert_eq!(question, &expected, "detail {detail:?}");
+        }
     }
 
     #[test]
