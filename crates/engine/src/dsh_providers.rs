@@ -241,6 +241,28 @@ fn reads_the_account(route: &GatewayProvider, credential_ready: bool) -> bool {
         && !route.chatgpt
 }
 
+/// What one route's picker list is: its discovered catalog, or the account's
+/// own models with the catalog as a labelled fallback.
+fn route_choices(
+    route: &GatewayProvider,
+    credential_ready: bool,
+    account: Result<Vec<ModelChoice>, String>,
+    discovered: Vec<ModelChoice>,
+) -> (Vec<ModelChoice>, ModelSource) {
+    if reads_the_account(route, credential_ready) {
+        return account_or_catalog(account, discovered);
+    }
+    // The account read is not this route's to make — discovery is its
+    // picker list outright — so `account`, whatever the caller found or
+    // never fetched, is set aside. Its refusal, or the route's own reason
+    // for keeping discovery, is why the catalog stands.
+    let reason = match account {
+        Err(reason) => reason,
+        Ok(_) => "the route reads discovery".to_string(),
+    };
+    (discovered, ModelSource::CatalogFallback(reason))
+}
+
 /// The models the gateway's configured routes offer, for the model picker.
 ///
 /// A route counts as configured when its `apiKeyEnv` reference is stored, or
@@ -347,17 +369,19 @@ pub async fn route_models(
         // ref gates the read, not the oauth flag: a route can carry both a
         // browser sign-in and a saved apiKeyEnv, and the Mistral route is
         // exactly that. DeepSeek and ChatGPT keep the discovered list.
-        let (choices, description) = if reads_the_account(route, credential_ready) {
-            let (choices, source) = account_or_catalog(account.list(route).await, discovered);
-            let description = match source {
-                ModelSource::Account => None,
-                ModelSource::CatalogFallback(reason) => {
-                    Some(format!("Shipped catalog — {reason}"))
-                }
-            };
-            (choices, description)
+        let read = if reads_the_account(route, credential_ready) {
+            account.list(route).await
         } else {
-            (discovered, None)
+            // Never fetched for a route that keeps discovery: the refusal
+            // it would report is the catalog's own reason for standing.
+            Err("the route reads discovery".to_string())
+        };
+        let (choices, source) = route_choices(route, credential_ready, read, discovered);
+        let description = match source {
+            ModelSource::Account => None,
+            ModelSource::CatalogFallback(reason) => {
+                Some(format!("Shipped catalog — {reason}"))
+            }
         };
         for choice in choices {
             models.push(Model {
@@ -1830,32 +1854,48 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn a_route_that_can_oauth_still_reads_its_saved_key() {
+    #[test]
+    fn a_route_that_can_oauth_still_reads_its_saved_key() {
         // Mistral's catalog entry parses to a route carrying both a browser
-        // sign-in and a stored apiKeyEnv.
-        let catalog = parse_provider_catalog(&json!([
+        // sign-in and a stored apiKeyEnv; the ChatGPT subscription's carries
+        // only the oauth shape — no env ref to read an account with.
+        let routes = parse_provider_catalog(&json!([
             { "provider": "mistral", "settingsNs": "llm-pi-ai",
-              "nativeAuth": { "env": ["MISTRAL_API_KEY"], "oauth": true },
-              "defaultBaseURL": "https://api.mistral.ai" },
-            { "provider": "openai", "settingsNs": "llm-pi-ai", "auth": "chatgpt" },
+              "nativeAuth": { "env": ["MISTRAL_API_KEY"], "oauth": true } },
+            { "provider": "openai", "settingsNs": "llm-pi-ai",
+              "nativeAuth": { "oauth": true } },
         ]));
-        let mistral = &catalog[0];
+        let mistral = &routes[0];
         assert_eq!(mistral.credential_ref(), Some("MISTRAL_API_KEY"));
         assert!(mistral.oauth && !mistral.chatgpt);
-        let describe = json!({ "MISTRAL_API_KEY": { "configured": true } });
-        let credential_ready = mistral
-            .credential_ref()
-            .is_some_and(|key| credential_configured(&describe, key));
-        assert!(credential_ready);
-        assert!(
-            reads_the_account(mistral, credential_ready),
+        // The picker's own decision — the code path route_models takes, not
+        // a restated condition — reads the account for a route whose key is
+        // stored, browser sign-in or none.
+        let (models, source) = route_choices(
+            mistral,
+            true,
+            Ok(vec![ModelChoice { id: "mistral-medium-3".into(), label: "Mistral Medium 3".into() }]),
+            catalog_34(),
+        );
+        assert_eq!(
+            models.iter().map(|model| model.id.as_str()).collect::<Vec<_>>(),
+            vec!["mistral-medium-3"],
             "a browser sign-in layered on a saved key must not hide the account's models"
         );
-        // The ChatGPT subscription carries no ref and keeps discovery.
-        let chatgpt = &catalog[1];
+        assert_eq!(source, ModelSource::Account);
+        // The ChatGPT subscription carries no ref and keeps discovery,
+        // whatever its credential flag reads.
+        let chatgpt = &routes[1];
         assert!(chatgpt.chatgpt && chatgpt.credential_ref().is_none());
-        assert!(!reads_the_account(chatgpt, false));
+        for credential_ready in [false, true] {
+            let (models, source) =
+                route_choices(chatgpt, credential_ready, Err("no key".to_string()), catalog_34());
+            assert_eq!(models, catalog_34());
+            assert!(
+                matches!(source, ModelSource::CatalogFallback(_)),
+                "a route with no saved ref keeps the catalog, never the account: {source:?}"
+            );
+        }
     }
 
     #[tokio::test]
