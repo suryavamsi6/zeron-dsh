@@ -35,6 +35,10 @@ export type Question = {
 	-- This page among the pages, from 1.
 	page: number?,
 	pages: number?,
+	-- The body under the text when the question carries one: a plan under
+	-- review (the SDK's `question.detail`), drawn as the approval card draws
+	-- its own. (SUR-167)
+	detail: string?,
 }
 export type QuestionProps = {
 	question: Question,
@@ -230,6 +234,19 @@ M.Question = ui.component(function(props: QuestionProps): Node
 				weight = "$font.weight.medium",
 				color = "$text.primary",
 			},
+			-- A plan under review: the reason the question is asked, so it
+			-- reads under the question rather than behind a link. (Its width
+			-- is the column's: `min_w = 0` lets a long line wrap there.)
+			if q.detail
+				then ui.text {
+					q.detail,
+					wrap = true,
+					min_w = 0,
+					text_size = "$font.size.sm",
+					line_height = "$font.line.sm",
+					color = "$text.secondary",
+				}
+				else nil,
 			if q.multi
 				then ui.text { locale.t("ds.composer_ask.multi"), text_size = "$font.size.sm", line_height = "$font.line.sm", color = "$text.tertiary" }
 				else nil,

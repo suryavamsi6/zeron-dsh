@@ -1030,6 +1030,33 @@ ui.command {
 	end,
 }
 
+-- A plan-review question, as the SDK's plan plugin asks one: the plan itself
+-- in `question.detail`, which the host puts on the record as `detail`
+-- (SUR-166). The card draws it under the question (SUR-167).
+ui.command {
+	id = "ask_question_plan",
+	title = "The agent asks to approve a plan",
+	run = function()
+		if opened then
+			publish(opened, {
+				ask = {
+					request = "q3",
+					kind = "question",
+					question = {
+						header = "Approve plan",
+						text = "Approve this plan to leave plan mode?",
+						detail = "1. Read the render loop.\n2. Pin the inner width.\n3. Run the shells again.",
+						options = {
+							{ value = "Approve", label = "Approve" },
+							{ value = "Decline", label = "Decline" },
+						},
+					},
+				},
+			})
+		end
+	end,
+}
+
 -- The same question as the second of two pages (the first answered).
 ui.command {
 	id = "ask_question_page2",
