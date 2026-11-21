@@ -88,3 +88,37 @@ test("a new chat's first run carries the plan the toggle set", function()
 	-- The run's config: its `plan`, as the host sends it.
 	expect(calls).to_contain("plan:true")
 end)
+
+test("a new chat whose agent stops reporting plan sends none", function()
+	local app = open("go_home")
+	app:click('role:button "Access"')
+	app:frames(20)
+	app:click(TOGGLE)
+	app:frames(20)
+	expect(checked(app)).to_be(true)
+	app:key("Escape")
+	app:frames(10)
+	-- The agent's catalog entry now reports it cannot enter plan mode: the
+	-- toggle goes, and the plan it had stored goes with it.
+	local catalog = app:state("chat.catalog")
+	local harness = catalog.harnesses[1]
+	app:set_state("chat.catalog", {
+		state = catalog.state,
+		complete = catalog.complete,
+		harnesses = { { id = harness.id, label = harness.label, mark = harness.mark, supportsPlan = false } },
+		models = catalog.models,
+	})
+	app:frames(20)
+	app:click('role:button "Access"')
+	app:frames(20)
+	expect(app:has(TOGGLE)).to_be(false)
+	app:key("Escape")
+	app:frames(10)
+	app:type("role:textbox", "Plan unsupported")
+	app:key("Enter")
+	app:frames(30)
+	local calls = app:state("calls")
+	expect(calls).to_contain("send:new1:Plan unsupported")
+	-- The run's config names no plan: the stale "on" did not ride along.
+	expect(calls).never.to_contain("plan:true")
+end)

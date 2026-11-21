@@ -1594,11 +1594,11 @@ return ui.component(function(props: Props): Node
 					return if plan_on() then locale.s("ds.composer.plan.short") else ""
 				end
 				else nil,
-			-- An agent that cannot enter plan mode has no row: `ui.show`
-			-- mounts the row only while it reports that it can.
-			extra = if plan
-				then (if supported then ui.show(supported, plan_row(plan)) else plan_row(plan))
-				else nil,
+			-- An agent that cannot enter plan mode has no row and no foot:
+			-- its rule and inset go with it, so the panel's inset follows the
+			-- rows actually mounted.
+			extra = if plan then plan_row(plan) else nil,
+			extra_when = supported,
 			placement = { side = "bottom", align = "start", offset = 6 },
 		}
 	end

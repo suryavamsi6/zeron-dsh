@@ -595,6 +595,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		if not out.harness and type(m) == "string" then
 			out.harness = string.match(m, "^([^/]+)/")
 		end
+		if store.reports_plan(out.harness) == false then
+			out.plan = false
+		end
 		return out
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
@@ -650,6 +653,12 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 	local function plan_supported(): boolean
 		return store.supports_plan(agent())
 	end
+	-- A stale "on" cannot outlive that report (SUR-156).
+	ui.effect(function()
+		if plan:peek() and store.reports_plan(agent()) == false then
+			plan:set(false)
+		end
+	end)
 	local completions = if split
 		then nil
 		else Completions.bind {

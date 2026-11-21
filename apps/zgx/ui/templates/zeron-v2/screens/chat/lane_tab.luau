@@ -370,6 +370,9 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 		if not out.harness and type(m) == "string" then
 			out.harness = string.match(m, "^([^/]+)/")
 		end
+		if store.reports_plan(out.harness) == false then
+			out.plan = false
+		end
 		return out
 	end
 	-- Where its first message makes it: nil, its parent's place as it is;
@@ -414,12 +417,26 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			ZeronCommands.run(command, if unsent() then nil else chat)
 		end
 	end
+	-- The agent the draft runs (its model's), for its completions and whether
+	-- the composer offers plan mode.
+	local function agent(): string?
+		return Completions.agent_of(model:get(), if unsent() then nil else session:get())
+	end
+	-- Whether the lane's agent reports plan mode: only then is the toggle
+	-- drawn (SUR-156).
+	local function plan_supported(): boolean
+		return store.supports_plan(agent())
+	end
+	-- A stale "on" cannot outlive that report.
+	ui.effect(function()
+		if plan:peek() and store.reports_plan(agent()) == false then
+			plan:set(false)
+		end
+	end)
 	local completions = Completions.bind {
 		key = `chat_lane_{chat}`,
 		text = draft,
-		agent = function(): string?
-			return Completions.agent_of(model:get(), if unsent() then nil else session:get())
-		end,
+		agent = agent,
 		target = function(): any
 			if unsent() then
 				local p = project:get()
@@ -486,6 +503,7 @@ local function composer(chat: string, view: any, name: string, focus: State<numb
 			return store.offers_auto(model:get())
 		end,
 		plan = plan,
+		plan_supported = plan_supported,
 		model = model,
 		effort = effort,
 		fast = fast,

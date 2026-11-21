@@ -583,6 +583,11 @@ local function Composer(): Node
 			if (req :: any).harness == nil then
 				return nil
 			end
+			-- An agent that reports it cannot plan takes no plan, even if one
+			-- was chosen before its catalog entry said so.
+			if store.reports_plan((req :: any).harness) == false then
+				req.plan = false
+			end
 			(req :: any).cwd = p.cwd;
 			(req :: any).device = p.device
 			return req
@@ -878,6 +883,13 @@ local function Composer(): Node
 	local function plan_supported(): boolean
 		return store.supports_plan(agent())
 	end
+	-- A stale "on" cannot outlive that report: when the catalog says the
+	-- agent cannot plan, the stored choice goes too, so a send carries none.
+	ui.effect(function()
+		if plan:peek() and store.reports_plan(agent()) == false then
+			plan:set(false)
+		end
+	end)
 	-- What each trigger lists, as the agent's settings have it: with
 	-- "Separate / commands" off, `/` lists the skills after the commands
 	-- (Zeron's composer.rs `completion_trigger`).
@@ -1162,6 +1174,9 @@ local function Composer(): Node
 			if m.value == req.model then
 				req.harness = m.harness
 			end
+		end
+		if store.reports_plan(req.harness) == false then
+			req.plan = false
 		end
 		-- Nowhere it can start (a project no longer there): the line above
 		-- says why, and the draft stays.
