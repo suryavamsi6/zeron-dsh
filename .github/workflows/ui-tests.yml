@@ -53,17 +53,20 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-core-tests-${{ matrix.shard }}
-      # SUR-152: a red pull-request leg cancels the run, so the legs still
-      # running stop at once instead of finishing for a verdict already known.
-      # The annotation goes first: the cancel takes this job down with it, so
-      # `::error` is the only place the failing job stays readable on the run
-      # page. `|| true` keeps a failed cancel from masking this failure.
+      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
+      # still running stop at once. The annotation names the failed step
+      # before the cancel takes this job down; `scripts/ci/first-red.sh`
+      # reads that step from the run's jobs. If the checkout itself is what
+      # failed, the fallback below keeps the job-only annotation. `|| true`
+      # keeps a failed cancel from masking this failure.
       - name: Cancel the run's other legs (SUR-152)
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+          bash scripts/ci/first-red.sh || {
+            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+          }
 
