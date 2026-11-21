@@ -296,7 +296,10 @@ class PlanMainTests(unittest.TestCase):
         second = self.run_plan("pull_request", {"pull_request": {"number": 3}}, caches, files=files)
         self.assertFalse(json.loads(second["suites"])["core"])
         self.assertTrue(json.loads(second["suites"])["deepseek"])
-        self.assertEqual(json.loads(second["skip"]), {"core": ["core-tests-1", "core-tests-2"]})
+        # The harness path selects Windows (SUR-158); its `app` job is not
+        # needed for this change, so only core was reused.
+        self.assertEqual(json.loads(second["skip"]),
+                         {"core": ["core-tests-1", "core-tests-2"], "windows": ["app"]})
         self.assertLess(int(second["reservation"].split()[0].split("=")[1]),
                         int(first["reservation"].split()[0].split("=")[1]))
 
