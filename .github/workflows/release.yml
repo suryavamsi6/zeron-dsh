@@ -47,6 +47,9 @@ jobs:
           echo "version=$workspace" >>"$GITHUB_OUTPUT"
 
   deepseek-compatibility:
+    permissions:
+      contents: read
+      actions: write
     uses: ./.github/workflows/deepseek-compatibility.yml
 
   zgx:
