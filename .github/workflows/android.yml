@@ -193,13 +193,17 @@ jobs:
         run: rm -f "$RUNNER_TEMP/zeron-release.jks"
       # SUR-152: a red pull-request leg cancels the run, so the legs still
       # running stop at once instead of finishing for a verdict already known.
-      # `|| true` keeps a failed cancel from masking this failure.
+      # The annotation goes first: the cancel takes this job down with it, so
+      # `::error` is the only place the failing job stays readable on the run
+      # page. `|| true` keeps a failed cancel from masking this failure.
       - name: Cancel the run's other legs (SUR-152)
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+        run: |
+          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
 
   play:
     permissions:
@@ -248,13 +252,17 @@ jobs:
           status: ${{ env.PLAY_STATUS }}
       # SUR-152: a red pull-request leg cancels the run, so the legs still
       # running stop at once instead of finishing for a verdict already known.
-      # `|| true` keeps a failed cancel from masking this failure.
+      # The annotation goes first: the cancel takes this job down with it, so
+      # `::error` is the only place the failing job stays readable on the run
+      # page. `|| true` keeps a failed cancel from masking this failure.
       - name: Cancel the run's other legs (SUR-152)
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+        run: |
+          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
 
   publish:
     permissions:
@@ -302,10 +310,14 @@ jobs:
           put zeron-android-arm64.apk.sha256 latest.sha256 text/plain "no-cache"
       # SUR-152: a red pull-request leg cancels the run, so the legs still
       # running stop at once instead of finishing for a verdict already known.
-      # `|| true` keeps a failed cancel from masking this failure.
+      # The annotation goes first: the cancel takes this job down with it, so
+      # `::error` is the only place the failing job stays readable on the run
+      # page. `|| true` keeps a failed cancel from masking this failure.
       - name: Cancel the run's other legs (SUR-152)
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+        run: |
+          echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
+          gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
