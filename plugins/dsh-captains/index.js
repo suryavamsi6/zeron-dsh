@@ -1,7 +1,8 @@
 import { isAbsolute } from 'node:path';
+import { captainPrompt } from './src/prompts.js';
 
 export const name = 'zeron-captains';
-export const inject = [];
+export const inject = ['systemPrompt'];
 
 const roles = new Set(['none', 'captain', 'crew']);
 const idPattern = /^[A-Za-z0-9_-]{1,128}$/;
@@ -36,8 +37,18 @@ export function normalizeConfig(raw) {
   return { role, chatId, captainId, captainName, driveRoot };
 }
 
+// SUR-81 creates the folder engine-side; the row's driveRoot is the Drive path here (same decision as SUR-99's reuse line).
+const driveDir = cfg => cfg.driveRoot;
+
 export function apply(ctx, config) {
   const cfg = normalizeConfig(config);
   if (cfg.role === 'none') return;
-  // registrations follow
+  if (cfg.role === 'captain') {
+    ctx.effect(() => ctx.systemPrompt.section({
+      name: 'zeron-captains:role',
+      order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
+      text: () => captainPrompt(cfg, driveDir(cfg)),
+      interpolate: false,
+    }));
+  }
 }
