@@ -12,7 +12,6 @@ are shown only in an existing chat.
 | `/new` | Start a new conversation |
 | `/resume` | Search and open conversations |
 | `/settings` | Open Zeron settings |
-| `/diff` | Open a changes tab |
 | `/files` | Open project files |
 | `/terminal` | Open a terminal tab |
 | `/rename` | Open the conversation rename dialog |
@@ -29,17 +28,18 @@ no runtime, no command catalog, and cannot be selected for a new run.
 
 ## Skill preferences
 
-Settings → DeepSeek → Completion has two independent controls for the DeepSeek
+Settings → Providers has two independent completion controls for the DeepSeek
 agent on this device:
 
-- **$ for skills** enables the skill picker after `$`.
+- **Use $ for skills** enables the skill picker after `$`.
 - **Separate / commands** removes skills from the `/` picker.
 
-Both default to disabled for DeepSeek: no skill catalog reaches the composer, so
-skills remain available only through `/` when a catalog supplies them. The mock
-harness used by tests follows the same preferences. Searches for a skill without
-a catalog find nothing; enabling `$` alone makes a discovered skill available in
-both pickers.
+Both default to on for DeepSeek: `$` opens the skill picker, and the skills a
+chat discovers are kept out of `/`, so the two lists stay apart. Turning
+"Separate / commands" off lists those skills beside the commands; turning
+"Use $ for skills" off leaves `$` as ordinary text. The mock harness used by
+tests follows the same controls. Skills come from the chat's catalog, so a
+search without one finds nothing.
 
 These controls change completion, not arbitrary typed text. Selecting a skill
 stores its identity in the composer. Literal dollar signs, code, and unselected
@@ -48,15 +48,15 @@ text retain their meaning.
 ## Discovery and delivery
 
 Discovery runs on the selected host in the project directory. Skills are
-read, not invented: Zeron reads the same files dsh would load
-(`<root>/<name>/SKILL.md`, or a flat `<root>/<name>.md`, one level deep) from
-the project's `.dsh/skills`, then `.agents/skills`, then the harness home's
+read, not invented: Zeron reads three roots, using the file shapes dsh loads
+(`<root>/<name>/SKILL.md`, or a flat `<root>/<name>.md`, one level deep): the
+project's `.dsh/skills`, then `.agents/skills`, then the harness home's
 `skills`, the first root winning a duplicate name
 (`crates/harness/src/deepseek/skills.rs`). A skill marked `user-invocable:
 false` is listed but not offered. A discovered skill carries no slash command;
 its `$` token is how it reaches a message. The DeepSeek SDK driver's own
 commands are a separate catalog: `commands()` in the same module advertises
-`/goal` and `/compact`. Mock (tests) lists no skills.
+`/goal` and `/compact`. Mock (tests) reports none.
 
 Hosts advertise `composer-references-v1` for canonical reference delivery.
 Selecting a harness command for an older host inserts literal slash text.
