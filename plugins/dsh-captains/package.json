@@ -1,0 +1,11 @@
+{
+  "name": "zeron-dsh-captains",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "files": ["index.js", "src", "cordis.patch.yml"],
+  "engines": { "dsh": ">=0.2.2-rc.3 <0.3.0" },
+  "peerDependencies": { "@deepseek-ai/dsh-tools": ">=0.2.2-rc.1 <0.3.0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

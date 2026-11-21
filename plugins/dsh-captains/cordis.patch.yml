@@ -1,0 +1,5 @@
+- insert:
+    - id: zeron-captains
+      name: zeron-dsh-captains
+      config:
+        role: none
