@@ -2360,3 +2360,203 @@ async fn queued_model_only_config_drains_onto_that_model_without_a_switch_seam()
     let _ = harness.finish.send(());
     core.shutdown().await;
 }
+
+/// Two providers in one registry: `setup_with`'s single-harness assembly,
+/// doubled — the chat's saved provider plus the one a queued pick switches to.
+async fn setup_two_providers() -> (
+    EngineCore,
+    Arc<HeldHarness>,
+    Arc<Mutex<Vec<String>>>,
+    Arc<HeldHarness>,
+    Arc<Mutex<Vec<String>>>,
+) {
+    let tmp = tempfile::tempdir().unwrap();
+    // Leak the tempdir guard, as `setup_with` does: the engine outlives this
+    // helper and the test only cares that the path is unique per run.
+    let path = tmp.keep();
+    let (mock, mock_prompts) =
+        HeldHarness::build_as(HarnessId::Mock, SteeringMode::StepBoundary, false);
+    let (deepseek, deepseek_prompts) =
+        HeldHarness::build_as(HarnessId::DeepSeek, SteeringMode::StepBoundary, false);
+    let registry = HarnessRegistry::new();
+    registry.register(mock.clone());
+    registry.register(deepseek.clone());
+    let core = EngineCore::assemble(
+        &path.join("data"),
+        Arc::new(registry),
+        HarnessId::Mock,
+        None,
+    )
+    .expect("engine core assembles");
+    core.sessions.set_no_ipc_port();
+    create_chat(&core).await;
+    core.workspace
+        .set_chat_config(
+            CHAT,
+            &zeron_proto::ChatConfig {
+                harness: HarnessId::Mock,
+                model: Some("mock-base".into()),
+                reasoning: Some(ReasoningLevel::Medium),
+                model_options: Default::default(),
+                sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+                access: Default::default(),
+                plan: false,
+            },
+        )
+        .expect("set the starting provider");
+    (core, mock, mock_prompts, deepseek, deepseek_prompts)
+}
+
+/// The chat's switch seams, in entry order: `(from_harness, to_harness)` per
+/// `MessagePart::Switch`, as the transcript draws them.
+fn switch_seams(core: &EngineCore) -> Vec<(Option<String>, Option<String>)> {
+    core.doc_host
+        .open(CHAT)
+        .ok()
+        .and_then(|h| h.doc().read_entries().ok())
+        .unwrap_or_default()
+        .into_iter()
+        .flat_map(|e| e.parts)
+        .filter_map(|p| match p {
+            MessagePart::Switch {
+                from_harness,
+                to_harness,
+                ..
+            } => Some((from_harness, to_harness)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn deepseek_config() -> zeron_proto::ChatConfig {
+    zeron_proto::ChatConfig {
+        harness: HarnessId::DeepSeek,
+        model: Some("deepseek-picked".into()),
+        reasoning: Some(ReasoningLevel::Medium),
+        model_options: Default::default(),
+        sandbox: zeron_proto::SandboxLevel::WorkspaceWrite,
+        access: Default::default(),
+        plan: false,
+    }
+}
+
+/// The queue carries the provider pick it was sent with. A message queued
+/// while a turn runs, with a config for ANOTHER harness — what the provider
+/// picker makes — drains onto that provider when the turn ends, keeps its own
+/// id, and writes the switch seam the transcript draws, above the message
+/// that made the switch.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn queued_provider_switch_drains_onto_the_new_provider_with_a_switch_seam() {
+    let (core, mock, mock_prompts, deepseek, deepseek_prompts) = setup_two_providers().await;
+
+    core.doc_host
+        .queue_message(CHAT, "opening on mock", Vec::new())
+        .expect("queue opening");
+    wait_for(
+        || {
+            mock_prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p == "opening on mock")
+        },
+        "the opening turn on mock",
+    )
+    .await;
+
+    // While Mock is still running, queue a message picking DeepSeek.
+    let switched_id = core
+        .doc_host
+        .queue_message_with_config(
+            CHAT,
+            "send this on deepseek",
+            Vec::new(),
+            true,
+            Vec::new(),
+            Some(deepseek_config()),
+        )
+        .expect("queue the provider pick");
+    assert_eq!(queue_texts(&core), vec!["send this on deepseek"]);
+    assert!(
+        !user_messages(&core)
+            .iter()
+            .any(|m| m == "send this on deepseek"),
+        "the pick waits for the turn end"
+    );
+
+    // Mock's turn ends: the queued row drains onto DeepSeek. The switched
+    // provider owes the transcript to a fresh session of its own, so the
+    // prompt it sees carries the pick inside the replayed history.
+    let _ = mock.finish.send(());
+    wait_for(
+        || {
+            deepseek_prompts
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|p| p.contains("send this on deepseek"))
+        },
+        "the queued pick to reach the new provider",
+    )
+    .await;
+
+    // DeepSeek ran it; Mock never saw it.
+    assert_eq!(
+        mock_prompts.lock().unwrap().as_slice(),
+        &["opening on mock"],
+        "the outgoing provider must never receive the switched row"
+    );
+    // The row's own id becomes the user message id in the transcript.
+    assert_eq!(
+        user_message_id(&core, "send this on deepseek").as_deref(),
+        Some(switched_id.as_str()),
+        "the queued row keeps its issued id"
+    );
+    // Exactly one seam, Mock → DeepSeek, sitting above the switched message.
+    assert_eq!(
+        switch_seams(&core),
+        vec![(Some("mock".into()), Some("deepseek".into()))],
+        "a provider switch writes its seam"
+    );
+    let entries = core
+        .doc_host
+        .open(CHAT)
+        .expect("open chat")
+        .doc()
+        .read_entries()
+        .expect("read entries");
+    let switch_ix = entries
+        .iter()
+        .position(|e| {
+            e.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Switch { .. }))
+        })
+        .expect("the switch seam entry");
+    let switched_ix = entries
+        .iter()
+        .position(|e| e.id == switched_id)
+        .expect("the switched user message");
+    assert!(
+        switch_ix < switched_ix,
+        "the seam sits before the message that switched ({switch_ix} before {switched_ix}): {entries:#?}"
+    );
+    assert_eq!(
+        switch_ix + 1,
+        switched_ix,
+        "the seam sits directly above the message that switched ({switch_ix} then {switched_ix}): {entries:#?}"
+    );
+    // The pick sticks: the chat keeps the new provider's harness and model.
+    wait_for(
+        || {
+            core.workspace.chat_config(CHAT).is_some_and(|c| {
+                c.harness == HarnessId::DeepSeek && c.model.as_deref() == Some("deepseek-picked")
+            })
+        },
+        "the chat to keep the picked provider",
+    )
+    .await;
+
+    let _ = deepseek.finish.send(());
+    core.shutdown().await;
+}
