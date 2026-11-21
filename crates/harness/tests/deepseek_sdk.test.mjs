@@ -379,10 +379,12 @@ test("a failing command's own text is a notice exactly once", async t => {
 });
 
 // A list derived only as far as the English name would pass with the guard
-// knowing nothing else; the catalog must actually contribute locale tokens.
-test('the plan guard cases name at least two locale tokens from the SDK catalog', () => {
+// knowing nothing else; the catalog must contribute at least one locale token.
+// `planTokens` seeds the base name itself, so the assertion counts one token
+// more than `plan` rather than two locale spellings.
+test('the plan guard cases carry a locale token beyond the base name', () => {
   assert.ok(planTokens.length >= 2,
-    `the catalog read produced ${JSON.stringify(planTokens)}; a dropped read still passes with only 'plan'`);
+    `the catalog read produced ${JSON.stringify(planTokens)}; with only the base name it contributed no locale token`);
 });
 
 for (const prompt of slashPrompts(planTokens, 'off')) {
