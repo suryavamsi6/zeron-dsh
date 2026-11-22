@@ -136,9 +136,8 @@ impl ChatImporter {
             imported: 0,
             already_present: 0,
             chats: Vec::new(),
-            // RED SCAFFOLD: set from the export in the implementation step.
-            total: None,
-            kept: 0,
+            total: export.total,
+            kept: newest_for_import(&export.conversations).len(),
         };
         for conversation in newest_for_import(&export.conversations) {
             // A conversation with no usable turns (an empty session, or one whose
@@ -257,10 +256,14 @@ impl ChatImporter {
     }
 }
 
+/// The newest conversations an import considers; beyond this the export is
+/// truncated and `Outcome::total` says by how much.
+const MAX_IMPORTED_CONVERSATIONS: usize = 1000;
+
 /// The newest conversations an import keeps. The parser ranks newest-first.
 fn newest_for_import(conversations: &[ExportedConversation]) -> &[ExportedConversation] {
-    // RED SCAFFOLD: the 1000 cap is applied in the implementation step.
-    conversations
+    let kept = conversations.len().min(MAX_IMPORTED_CONVERSATIONS);
+    &conversations[..kept]
 }
 
 /// Two concurrent imports over the same export would both see no row and

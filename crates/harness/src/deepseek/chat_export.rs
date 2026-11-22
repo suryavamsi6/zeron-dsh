@@ -92,9 +92,10 @@ pub fn read_chat_export(zip: &Path) -> Result<ChatExport, String> {
     let node =
         super::node().ok_or_else(|| "node is required to read a DeepSeek chat export".to_string())?;
     let driver = format!(
-        "{CHAT_EXPORT}\ntry {{\n  const __export = readExport(await readFile(process.argv[1]));\n  \
+        "{CHAT_EXPORT}\ntry {{\n  const __export = readExport(await readFile(process.argv[1]), {{ maxSessions: {} }});\n  \
          process.stdout.write(JSON.stringify(__export));\n}} catch (error) {{\n  \
-         console.error(error?.message ?? String(error));\n  process.exitCode = 1;\n}}\n"
+         console.error(error?.message ?? String(error));\n  process.exitCode = 1;\n}}\n",
+        MAX_PARSED_CONVERSATIONS
     );
     let output = std::process::Command::new(node)
         .arg("--input-type=module")
@@ -113,11 +114,14 @@ pub fn read_chat_export(zip: &Path) -> Result<ChatExport, String> {
     if conversations.iter().any(|c| c.id.trim().is_empty()) {
         return Err("the export has a conversation with no id".into());
     }
-    // RED SCAFFOLD: the parsed count is carried in the implementation step.
-    Ok(ChatExport {
-        conversations,
-        total: None,
-    })
+    // Hitting the ceiling means the export held at least this many; the exact
+    // count is unknowable, so it is not reported as a number.
+    let total = if conversations.len() < MAX_PARSED_CONVERSATIONS {
+        Some(conversations.len())
+    } else {
+        None
+    };
+    Ok(ChatExport { conversations, total })
 }
 
 /// The first `max` bytes of `s`, not splitting a UTF-8 character.
