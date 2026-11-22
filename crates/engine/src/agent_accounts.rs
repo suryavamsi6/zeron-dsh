@@ -697,4 +697,45 @@ mod tests {
         let error = refused.expect_err("a Captain must not run half-provisioned");
         assert!(error.contains("cannot create"), "unexpected error: {error}");
     }
+
+    #[tokio::test]
+    async fn a_registry_row_the_plugin_would_refuse_is_not_stamped() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        // A hand-written row, not one this engine promoted: an invalid id and
+        // a name outside the plugin's 1-80/no-CR-LF rule.
+        let long_name = "x".repeat(81);
+        std::fs::write(
+            config.data_dir.join("captains.json"),
+            format!(
+                r#"{{"captains":[
+                    {{"chatId":"bad/id","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}},
+                    {{"chatId":"cap-long","name":{long_name:?},"createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        for chat_id in ["bad/id", "cap-long"] {
+            let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+            }))
+            .unwrap();
+            env.prepare(HarnessId::DeepSeek, Some(chat_id), &mut request)
+                .await
+                .unwrap_or_else(|error| panic!("{chat_id} must run ordinary: {error}"));
+            assert!(
+                !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+                "{chat_id} was stamped although the plugin would refuse the row"
+            );
+        }
+        assert!(
+            !config.deepseek_home.exists(),
+            "a refused row created something on disk"
+        );
+    }
 }

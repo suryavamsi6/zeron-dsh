@@ -113,6 +113,7 @@ impl Registry {
     /// Captain, or crews for one, is refused. Promoting an archived Captain
     /// reactivates its record and keeps only the crew that can still serve it.
     pub fn promote(&mut self, chat_id: &str, name: &str) -> Result<(), String> {
+        valid_captain_name(name)?;
         if self.is_captain(chat_id) {
             return Err(format!("{chat_id} is already a captain"));
         }
@@ -274,6 +275,9 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
             captain_name,
         } => ("crew", captain_id, captain_name),
     };
+    if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
+        return None;
+    }
     Some(
         serde_json::to_string(&Stamp {
             role,
@@ -306,6 +310,30 @@ pub fn valid_captain_id(id: &str) -> Result<(), String> {
     }
 }
 
+/// The plugin's name rule (`config.js`): 1-80 characters, no line breaks.
+pub fn valid_captain_name(name: &str) -> Result<(), String> {
+    if !name.is_empty() && name.chars().count() <= 80 && !name.contains(['\r', '\n']) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid Captain name: {name:?} (allowed: 1-80 characters, no line breaks)"
+        ))
+    }
+}
+
+/// Whether a row may be stamped at all: the plugin's `normalizeConfig`
+/// throws on any of these, so a row that fails must run ordinary rather
+/// than carry a stamp its consumer refuses.
+pub fn valid_captain_row(
+    chat_id: &str,
+    captain_id: &str,
+    captain_name: &str,
+) -> Result<(), String> {
+    valid_captain_id(chat_id)?;
+    valid_captain_id(captain_id)?;
+    valid_captain_name(captain_name)
+}
+
 /// The subdirectories every Captain Drive starts with.
 const DRIVE_DIRS: [&str; 5] = ["skills", "reports", "renders", "handoffs", "state"];
 
@@ -330,8 +358,10 @@ pub fn ensure_drive(
             captain_name,
         } => (captain_id, captain_name),
     };
-    valid_captain_id(&captain_id)?;
-    let drive = captains_root(deepseek_home).join(&captain_id);
+    if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
+        return Ok(None);
+    }
+    let drive = drive_dir(deepseek_home, &captain_id);
     for dir in DRIVE_DIRS {
         let sub = drive.join(dir);
         std::fs::create_dir_all(&sub)
@@ -702,6 +732,7 @@ impl CaptainsRpc<'_> {
                         Err(format!("{} is already a captain", params.chat_id))
                     };
                 }
+                valid_captain_name(&params.name)?;
                 registry
                     .promote(&params.chat_id, &params.name)
                     .map(|()| true)
@@ -1966,10 +1997,10 @@ mod tests {
         for id in ["../../escape", "a/b", "", "with space", "dotted."] {
             let mut registry = Registry::default();
             registry.promote(id, "ada").unwrap();
-            let error = ensure_drive(&registry, &home, id).unwrap_err();
-            assert!(
-                error.contains("invalid Captain id"),
-                "id {id:?} was not refused clearly: {error}"
+            assert_eq!(
+                ensure_drive(&registry, &home, id).unwrap(),
+                None,
+                "id {id:?} was not skipped"
             );
         }
         assert!(
@@ -2050,5 +2081,100 @@ mod tests {
         for sub in ["skills", "reports", "renders", "handoffs", "state"] {
             assert!(drive.join(sub).is_dir(), "{sub}/ was not completed");
         }
+    }
+
+    /// A row the plugin would refuse at `normalizeConfig` must not be stamped:
+    /// the plugin throws before a single registration runs, so the run would
+    /// die on the very stamp the row exists to enable. The same predicate is
+    /// consulted by `ensure_drive`, so both call sites agree.
+    fn invalid_row_registry() -> Registry {
+        let at = "2026-11-01T00:00:00Z".parse().unwrap();
+        Registry {
+            captains: vec![
+                Captain {
+                    chat_id: "bad/id".to_string(),
+                    name: "Ada".to_string(),
+                    created_at: at,
+                    archived: false,
+                    crew: vec!["crew-x".to_string()],
+                },
+                Captain {
+                    chat_id: "cap-name".to_string(),
+                    name: "x".repeat(81),
+                    created_at: at,
+                    archived: false,
+                    crew: Vec::new(),
+                },
+                Captain {
+                    chat_id: "cap-ok".to_string(),
+                    name: "Grace".to_string(),
+                    created_at: at,
+                    archived: false,
+                    crew: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn captains_env_skips_a_row_the_plugin_would_refuse() {
+        let home = Path::new("/deepseek-home");
+        let registry = invalid_row_registry();
+        assert!(
+            captains_env(&registry, home, "bad/id").is_none(),
+            "an invalid Captain id was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "crew-x").is_none(),
+            "a crew of an invalid Captain id was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "cap-name").is_none(),
+            "a Captain name the plugin refuses was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "cap-ok").is_some(),
+            "a valid row is still stamped"
+        );
+    }
+
+    #[test]
+    fn ensure_drive_skips_a_row_the_plugin_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let registry = invalid_row_registry();
+        for chat_id in ["bad/id", "crew-x", "cap-name"] {
+            assert_eq!(
+                ensure_drive(&registry, &home, chat_id).unwrap(),
+                None,
+                "{chat_id}: a refused row creates no drive and does not error"
+            );
+        }
+        assert!(
+            !captains_root(&home).exists(),
+            "a refused row created the captains root"
+        );
+        let created = ensure_drive(&registry, &home, "cap-ok").unwrap();
+        assert_eq!(created, Some(drive_dir(&home, "cap-ok")));
+    }
+
+    #[test]
+    fn a_captain_name_the_plugin_would_refuse_is_not_promoted() {
+        let mut registry = Registry::default();
+        for name in ["", "x".repeat(81).as_str(), "line\nbreak", "carriage\rreturn"] {
+            let refused = registry.promote("cap-a", name);
+            assert!(
+                refused.is_err(),
+                "the plugin refuses name {name:?}; promote accepted it"
+            );
+            assert!(
+                registry.captains().is_empty(),
+                "a refused promote must not create a record"
+            );
+        }
+        registry.promote("cap-a", "A & B").unwrap();
+        assert_eq!(registry.captains()[0].name, "A & B");
+        registry.promote("cap-b", &"y".repeat(80)).unwrap();
     }
 }
