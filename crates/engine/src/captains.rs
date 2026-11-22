@@ -497,6 +497,8 @@ impl CaptainsRpc<'_> {
     /// The whole roster, live and archived records alike, each Captain's
     /// Drive path projected from `deepseek_home`. Pure: nothing here creates
     /// the directory — the plugin does, on the Captain's first turn.
+    /// Projection is registry-only: it does not consult the chat store, so
+    /// archived or deleted chats appear here as recorded until a repair.
     fn roster(&self) -> Value {
         let registry = self.store.snapshot();
         let captains: Vec<RosterEntry> = registry
@@ -520,6 +522,13 @@ impl CaptainsRpc<'_> {
     /// on this device, and has no turn in flight a roster change would cut
     /// across (the sessions engine's `turn_in_flight` — the engine keeps no
     /// other busy flag).
+    /// Reads the chat row outside `MUTATION`. A chat deleted (`deleteChat`,
+    /// `DeleteSpace`) or archived (`setChatArchived`) between this read and the
+    /// commit is therefore not observed: the commit can leave a Captain or crew
+    /// record for a chat that is gone, and the roster, being registry-only,
+    /// keeps showing it until a repair pass. Closing that window needs the
+    /// chat-store read under the same lock; the atomic write protects the file,
+    /// not this decision.
     fn row(&self, chat_id: &str) -> Result<ChatRow, RpcError> {
         let Some(row) = self.chats.chat(chat_id) else {
             return Err(RpcError::BadParams(format!("no such chat: {chat_id}")));
@@ -539,6 +548,9 @@ impl CaptainsRpc<'_> {
     /// live Captain is a different ask and refused. An archived record's
     /// reactivation, and the rules on what may promote at all, are the
     /// registry's — checked under the store's lock inside `mutate`.
+    /// Promoting a UI-archived chat (`setChatArchived`) is intentional: the
+    /// Captains registry does not consult the chat store's archived flag;
+    /// archival is a view concern.
     fn promote(&self, params: &PromoteParams) -> Result<Value, RpcError> {
         self.row(&params.chat_id)?;
         let snapshot = self.store.snapshot();
