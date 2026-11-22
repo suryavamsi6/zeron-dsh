@@ -334,6 +334,11 @@ struct Inner {
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
     /// Their leases (open, typed) when a test sets them.
     warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
+    /// Per crew chat: the last report text id `turn_end_writes` scheduled, so
+    /// a duplicate finalization of the same turn does not rewrite the file.
+    /// Part ids are positional per segment (`t0`), so the entry is dropped
+    /// when a new turn opens (`Inner::crew_turn_opened`).
+    crew_reports: Mutex<HashMap<String, String>>,
 }
 
 /// How long a runtime parked between turns with nothing pending keeps its
@@ -460,6 +465,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 /// dispatched with, never the roster as it then stands.
 const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
+/// The last assistant text of the turn being finalized.
+pub(crate) struct TurnText<'a> {
+    /// The `MessagePart::Text` id — the turn's identity for the de-duplication.
+    pub id: &'a str,
+    pub text: &'a str,
+}
+
 #[derive(Clone)]
 pub struct SessionsEngine {
     inner: Arc<Inner>,
@@ -512,6 +524,7 @@ impl SessionsEngine {
                 plugins: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
+                crew_reports: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -532,13 +545,21 @@ impl SessionsEngine {
         let _ = self.inner.captains_home.set(path);
     }
 
-    /// The per-run turn end: a turn dispatched as a Captain snapshots its
-    /// Digest on completion; a failed or interrupted turn keeps the last good
-    /// list. Ordinary and crew dispatches write nothing. `stamp` is the
+    /// The per-run turn end, by the role the turn was dispatched with: a
+    /// Captain snapshots its Digest on completion (a failed or interrupted
+    /// turn keeps the last good list), a crew chat writes its report into the
+    /// Captain's Drive. An unstamped turn writes nothing. `stamp` is the
     /// dispatch-time [`CAPTAINS_ENV`] value — the decision is that stamp, so
     /// the roster is never consulted at turn end.
-    fn captain_turn_ended(&self, chat_id: &str, stamp: Option<&str>, status: DoneStatus) -> bool {
-        self.inner.captain_turn_ended(chat_id, stamp, status)
+    fn turn_end_writes(
+        &self,
+        chat_id: &str,
+        stamp: Option<&str>,
+        status: DoneStatus,
+        turn_text: Option<TurnText<'_>>,
+    ) -> bool {
+        self.inner
+            .turn_end_writes(chat_id, stamp, status, turn_text)
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -2887,16 +2908,34 @@ impl Inner {
             .and_then(|handle| handle.runtime_config.request.env.get(CAPTAINS_ENV).cloned())
     }
 
-    /// The per-run turn end the needs-you snapshot hangs off: a turn whose
-    /// dispatch-time `stamp` says Captain snapshots its Digest on completion,
-    /// a failed or interrupted turn keeps the last good list
-    /// ([`crate::needs_you::record_turn_end`]). `false` — nothing scheduled —
-    /// for an unstamped turn, a stamp that does not say `captain`, a stamp
-    /// with an empty `driveRoot`, and a stamp that fails to parse; the role
-    /// is the dispatch-time stamp and the roster is never consulted at turn
-    /// end. The write itself runs off the event loop; its outcome is traced,
-    /// never propagated.
-    fn captain_turn_ended(&self, chat_id: &str, stamp: Option<&str>, status: DoneStatus) -> bool {
+    /// A new turn for `chat_id` opens (a fresh run, a steer boundary, an
+    /// agent-continued turn): the stored crew-report id belongs to the turn
+    /// that ended and must not suppress this one's write — folded part ids
+    /// are positional (`t0`), so the last text of a new turn repeats them.
+    fn crew_turn_opened(&self, chat_id: &str) {
+        lock(&self.crew_reports).remove(chat_id);
+    }
+
+    /// The per-run turn end the turn-finalization writes hang off: a turn
+    /// whose dispatch-time `stamp` says Captain snapshots its Digest on
+    /// completion, a failed or interrupted turn keeps the last good list
+    /// ([`crate::needs_you::record_turn_end`]); a turn stamped crew writes
+    /// its report into the Captain's Drive
+    /// ([`crate::crew_reports::write_report`]). `false` — nothing scheduled —
+    /// for an unstamped turn, a stamp that fails to parse, a stamp with an
+    /// empty `driveRoot`, a role that is neither captain nor crew, a crew
+    /// turn with no assistant text to report, a crew turn already written
+    /// (a duplicate finalization), and a crew chat id that is not a bare
+    /// filename; the role is the dispatch-time stamp and the roster is never
+    /// consulted at turn end. The write itself runs off the event loop; its
+    /// outcome is traced, never propagated.
+    fn turn_end_writes(
+        &self,
+        chat_id: &str,
+        stamp: Option<&str>,
+        status: DoneStatus,
+        turn_text: Option<TurnText<'_>>,
+    ) -> bool {
         let Some(stamp) = stamp else {
             return false;
         };
@@ -2907,34 +2946,63 @@ impl Inner {
                 return false;
             }
         };
-        if stamp["role"].as_str() != Some("captain") {
-            return false;
-        }
         let Some(drive) = stamp["driveRoot"]
             .as_str()
             .filter(|drive| !drive.is_empty())
             .map(std::path::PathBuf::from)
         else {
+            tracing::warn!(chat = %chat_id, "captains stamp carries no driveRoot");
             return false;
         };
-        let chat_id = chat_id.to_string();
-        tokio::task::spawn_blocking(move || {
-            match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
-                Ok(recorded) => {
-                    let outcome = recorded.outcome;
-                    tracing::debug!(
-                        chat = %chat_id,
-                        ?outcome,
-                        items = recorded.items,
-                        "captain turn end"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
-                }
+        match stamp["role"].as_str() {
+            Some("captain") => {
+                let chat_id = chat_id.to_string();
+                tokio::task::spawn_blocking(move || {
+                    match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
+                        Ok(recorded) => {
+                            let outcome = recorded.outcome;
+                            tracing::debug!(
+                                chat = %chat_id,
+                                ?outcome,
+                                items = recorded.items,
+                                "captain turn end"
+                            );
+                        }
+                        Err(error) => {
+                            tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
+                        }
+                    }
+                });
+                true
             }
-        });
-        true
+            Some("crew") => {
+                let Some(turn_text) = turn_text else {
+                    return false;
+                };
+                {
+                    let written = lock(&self.crew_reports);
+                    if written.get(chat_id).is_some_and(|id| id == turn_text.id) {
+                        return false;
+                    }
+                }
+                if crate::crew_reports::report_path(&drive, chat_id).is_none() {
+                    tracing::warn!(chat = %chat_id, "crew report skipped: chat id is not a bare filename");
+                    return false;
+                }
+                lock(&self.crew_reports).insert(chat_id.to_string(), turn_text.id.to_string());
+                let chat_id = chat_id.to_string();
+                let text = turn_text.text.to_owned();
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) =
+                        crate::crew_reports::write_report(&drive, &chat_id, status, &text, Utc::now())
+                    {
+                        tracing::warn!(chat = %chat_id, error = %error, "crew report write failed");
+                    }
+                });
+                true
+            }
+            _ => false,
+        }
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
@@ -4873,6 +4941,9 @@ async fn drive_run(
     // a fresh session needs all prior user text, not just the latest tail.
     let doc_ref: &SessionDoc = &doc;
     let mut folded: Vec<MessagePart> = Vec::new();
+    // A run is at least one new turn: the stored crew-report id belongs to
+    // the previous turn — it must not suppress this one's end write.
+    inner.crew_turn_opened(&chat_id);
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -5528,6 +5599,7 @@ async fn drive_run(
                         last_stream_activity = tokio::time::Instant::now();
                         entry_id = new_id();
                         segment_started = now_ms();
+                        inner.crew_turn_opened(&chat_id);
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     continue;
@@ -6109,6 +6181,7 @@ async fn drive_run(
                 // fall through — this event is the new segment's first part.
                 entry_id = new_id();
                 segment_started = now_ms();
+                inner.crew_turn_opened(&chat_id);
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
                 match &event {
@@ -6351,6 +6424,7 @@ async fn drive_run(
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
             segment_started = now_ms();
+            inner.crew_turn_opened(&chat_id);
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -6431,8 +6505,12 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            let last_text = folded.iter().rev().find_map(|part| match part {
+                MessagePart::Text { id, text } => Some(TurnText { id, text }),
+                _ => None,
+            });
             let stamp = inner.dispatch_captain_stamp(&chat_id, &run_id);
-            inner.captain_turn_ended(&chat_id, stamp.as_deref(), *status);
+            inner.turn_end_writes(&chat_id, stamp.as_deref(), *status, last_text);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -8470,10 +8548,11 @@ mod tests {
         let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
         let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
         assert!(
-            sessions.captain_turn_ended(
+            sessions.turn_end_writes(
                 "cap-a",
                 Some(&captain_stamp(&drive)),
-                DoneStatus::Completed
+                DoneStatus::Completed,
+                None
             ),
             "a live Captain's completed turn schedules the snapshot"
         );
@@ -8489,7 +8568,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
         seed_digest(&home, "## Needs you\n- not mine\n");
-        assert!(!sessions.captain_turn_ended("plain", None, DoneStatus::Completed));
+        assert!(!sessions.turn_end_writes("plain", None, DoneStatus::Completed, None));
         tokio::time::sleep(Duration::from_millis(200)).await;
         let mut files = 0;
         for captain_dir in std::fs::read_dir(home.join("captains")).into_iter().flatten() {
@@ -8514,7 +8593,7 @@ mod tests {
             "driveRoot": drive.to_string_lossy(),
         })
         .to_string();
-        assert!(!sessions.captain_turn_ended("crew-b", Some(&crew_stamp), DoneStatus::Completed));
+        assert!(!sessions.turn_end_writes("crew-b", Some(&crew_stamp), DoneStatus::Completed, None));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             !drive.join("state").join(crate::needs_you::FILE).exists(),
@@ -8530,7 +8609,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), registry);
         let drive = seed_digest(&home, "## Needs you\n- paused\n");
-        assert!(!sessions.captain_turn_ended("cap-a", None, DoneStatus::Completed));
+        assert!(!sessions.turn_end_writes("cap-a", None, DoneStatus::Completed, None));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!drive.join("state").join(crate::needs_you::FILE).exists());
     }
@@ -8570,7 +8649,12 @@ mod tests {
         std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- half-written\n").expect("digest");
 
         assert!(
-            sessions.captain_turn_ended("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Errored),
+            sessions.turn_end_writes(
+                "cap-a",
+                Some(&captain_stamp(&drive)),
+                DoneStatus::Errored,
+                None
+            ),
             "a live Captain's failed turn is still a turn end worth tracing"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
@@ -8578,6 +8662,85 @@ mod tests {
             std::fs::read_to_string(&path).expect("after"),
             before,
             "a failed turn does not clobber the last good list"
+        );
+    }
+
+    /// A duplicate finalization of the same turn does not rewrite a finished
+    /// report; a different turn id does.
+    #[tokio::test]
+    async fn a_duplicate_crew_finalization_does_not_rewrite_the_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "t-1",
+                    text: "first body",
+                })
+            ),
+            "a crew turn's end schedules its report"
+        );
+        assert!(wait_for(&path).await, "the report is written: {}", path.display());
+        let first = std::fs::read_to_string(&path).expect("the first report reads");
+
+        // The same turn finalized again — an idle re-finalization — must not
+        // touch the finished report.
+        assert!(!sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "t-1",
+                text: "first body",
+            })
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("the report reads back"),
+            first,
+            "a duplicate finalization does not rewrite the report"
+        );
+
+        // A different turn id is a different turn: its report replaces the
+        // first.
+        assert!(sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "t-2",
+                text: "second body",
+            })
+        ));
+        for _ in 0..60 {
+            if std::fs::read_to_string(&path).is_ok_and(|body| body.contains("second body")) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let body = std::fs::read_to_string(&path).expect("the second report reads");
+        assert!(
+            body.contains("second body"),
+            "the new turn's report replaced the first: {body:?}"
+        );
+        assert!(
+            !body.contains("first body"),
+            "the report is replaced, not appended: {body:?}"
         );
     }
 
