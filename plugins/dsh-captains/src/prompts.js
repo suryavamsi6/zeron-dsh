@@ -5,6 +5,7 @@ const escapeAttr = s => String(s)
   .replace(/"/g, '&quot;');
 
 const escapePath = s => String(s)
+  .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;');
 

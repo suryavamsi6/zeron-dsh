@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
-import { cp, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { cp, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
@@ -161,18 +161,150 @@ test('the captains bundle installs and composes on rc.3', { timeout: 300000 }, a
 // validation is the security boundary: an unknown role or a relative Drive root
 // must throw before any registration runs.
 test('zeron-captains validates its row config', async () => {
-  const module = await import(new URL('../../../plugins/dsh-captains/index.js', import.meta.url).href);
-  assert.equal(module.name, 'zeron-captains');
+  // The validation lives in a plain module the entry point re-exports, so this
+  // matrix runs without dsh installed; `apply` itself is exercised below.
+  const module = await import(new URL('../../../plugins/dsh-captains/src/config.js', import.meta.url).href);
+  const driveFixture = join(tmpdir(), 'd');
   assert.equal(module.normalizeConfig({}).role, 'none');
   assert.equal(module.normalizeConfig(undefined).role, 'none');
   assert.throws(() => module.normalizeConfig({ role: 'boss' }), /unknown role/);
   assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: 'rel' }), /driveRoot/);
-  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c2', captainName: 'B', driveRoot: '/tmp/d' }), /captainId/);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: '', driveRoot: '/tmp/d' }), /captainName/);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c 2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' }), /chatId/);
-  const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
+  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c2', captainName: 'B', driveRoot: driveFixture }), /captainId/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: '', driveRoot: driveFixture }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c 2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture }), /chatId/);
+  const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture });
   assert.equal(crew.captainId, 'c1');
   assert.equal(crew.role, 'crew');
+  // The boundary pairs are part of the contract, not a detail of the regex:
+  // 128 characters is a valid id, 129 is not; 80 is a valid name, 81 is not.
+  const id128 = 'a'.repeat(128);
+  assert.equal(module.normalizeConfig({ role: 'crew', chatId: id128, captainId: 'c1', captainName: 'B', driveRoot: driveFixture }).chatId, id128);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: `${id128}a`, captainId: 'c1', captainName: 'B', driveRoot: driveFixture }), /chatId/);
+  assert.equal(module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(80), driveRoot: driveFixture }).captainName.length, 80);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(81), driveRoot: driveFixture }), /captainName/);
+  // A name is one line: a newline would break the section's attribute shape.
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\nb', driveRoot: driveFixture }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\rb', driveRoot: driveFixture }), /captainName/);
+});
+
+// SUR-99: the Drive tools are host code, so the installed bundle has to keep
+// every call inside the row's driveRoot. This case exercises the tools the way
+// the runtime would: apply() with a fake registration context, then the tool
+// definitions themselves, against a real temp Drive.
+test('the captains bundle confines Drive tools', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-drive-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-drive-bundle-'));
+  const drive = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-drive-root-'));
+  const outside = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-drive-outside-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  t.after(() => rm(drive, { recursive: true, force: true }));
+  t.after(() => rm(outside, { recursive: true, force: true }));
+  await writeFile(join(outside, 'secret.txt'), 'secret');
+  await symlink(outside, join(drive, 'link'));
+
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  // A real install supplies the dsh-tools peer next to the bundle. This copy
+  // lives in a temp dir with no dsh on PATH, so link the peer in the same way
+  // the installed layout would; without it the tools cannot be defined at all.
+  await symlink(join(sdkRoot, 'node_modules'), join(bundle, 'node_modules'), 'dir');
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+  const profile = join(home, 'profiles', 'sdk');
+
+  const script = `
+import assert from 'node:assert/strict';
+import { mkdir, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
+const drive = process.argv[1];
+const plugin = await import('zeron-dsh-captains');
+assert.equal(plugin.name, 'zeron-captains');
+// The entry re-exports the validation it applies, so callers share one rule.
+assert.equal(typeof plugin.normalizeConfig, 'function', 'the entry dropped its normalizeConfig re-export');
+assert.throws(() => plugin.normalizeConfig({ role: 'boss' }), /unknown role/);
+const captain = { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
+const crew = { role: 'crew', chatId: 'crew-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
+
+// The plugin registers on the root agent, not at load, so each assertion goes
+// through the same gate the runtime uses.
+function applyAs(config, origin) {
+  const registered = [];
+  const scope = {
+    systemPrompt: { section: () => () => {}, getSectionOrder: () => 10200 },
+    tools: { register: (definition) => { registered.push(definition); return () => {}; } },
+    effect: fn => fn(),
+  };
+  let created;
+  plugin.apply({ ...scope, on: (event, handler) => { if (event === 'agent/created') created = handler; } }, config);
+  if (created) created({ agent: { session: { header: { origin } }, ctx: scope } });
+  return registered;
+}
+
+// Crew and ordinary sessions register zero Drive tools; a Captain gets exactly two.
+assert.deepEqual(applyAs(crew, 'root'), [], 'a crew chat registers no Drive tools');
+assert.deepEqual(applyAs({ role: 'none' }, 'root'), [], 'an ordinary chat registered a tool');
+assert.deepEqual(applyAs(captain, 'subagent'), [], 'a native child inherited the Drive tools');
+// The installed entry applies the same validation as the plain module.
+assert.throws(() => plugin.apply({ on: () => {} },
+  { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: 'relative' }), /driveRoot/);
+
+const registered = applyAs(captain, 'root');
+assert.deepEqual(registered.map(definition => definition.name).sort(), ['captain_drive_read', 'captain_drive_write']);
+const read = registered.find(definition => definition.name === 'captain_drive_read');
+const write = registered.find(definition => definition.name === 'captain_drive_write');
+const outside = /path is outside the Captain Drive/;
+
+// Round trip under a nested path the tool creates.
+const wrote = await write.execute({ path: 'notes/deep/a.txt', content: 'hello' });
+assert.ok(wrote.startsWith('wrote notes/deep/a.txt (') && wrote.endsWith(' bytes)'), wrote);
+assert.equal(await read.execute({ path: 'notes/deep/a.txt' }), 'hello');
+assert.equal(await read.execute({ path: '' }), 'notes/');
+
+// Traversal, absolute paths and a symlink that leaves the Drive are rejected.
+await assert.rejects(read.execute({ path: 'link/secret.txt' }), outside);
+await assert.rejects(write.execute({ path: 'link/evil.txt', content: 'x' }), outside);
+await assert.rejects(read.execute({ path: '../secret.txt' }), outside);
+await assert.rejects(write.execute({ path: '/etc/passwd', content: 'x' }), outside);
+
+// The engine owns state/ and reports/ for writing; the Captain reads them.
+await assert.rejects(write.execute({ path: 'state/needs-you.json', content: '{}' }), /engine-owned/);
+await assert.rejects(write.execute({ path: 'reports/turn-1.md', content: '# report' }), /engine-owned/);
+// The guard is checked on the resolved path: a display prefix must not smuggle
+// a write into either folder.
+for (const target of ['.//state/needs-you.json', './/reports/turn-1.md', '././/state/needs-you.json']) {
+  await assert.rejects(write.execute({ path: target, content: 'x' }), /engine-owned/, target + ' slipped past the engine-owned guard');
+}
+// A symlink alias inside the Drive still names the engine's folder.
+await mkdir(join(drive, 'state'), { recursive: true });
+await symlink(join(drive, 'state'), join(drive, 'alias'));
+await assert.rejects(write.execute({ path: 'alias/needs-you.json', content: '{}' }), /engine-owned/,
+  'a symlink alias reached the engine-owned folder');
+// Positive controls: a prefix is not the folder.
+for (const target of ['notes/x.md', 'stateful/x.md']) {
+  await write.execute({ path: target, content: 'ok' });
+  assert.equal(await read.execute({ path: target }), 'ok', target);
+}
+// Writing through a symlinked folder lands at the real path and says so.
+await symlink(join(drive, 'notes'), join(drive, 'notes-alias'));
+assert.equal(await write.execute({ path: 'notes-alias/y.txt', content: 'abc' }), 'wrote notes/y.txt (3 bytes)');
+
+// A read-only run cannot write the Drive.
+process.env.DSH_PERMISSION_MODE = 'read-only';
+await assert.rejects(write.execute({ path: 'notes/blocked.txt', content: 'x' }), /read-only/);
+delete process.env.DSH_PERMISSION_MODE;
+
+console.log('confined');
+`;
+  const call = await run(['--input-type=module', '-e', script, drive],
+    { cwd: profile, env: { ...env, NODE_PATH: join(sdkRoot, 'node_modules') }, timeout: 60000 });
+  assert.equal(call.code, 0, `the Drive tools are not confined: ${report(call)}`);
+  assert.match(call.stdout, /^confined$/m);
 });
 
 // SUR-84: the role prompt is a system section, so the only assertion that
@@ -201,8 +333,8 @@ test('Helm bundle adds the role prompt to model input', { timeout: 300000 }, asy
   // (SUR-104); until then the test supplies the same invocation patch so the
   // plugin's half of the contract is pinned end to end.
   const roles = {
-    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
-    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
+    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
+    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
     none: { role: 'none' },
   };
   const sessions = { helm: 'dsh-session-a', crew: 'dsh-session-b', none: 'dsh-session-c' };
@@ -239,6 +371,49 @@ test('Helm bundle adds the role prompt to model input', { timeout: 300000 }, asy
     assert.doesNotMatch(systems[role], /<captain/, `the ${role} row registered a captain section`);
     assert.doesNotMatch(systems[role], /## Needs you/, `the ${role} row carried the captain prompt`);
   }
+});
+
+test('the bundle loads and stays inert without the dsh tools peer', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-nopeer-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const bundle = join(dir, 'bundle');
+  await cp(resolve(here, '../../../plugins/dsh-captains'), bundle, { recursive: true });
+  await rm(join(bundle, 'node_modules'), { recursive: true, force: true });
+  // With no PATH, no cwd profile and no local node_modules, nothing can satisfy
+  // the peer: the module still has to load, an ordinary chat must stay inert,
+  // and a captain must fail loudly rather than lose its tools silently.
+  const script = `
+const plugin = await import(process.argv[1]);
+console.log('name:' + plugin.name);
+plugin.apply({}, { role: 'none' });
+console.log('inert');
+const ctx = {
+  systemPrompt: { section: () => () => {}, getSectionOrder: () => 10200 },
+  tools: { register: () => () => {} },
+  effect: fn => fn(),
+};
+let created;
+const host = { ...ctx, on: (event, handler) => { if (event === 'agent/created') created = handler; } };
+try {
+  plugin.apply(host, { role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: process.argv[2] });
+  created({ agent: { session: { header: { origin: 'root' } }, ctx } });
+  console.log('captain:ran');
+} catch (error) {
+  console.log('captain:' + String(error.message).slice(0, 120));
+}
+`;
+  const isolated = Object.fromEntries(Object.entries({ HOME: dir, TMPDIR: tmpdir(), DSH_HOME: join(dir, 'home') }));
+  const probed = await new Promise(runProbe => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, join(bundle, 'index.js'), join(dir, 'drive')], { cwd: dir, env: isolated });
+    let out = '';
+    child.stdout.on('data', chunk => { out += chunk; });
+    child.stderr.on('data', chunk => { out += chunk; });
+    child.once('close', code => runProbe({ code, out }));
+  });
+  assert.equal(probed.code, 0, `the isolated bundle did not load: ${probed.out}`);
+  assert.match(probed.out, /^name:zeron-captains$/m);
+  assert.match(probed.out, /^inert$/m);
+  assert.match(probed.out, /^captain:.*dsh-tools/m, `a captain without the peer did not fail loudly: ${probed.out}`);
 });
 
 // SUR-104: the role rides the host-stamped environment, and zeron's own shim
@@ -321,7 +496,7 @@ test('the sidecar stamps the host role into the captains row', { timeout: 300000
   const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
   assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const context = { here, env };
   const stamped = await sidecar(context, sdkRoot, checkout, home, role, 'dsh-session-a');
   assert.equal(stamped.frame.type, 'ready', `the stamped run did not start: ${stamped.lines.join('\n')}`);
@@ -376,8 +551,10 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
     for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString());
     requests.push(input);
-    const text = typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
-    const child = text.includes('delegated by agent');
+    // A native child's first user turn is the delegated task; its system
+    // prompt does not name the delegation, so detect it the same way the
+    // assertions below do.
+    const child = JSON.stringify((input.messages ?? [])[0] ?? '').includes('child task');
     const followUp = JSON.stringify(input.messages ?? '').includes('tool_result');
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
@@ -400,7 +577,7 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
   await new Promise(listening => server.listen(0, '127.0.0.1', listening));
   t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const result = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a', {
     prompt: 'delegate this to a subagent',
     env: { DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` },
@@ -408,12 +585,21 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
   assert.equal(result.frame.type, 'done', `the run did not finish: ${JSON.stringify(result.frame).slice(0, 300)}\n${result.lines.slice(-4).join('\n')}`);
 
   const system = input => typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
+  const advertised = input => (input.tools ?? []).map(tool => tool.name);
   const root = requests.find(input => system(input).includes('<captain name="Helm">'));
   assert.ok(root, 'the root session never carried the captain prompt');
   // A child session's first user turn is the delegated task, not the person's ask.
   const child = requests.find(input => JSON.stringify((input.messages ?? [])[0] ?? '').includes('child task'));
   assert.ok(child, 'the subagent never ran');
   assert.doesNotMatch(system(child), /<captain|## Needs you/, 'a native child inherited the captain prompt');
+
+  // The Drive tools ride the same scope: the root advertises both, the child
+  // neither. Removing the `agent/created` gate fails on this pair, not on a
+  // timeout.
+  for (const tool of ['captain_drive_read', 'captain_drive_write']) {
+    assert.ok(advertised(root).includes(tool), `the root session did not advertise ${tool}: ${advertised(root).join(', ')}`);
+    assert.ok(!advertised(child).includes(tool), `a native child inherited the ${tool} tool`);
+  }
 });
 
 // SUR-104 blocker 2: an override row for an id no bundle inserted is dropped by
@@ -429,7 +615,7 @@ test('the sidecar refuses a captains row without the bundle', { timeout: 300000 
   const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
     SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const refused = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a');
   assert.equal(refused.frame.type, 'error', `a captains row without the bundle started: ${refused.lines.join('\n')}`);
   assert.match(refused.frame.message, /bundle|zeron-captains/i, `the refusal did not name the missing bundle: ${refused.frame.message}`);
