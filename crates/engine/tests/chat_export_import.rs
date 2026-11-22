@@ -33,6 +33,15 @@ fn fixture() -> PathBuf {
         .join("deepseek-export-v3.zip")
 }
 
+/// One conversation with no messages, one whose only message the exporter
+/// marked `CONTENT_FILTER`, and one with no title.
+fn empty_fixture() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("deepseek-export-v3-empty.zip")
+}
+
 async fn import(core: &EngineCore, path: &Path) -> Result<serde_json::Value, String> {
     let rpc = core.rpc_service();
     match rpc
@@ -126,6 +135,19 @@ async fn an_export_imports_as_read_only_chats_with_ordered_transcripts() {
     assert_eq!(marker.source, "deepseek-v3");
     assert_eq!(marker.source_id, "s1", "the exporter's id is the identity");
 
+    // The doc is stored in the born-chat2 shape: cursor 0 and epoch 2. With
+    // the row's `roomGen: 2` that is exactly what keeps `DocHost::open` off
+    // the legacy s2 adopt path — an epoch-0 doc under an edge profile is
+    // discarded there, which would lose this transcript.
+    let (stored, cursor, epoch) = core
+        .doc_host
+        .store()
+        .load_snapshot_with_cursor("deepseek-s1")
+        .expect("read the stored doc")
+        .expect("the transcript is stored");
+    assert_eq!((cursor, epoch), (0, 2), "born-chat2: cursor 0, epoch 2");
+    assert!(!stored.is_empty(), "the stored doc carries the transcript");
+
     // Role, order, text, thinking and links — the parser already selected the
     // branch, so the transcript is exactly its turns in its order.
     let turns = entry(&core, &two.id);
@@ -186,10 +208,53 @@ async fn an_export_imports_as_read_only_chats_with_ordered_transcripts() {
         "s2",
         "one export, one identity per conversation"
     );
+    assert_eq!(
+        simple.imported.as_ref().expect("marker").imported_at,
+        marker.imported_at,
+        "one call stamps every row it writes with one import time"
+    );
     let simple_turns = entry(&core, &simple.id);
     assert_eq!(simple_turns.len(), 2);
     assert_eq!(texts(&simple_turns[0]), vec!["hello"]);
     assert_eq!(texts(&simple_turns[1]), vec!["hi"]);
+
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_zero_turn_conversation_writes_no_chat() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let core = assemble(dir.path());
+
+    let summary = import(&core, &empty_fixture()).await.expect("import");
+    // The parser emits `turns: []` for both; there is nothing to open, so no
+    // row, no count and no id in the answer.
+    assert_eq!(summary["imported"], 1, "{summary}");
+    assert_eq!(summary["alreadyPresent"], 0, "{summary}");
+    assert_eq!(
+        summary["chats"],
+        serde_json::json!(["deepseek-u1"]),
+        "{summary}"
+    );
+    for silent in ["e1", "e2"] {
+        assert!(
+            core.workspace
+                .chat(&format!("deepseek-{silent}"))
+                .expect("read row")
+                .is_none(),
+            "{silent} has no turns and must not become a chat"
+        );
+    }
+
+    // The conversation that does have a turn imports, and a missing export
+    // title stays missing rather than being invented.
+    let untitled = core
+        .workspace
+        .chat("deepseek-u1")
+        .expect("read row")
+        .expect("u1 imported");
+    assert_eq!(untitled.title, None, "a null title stays null");
+    assert_eq!(entry(&core, "deepseek-u1").len(), 1);
 
     core.shutdown().await;
 }
@@ -279,10 +344,7 @@ async fn a_failed_transcript_write_publishes_no_row() {
     );
     for chat_id in ["deepseek-s1", "deepseek-s2"] {
         assert!(
-            core.workspace
-                .chat(chat_id)
-                .expect("read row")
-                .is_none(),
+            core.workspace.chat(chat_id).expect("read row").is_none(),
             "{chat_id} was published without a transcript"
         );
     }
@@ -300,9 +362,13 @@ async fn a_non_export_file_is_a_displayable_error() {
     let error = import(&core, &path)
         .await
         .expect_err("a non-export is refused");
+    assert_eq!(
+        error, "chat-export: not a ZIP archive",
+        "the parser's own message reaches the person, not a Node stack"
+    );
     assert!(
-        error.contains("chat-export"),
-        "the error must be displayable and name the parser: {error}"
+        !error.contains("    at "),
+        "no stack frames in the displayable error: {error}"
     );
     assert!(
         core.workspace
@@ -334,10 +400,7 @@ async fn another_device_cannot_import_into_this_one() {
             .await
         })
         .await;
-        assert!(
-            refused.is_err(),
-            "an import was served to {caller:?}"
-        );
+        assert!(refused.is_err(), "an import was served to {caller:?}");
     }
     assert!(
         core.workspace

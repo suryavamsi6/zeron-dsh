@@ -79,8 +79,9 @@ pub fn read_chat_export(zip: &Path) -> Result<Vec<ExportedConversation>, String>
     let node =
         super::node().ok_or_else(|| "node is required to read a DeepSeek chat export".to_string())?;
     let driver = format!(
-        "{CHAT_EXPORT}\nconst __export = readExport(await readFile(process.argv[1]));\n\
-         process.stdout.write(JSON.stringify(__export));\n"
+        "{CHAT_EXPORT}\ntry {{\n  const __export = readExport(await readFile(process.argv[1]));\n  \
+         process.stdout.write(JSON.stringify(__export));\n}} catch (error) {{\n  \
+         console.error(error?.message ?? String(error));\n  process.exitCode = 1;\n}}\n"
     );
     let output = std::process::Command::new(node)
         .arg("--input-type=module")
@@ -95,9 +96,7 @@ pub fn read_chat_export(zip: &Path) -> Result<Vec<ExportedConversation>, String>
     }
     let conversations = serde_json::from_slice::<Vec<ExportedConversation>>(&output.stdout)
         .map_err(|error| format!("cannot read the parser's output: {error}"))?;
-    if conversations.len() > 1000 {
-        return Err("the export has more than 1000 conversations".into());
-    }
+    // Truncation to 1000 conversations happens inside the pinned parser.
     if conversations.iter().any(|c| c.id.trim().is_empty()) {
         return Err("the export has a conversation with no id".into());
     }

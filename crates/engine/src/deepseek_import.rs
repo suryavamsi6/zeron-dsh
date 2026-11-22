@@ -134,6 +134,13 @@ impl ChatImporter {
             chats: Vec::new(),
         };
         for conversation in &conversations {
+            // A conversation with no usable turns (an empty session, or one whose
+            // messages were all CONTENT_FILTER) would land as an empty clickable
+            // chat. The parser reports it faithfully; the importer declines it, so
+            // it is neither counted nor listed.
+            if conversation.turns.is_empty() {
+                continue;
+            }
             let chat_id = format!("deepseek-{}", conversation.id);
             outcome.chats.push(chat_id.clone());
             if self.workspace.chat(&chat_id)?.is_some() {
