@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promise
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { driveDir, driveToolSpecs, resolveInDrive } from '../src/tools.js';
+import { apply } from '../index.js';
 
 const captain = root => ({ role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: root });
 
@@ -109,4 +110,28 @@ test('a read-only run refuses to write the Drive', async t => {
   });
   await assert.rejects(write.execute({ path: 'notes/blocked.txt', content: 'x' }), /read-only/);
   assert.deepEqual(await readdir(root), []);
+});
+
+// SUR-104 scopes the captain contribution to the root agent; the Drive tools
+// ride the same gate, or every native child inherits the Captain's hands.
+function gated(config, origin) {
+  const registered = [];
+  const scope = {
+    systemPrompt: { section: () => () => {}, getSectionOrder: () => 10200 },
+    tools: { register(definition) { registered.push(definition.name); return () => {}; } },
+    effect: fn => fn(),
+  };
+  let created;
+  apply({ ...scope, on(event, handler) { if (event === 'agent/created') created = handler; } }, config);
+  if (origin !== 'subagent' && created) created({ agent: { session: { header: { origin } }, ctx: scope } });
+  return registered;
+}
+
+test('only the root agent registers the Drive tools', async t => {
+  const root = await drive(t);
+  const config = captain(root);
+  assert.deepEqual(gated(config, 'root').sort(), ['captain_drive_read', 'captain_drive_write']);
+  const crew = { ...config, role: 'crew', chatId: 'crew-1' };
+  assert.deepEqual(gated(crew, 'root'), [], 'a crew chat registered a Drive tool');
+  assert.deepEqual(gated(config, 'subagent'), [], 'a native child inherited the Drive tools');
 });

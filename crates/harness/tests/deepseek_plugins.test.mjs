@@ -164,26 +164,27 @@ test('zeron-captains validates its row config', async () => {
   // The validation lives in a plain module the entry point re-exports, so this
   // matrix runs without dsh installed; `apply` itself is exercised below.
   const module = await import(new URL('../../../plugins/dsh-captains/src/config.js', import.meta.url).href);
+  const driveFixture = join(tmpdir(), 'd');
   assert.equal(module.normalizeConfig({}).role, 'none');
   assert.equal(module.normalizeConfig(undefined).role, 'none');
   assert.throws(() => module.normalizeConfig({ role: 'boss' }), /unknown role/);
   assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: 'rel' }), /driveRoot/);
-  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c2', captainName: 'B', driveRoot: '/tmp/d' }), /captainId/);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: '', driveRoot: '/tmp/d' }), /captainName/);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c 2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' }), /chatId/);
-  const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
+  assert.throws(() => module.normalizeConfig({ role: 'captain', chatId: 'c1', captainId: 'c2', captainName: 'B', driveRoot: driveFixture }), /captainId/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: '', driveRoot: driveFixture }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c 2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture }), /chatId/);
+  const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture });
   assert.equal(crew.captainId, 'c1');
   assert.equal(crew.role, 'crew');
   // The boundary pairs are part of the contract, not a detail of the regex:
   // 128 characters is a valid id, 129 is not; 80 is a valid name, 81 is not.
   const id128 = 'a'.repeat(128);
-  assert.equal(module.normalizeConfig({ role: 'crew', chatId: id128, captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' }).chatId, id128);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: `${id128}a`, captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' }), /chatId/);
-  assert.equal(module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(80), driveRoot: '/tmp/d' }).captainName.length, 80);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(81), driveRoot: '/tmp/d' }), /captainName/);
+  assert.equal(module.normalizeConfig({ role: 'crew', chatId: id128, captainId: 'c1', captainName: 'B', driveRoot: driveFixture }).chatId, id128);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: `${id128}a`, captainId: 'c1', captainName: 'B', driveRoot: driveFixture }), /chatId/);
+  assert.equal(module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(80), driveRoot: driveFixture }).captainName.length, 80);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'b'.repeat(81), driveRoot: driveFixture }), /captainName/);
   // A name is one line: a newline would break the section's attribute shape.
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\nb', driveRoot: '/tmp/d' }), /captainName/);
-  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\rb', driveRoot: '/tmp/d' }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\nb', driveRoot: driveFixture }), /captainName/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'a\rb', driveRoot: driveFixture }), /captainName/);
 });
 
 // SUR-99: the Drive tools are host code, so the installed bundle has to keep
@@ -221,17 +222,30 @@ assert.equal(plugin.name, 'zeron-captains');
 const captain = { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
 const crew = { role: 'crew', chatId: 'crew-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
 
+// The plugin registers on the root agent, not at load, so each assertion goes
+// through the same gate the runtime uses.
+function applyAs(config, origin) {
+  const registered = [];
+  const scope = {
+    systemPrompt: { section: () => () => {}, getSectionOrder: () => 10200 },
+    tools: { register: (definition) => { registered.push(definition); return () => {}; } },
+    effect: fn => fn(),
+  };
+  let created;
+  plugin.apply({ ...scope, on: (event, handler) => { if (event === 'agent/created') created = handler; } }, config);
+  if (created) created({ agent: { session: { header: { origin } }, ctx: scope } });
+  return registered;
+}
+
 // Crew and ordinary sessions register zero Drive tools; a Captain gets exactly two.
-const crewTools = [];
-plugin.apply({ tools: { register: (definition) => { crewTools.push(definition.name); return () => {}; } } }, crew);
-assert.deepEqual(crewTools, [], 'a crew chat registers no Drive tools');
-plugin.apply({ tools: { register: () => { throw new Error('an ordinary chat registered a tool'); } } }, { role: 'none' });
+assert.deepEqual(applyAs(crew, 'root'), [], 'a crew chat registers no Drive tools');
+assert.deepEqual(applyAs({ role: 'none' }, 'root'), [], 'an ordinary chat registered a tool');
+assert.deepEqual(applyAs(captain, 'subagent'), [], 'a native child inherited the Drive tools');
 // The installed entry applies the same validation as the plain module.
-assert.throws(() => plugin.apply({ tools: { register: () => {} } },
+assert.throws(() => plugin.apply({ on: () => {} },
   { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: 'relative' }), /driveRoot/);
 
-const registered = [];
-plugin.apply({ tools: { register: (definition) => { registered.push(definition); return () => {}; } } }, captain);
+const registered = applyAs(captain, 'root');
 assert.deepEqual(registered.map(definition => definition.name).sort(), ['captain_drive_read', 'captain_drive_write']);
 const read = registered.find(definition => definition.name === 'captain_drive_read');
 const write = registered.find(definition => definition.name === 'captain_drive_write');
@@ -291,8 +305,8 @@ test('Helm bundle adds the role prompt to model input', { timeout: 300000 }, asy
   // (SUR-104); until then the test supplies the same invocation patch so the
   // plugin's half of the contract is pinned end to end.
   const roles = {
-    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
-    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' },
+    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
+    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
     none: { role: 'none' },
   };
   const sessions = { helm: 'dsh-session-a', crew: 'dsh-session-b', none: 'dsh-session-c' };
@@ -350,8 +364,11 @@ const ctx = {
   tools: { register: () => () => {} },
   effect: fn => fn(),
 };
+let created;
+const host = { ...ctx, on: (event, handler) => { if (event === 'agent/created') created = handler; } };
 try {
-  plugin.apply(ctx, { role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: '/tmp/d' });
+  plugin.apply(host, { role: 'captain', chatId: 'c1', captainId: 'c1', captainName: 'B', driveRoot: process.argv[2] });
+  created({ agent: { session: { header: { origin: 'root' } }, ctx } });
   console.log('captain:ran');
 } catch (error) {
   console.log('captain:' + String(error.message).slice(0, 120));
@@ -359,7 +376,7 @@ try {
 `;
   const isolated = Object.fromEntries(Object.entries({ HOME: dir, TMPDIR: tmpdir(), DSH_HOME: join(dir, 'home') }));
   const probed = await new Promise(runProbe => {
-    const child = spawn(process.execPath, ['--input-type=module', '-e', script, join(bundle, 'index.js')], { cwd: dir, env: isolated });
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script, join(bundle, 'index.js'), join(dir, 'drive')], { cwd: dir, env: isolated });
     let out = '';
     child.stdout.on('data', chunk => { out += chunk; });
     child.stderr.on('data', chunk => { out += chunk; });
@@ -451,7 +468,7 @@ test('the sidecar stamps the host role into the captains row', { timeout: 300000
   const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
   assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const context = { here, env };
   const stamped = await sidecar(context, sdkRoot, checkout, home, role, 'dsh-session-a');
   assert.equal(stamped.frame.type, 'ready', `the stamped run did not start: ${stamped.lines.join('\n')}`);
@@ -506,8 +523,10 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
     for await (const chunk of request) chunks.push(chunk);
     const input = JSON.parse(Buffer.concat(chunks).toString());
     requests.push(input);
-    const text = typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
-    const child = text.includes('delegated by agent');
+    // A native child's first user turn is the delegated task; its system
+    // prompt does not name the delegation, so detect it the same way the
+    // assertions below do.
+    const child = JSON.stringify((input.messages ?? [])[0] ?? '').includes('child task');
     const followUp = JSON.stringify(input.messages ?? '').includes('tool_result');
     response.writeHead(200, { 'content-type': 'text/event-stream' });
     const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
@@ -530,7 +549,7 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
   await new Promise(listening => server.listen(0, '127.0.0.1', listening));
   t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const result = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a', {
     prompt: 'delegate this to a subagent',
     env: { DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` },
@@ -538,12 +557,21 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
   assert.equal(result.frame.type, 'done', `the run did not finish: ${JSON.stringify(result.frame).slice(0, 300)}\n${result.lines.slice(-4).join('\n')}`);
 
   const system = input => typeof input.system === 'string' ? input.system : JSON.stringify(input.system ?? '');
+  const advertised = input => (input.tools ?? []).map(tool => tool.name);
   const root = requests.find(input => system(input).includes('<captain name="Helm">'));
   assert.ok(root, 'the root session never carried the captain prompt');
   // A child session's first user turn is the delegated task, not the person's ask.
   const child = requests.find(input => JSON.stringify((input.messages ?? [])[0] ?? '').includes('child task'));
   assert.ok(child, 'the subagent never ran');
   assert.doesNotMatch(system(child), /<captain|## Needs you/, 'a native child inherited the captain prompt');
+
+  // The Drive tools ride the same scope: the root advertises both, the child
+  // neither. Removing the `agent/created` gate fails on this pair, not on a
+  // timeout.
+  for (const tool of ['captain_drive_read', 'captain_drive_write']) {
+    assert.ok(advertised(root).includes(tool), `the root session did not advertise ${tool}: ${advertised(root).join(', ')}`);
+    assert.ok(!advertised(child).includes(tool), `a native child inherited the ${tool} tool`);
+  }
 });
 
 // SUR-104 blocker 2: an override row for an id no bundle inserted is dropped by
@@ -559,7 +587,7 @@ test('the sidecar refuses a captains row without the bundle', { timeout: 300000 
   const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
     SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
 
-  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') };
   const refused = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-a');
   assert.equal(refused.frame.type, 'error', `a captains row without the bundle started: ${refused.lines.join('\n')}`);
   assert.match(refused.frame.message, /bundle|zeron-captains/i, `the refusal did not name the missing bundle: ${refused.frame.message}`);

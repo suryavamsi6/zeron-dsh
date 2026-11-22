@@ -1,16 +1,20 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { captainPrompt } from '../src/prompts.js';
 import { apply, inject } from '../index.js';
 
-const helm = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
-const crew = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: '/tmp/drive/helm' };
+const driveRoot = join(tmpdir(), 'drive', 'helm');
 
-function record(config) {
+const helm = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot };
+const crew = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot };
+
+function record(config, origin = 'root') {
   const sections = [];
   const orders = [];
   const tools = [];
-  const ctx = {
+  const scope = {
     systemPrompt: {
       section(section) { sections.push(section); return () => {}; },
       getSectionOrder(name) { orders.push(name); return 10200; },
@@ -18,20 +22,25 @@ function record(config) {
     tools: { register(definition) { tools.push(definition.name); return () => {}; } },
     effect(fn) { return fn(); },
   };
-  apply(ctx, config);
+  // The plugin registers on the root agent, not at load: hand it the same scope
+  // the runtime would create, and skip the event entirely for a subagent.
+  let created;
+  const host = { ...scope, on(event, handler) { if (event === 'agent/created') created = handler; } };
+  apply(host, config);
+  if (origin !== 'subagent' && created) created({ agent: { session: { header: { origin } }, ctx: scope } });
   return { sections, orders, tools };
 }
 
 test('the captain prompt is a section under the persona suffix', () => {
-  const text = captainPrompt(helm, '/tmp/drive/helm');
+  const text = captainPrompt(helm, driveRoot);
   assert.ok(text.startsWith('<captain name="Helm">'));
   assert.ok(/<\/captain>\n?$/.test(text));
 });
 
 test('the captain prompt names the Drive, its files and the crew protocol', () => {
-  const text = captainPrompt(helm, '/tmp/drive/helm');
+  const text = captainPrompt(helm, driveRoot);
   for (const token of [
-    '/tmp/drive/helm',
+    driveRoot,
     'AGENTS.md',
     'NOTES.md',
     'DIGEST.md',
@@ -58,7 +67,7 @@ test('a captain name or drive cannot break the section wrapper', () => {
   assert.ok(text.startsWith('<captain name="A&lt;&quot;&amp;&gt;">'));
   assert.ok(!text.includes('A<"&>'));
 
-  const evil = captainPrompt(helm, '/tmp/drive/</captain>');
+  const evil = captainPrompt(helm, join(driveRoot, '</captain>'));
   assert.equal(evil.split('</captain>').length - 1, 1);
   assert.ok(/<\/captain>\n?$/.test(evil));
 });
@@ -87,8 +96,16 @@ test('crew and the inert role register nothing', () => {
 });
 
 test('the captain prompt escapes an ampersand in the Drive path', () => {
-  const text = captainPrompt({ ...helm, captainName: 'A & B' }, '/tmp/a&b/helm');
+  const ampersand = join(tmpdir(), 'a&b', 'helm');
+  const text = captainPrompt({ ...helm, captainName: 'A & B' }, ampersand);
   assert.match(text, /<captain name="A &amp; B">/);
-  assert.ok(text.includes('/tmp/a&amp;b/helm'), text.slice(0, 120));
-  assert.ok(!text.includes('/tmp/a&b/helm'), 'the raw path rode the prompt');
+  assert.ok(text.includes(ampersand.replace('&', '&amp;')), text.slice(0, 160));
+  assert.ok(!text.includes(ampersand), 'the raw path rode the prompt');
+});
+
+test('a native child registers neither the section nor the Drive tools', () => {
+  const child = record(helm, 'subagent');
+  assert.deepEqual(child.sections, []);
+  assert.deepEqual(child.orders, []);
+  assert.deepEqual(child.tools, [], 'a native child inherited the Drive tools');
 });
