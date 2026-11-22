@@ -329,10 +329,13 @@ impl CaptainsStore {
     }
 
     /// One read/modify/write round: take the process-wide lock, re-read the
-    /// file fresh under it, apply the rules, save atomically, and only then
-    /// publish. A change that reports it altered nothing (`false`) leaves
-    /// the file and the snapshot as they were — an idempotent retry commits
-    /// nothing and is never counted as a write.
+    /// file fresh under it, and hand that fresh registry to `change` — the
+    /// authoritative checks run there, under the lock that serialises the
+    /// write, so the decision is taken on the state actually committed. A
+    /// `true` result saves atomically and only then publishes; `false` (an
+    /// idempotent retry) commits nothing and is never counted as a write;
+    /// an `Err` refusal likewise leaves the file and the snapshot as they
+    /// were.
     fn mutate(
         &self,
         change: impl FnOnce(&mut Registry) -> Result<bool, String>,
@@ -522,13 +525,9 @@ impl CaptainsRpc<'_> {
     /// on this device, and has no turn in flight a roster change would cut
     /// across (the sessions engine's `turn_in_flight` — the engine keeps no
     /// other busy flag).
-    /// Reads the chat row outside `MUTATION`. A chat deleted (`deleteChat`,
-    /// `DeleteSpace`) or archived (`setChatArchived`) between this read and the
-    /// commit is therefore not observed: the commit can leave a Captain or crew
-    /// record for a chat that is gone, and the roster, being registry-only,
-    /// keeps showing it until a repair pass. Closing that window needs the
-    /// chat-store read under the same lock; the atomic write protects the file,
-    /// not this decision.
+    /// A fast pre-check only, read outside `MUTATION`: it produces the early
+    /// refusals, and the commit closure re-reads the same facts under the
+    /// lock via `committed_row` — which is the decision.
     fn row(&self, chat_id: &str) -> Result<ChatRow, RpcError> {
         let Some(row) = self.chats.chat(chat_id) else {
             return Err(RpcError::BadParams(format!("no such chat: {chat_id}")));
@@ -544,6 +543,52 @@ impl CaptainsRpc<'_> {
         Ok(row)
     }
 
+    /// One chat row re-read under `MUTATION`, with the row gate applied. The
+    /// closure that commits a roster change calls this: the facts the commit
+    /// depends on are then read under the same lock that serialises the write,
+    /// so a chat moved between the pre-check and the commit is observed.
+    ///
+    /// Lock order: `MUTATION` -> (workspace document lock, sessions statuses).
+    /// No engine path takes `MUTATION` while holding either, because this RPC is
+    /// the only caller of `CaptainsStore`; a future caller must keep that order or
+    /// the two locks can deadlock.
+    ///
+    /// The residual: a `moveChat`/`deleteChat` that lands between this
+    /// under-lock re-read and the atomic rename is still unobserved — a window
+    /// now bounded by the save+rename inside the same uninterrupted critical
+    /// section, not by the whole pre-check window. A deleted row still leaves
+    /// its registry record for a later repair, because the chat store does not
+    /// cascade.
+    fn committed_row(&self, chat_id: &str) -> Result<ChatRow, String> {
+        let Some(row) = self.chats.chat(chat_id) else {
+            return Err(format!("no such chat: {chat_id}"));
+        };
+        if row.device_id != self.device_id {
+            return Err(format!("{chat_id} belongs to another device"));
+        }
+        if row.turn_in_flight {
+            return Err(format!("{chat_id} has a turn in flight"));
+        }
+        Ok(row)
+    }
+
+    /// Both rows re-read under `MUTATION`, with the project rule applied to the
+    /// state being committed.
+    fn committed_crew_rows(
+        &self,
+        captain_id: &str,
+        chat_id: &str,
+    ) -> Result<(ChatRow, ChatRow), String> {
+        let captain_row = self.committed_row(captain_id)?;
+        let member_row = self.committed_row(chat_id)?;
+        if captain_row.space_id != member_row.space_id {
+            return Err(format!(
+                "a crew member must be in the Captain's project ({chat_id} is in another project)"
+            ));
+        }
+        Ok((captain_row, member_row))
+    }
+
     /// `PromoteCaptain`: a retried promote is a committed no-op; renaming a
     /// live Captain is a different ask and refused. An archived record's
     /// reactivation, and the rules on what may promote at all, are the
@@ -553,24 +598,23 @@ impl CaptainsRpc<'_> {
     /// archival is a view concern.
     fn promote(&self, params: &PromoteParams) -> Result<Value, RpcError> {
         self.row(&params.chat_id)?;
-        let snapshot = self.store.snapshot();
-        if let Some(captain) = snapshot
-            .captains()
-            .iter()
-            .find(|captain| captain.chat_id == params.chat_id && !captain.archived)
-        {
-            return if captain.name == params.name {
-                Ok(self.roster())
-            } else {
-                Err(RpcError::BadParams(format!(
-                    "{} is already a captain",
-                    params.chat_id
-                )))
-            };
-        }
         self.store
             .mutate(|registry| {
-                registry.promote(&params.chat_id, &params.name).map(|()| true)
+                self.committed_row(&params.chat_id)?;
+                if let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| captain.chat_id == params.chat_id && !captain.archived)
+                {
+                    return if captain.name == params.name {
+                        Ok(false)
+                    } else {
+                        Err(format!("{} is already a captain", params.chat_id))
+                    };
+                }
+                registry
+                    .promote(&params.chat_id, &params.name)
+                    .map(|()| true)
             })
             .map_err(RpcError::BadParams)?;
         Ok(self.roster())
@@ -580,24 +624,23 @@ impl CaptainsRpc<'_> {
     /// an already-archived Captain is a committed no-op.
     fn demote(&self, params: &DemoteParams) -> Result<Value, RpcError> {
         self.row(&params.chat_id)?;
-        let snapshot = self.store.snapshot();
-        match snapshot
-            .captains()
-            .iter()
-            .find(|captain| captain.chat_id == params.chat_id)
-        {
-            Some(captain) if !captain.archived => {
-                self.store
-                    .mutate(|registry| registry.demote(&params.chat_id).map(|()| true))
-                    .map_err(RpcError::BadParams)?;
-                Ok(self.roster())
-            }
-            Some(_) => Ok(self.roster()),
-            None => Err(RpcError::BadParams(format!(
-                "no such captain: {}",
-                params.chat_id
-            ))),
-        }
+        self.store
+            .mutate(|registry| {
+                self.committed_row(&params.chat_id)?;
+                let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| captain.chat_id == params.chat_id)
+                else {
+                    return Err(format!("no such captain: {}", params.chat_id));
+                };
+                if captain.archived {
+                    return Ok(false);
+                }
+                registry.demote(&params.chat_id).map(|()| true)
+            })
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
     }
 
     /// `AddCrew`: the member must be this device's chat, in the Captain's
@@ -613,27 +656,25 @@ impl CaptainsRpc<'_> {
                 params.chat_id
             )));
         }
-        let snapshot = self.store.snapshot();
-        if let Some(parent) = member_row.parent_chat_id.as_deref()
-            && !snapshot.is_captain(parent)
-        {
-            return Err(RpcError::BadParams(format!(
-                "a child of an ordinary chat can't crew: {}",
-                params.chat_id
-            )));
-        }
-        // A retried add commits nothing; crewing for ANOTHER live Captain is
-        // the registry's "at most one crew" refusal, under the lock.
-        let already = snapshot.captains().iter().any(|captain| {
-            captain.chat_id == params.captain_id
-                && !captain.archived
-                && captain.crew.iter().any(|id| id == &params.chat_id)
-        });
-        if already {
-            return Ok(self.roster());
-        }
         self.store
             .mutate(|registry| {
+                let (_, member_row) =
+                    self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                if let Some(parent) = member_row.parent_chat_id.as_deref()
+                    && !registry.is_captain(parent)
+                {
+                    return Err(format!(
+                        "a child of an ordinary chat can't crew: {}",
+                        params.chat_id
+                    ));
+                }
+                // A retried add commits nothing; crewing for ANOTHER live
+                // Captain is the registry's "at most one crew" refusal.
+                if let Some(owner) = registry.captain_of_crew(&params.chat_id)
+                    && owner.chat_id == params.captain_id
+                {
+                    return Ok(false);
+                }
                 registry
                     .add_crew(&params.captain_id, &params.chat_id)
                     .map(|()| true)
@@ -647,26 +688,27 @@ impl CaptainsRpc<'_> {
     fn remove_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
         self.row(&params.captain_id)?;
         self.row(&params.chat_id)?;
-        let snapshot = self.store.snapshot();
-        let Some(captain) = snapshot
-            .captains()
-            .iter()
-            .find(|captain| captain.chat_id == params.captain_id && !captain.archived)
-        else {
-            return Err(RpcError::BadParams(format!(
-                "no such captain: {}",
-                params.captain_id
-            )));
-        };
-        if captain.crew.iter().any(|id| id == &params.chat_id) {
-            self.store
-                .mutate(|registry| {
+        self.store
+            .mutate(|registry| {
+                self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| {
+                        captain.chat_id == params.captain_id && !captain.archived
+                    })
+                else {
+                    return Err(format!("no such captain: {}", params.captain_id));
+                };
+                if captain.crew.iter().any(|id| id == &params.chat_id) {
                     registry
                         .remove_crew(&params.captain_id, &params.chat_id)
                         .map(|()| true)
-                })
-                .map_err(RpcError::BadParams)?;
-        }
+                } else {
+                    Ok(false)
+                }
+            })
+            .map_err(RpcError::BadParams)?;
         Ok(self.roster())
     }
 }
@@ -1505,6 +1547,68 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crew(&rig.roster(), "cap-a"), vec!["child-w".to_string()]);
+    }
+
+    /// A chat row that moves to another project after its first read: the
+    /// interleaving a concurrent chat move produces between the pre-check and
+    /// the commit. The rule must be checked again on the state actually
+    /// committed, not only on the row the pre-check saw.
+    struct MovingChat {
+        member: String,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Chats for MovingChat {
+        fn chat(&self, chat_id: &str) -> Option<ChatRow> {
+            let space = if chat_id == self.member {
+                let seen = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen >= 1 { "space-2" } else { "space-1" }
+            } else {
+                "space-1"
+            };
+            Some(ChatRow {
+                space_id: Some(space.to_string()),
+                parent_chat_id: None,
+                device_id: DEVICE.to_string(),
+                turn_in_flight: false,
+            })
+        }
+    }
+
+    #[test]
+    fn add_crew_rechecks_the_project_under_the_store_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        store.promote("cap-a", "Ada").unwrap();
+        assert_eq!(store.commits(), 1);
+        let chats = MovingChat {
+            member: "chat-x".to_string(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+
+        bad_params(
+            rpc.call(
+                methods::ADD_CREW,
+                &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+            ),
+            "project",
+        );
+        assert_eq!(
+            store.commits(),
+            1,
+            "a move between the pre-check and the commit must not commit the add"
+        );
+        let registry = store.snapshot();
+        let captain = registry.captains().iter().find(|c| c.chat_id == "cap-a").unwrap();
+        assert!(captain.crew.is_empty(), "the roster kept the move out: {:?}", captain.crew);
     }
 
     #[test]
