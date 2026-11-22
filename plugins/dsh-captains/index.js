@@ -41,6 +41,15 @@ const defineTool = spec => peerTools().defineTool(spec);
 // SUR-81 creates the folder engine-side; the row's driveRoot is the Drive path here.
 const driveDir = cfg => cfg.driveRoot;
 
+// One gate for everything the Captain row contributes: the section and the
+// Drive tools both belong to the root agent's own scope, never to a native child.
+function rootScope(agent) {
+  const scope = agent?.ctx;
+  if (!scope?.systemPrompt) return undefined;
+  if (agent.session?.header?.origin === 'subagent') return undefined;
+  return scope;
+}
+
 export function apply(ctx, config) {
   const cfg = normalizeConfig(config);
   if (cfg.role !== 'captain') return;
@@ -49,14 +58,14 @@ export function apply(ctx, config) {
   // register into each created agent's own scope, skipping subagents: the
   // Captain row belongs to the root agent alone.
   ctx.on('agent/created', ({ agent }) => {
-    const scope = agent?.ctx;
-    if (!scope?.systemPrompt || agent.session?.header?.origin === 'subagent') return;
+    const scope = rootScope(agent);
+    if (scope === undefined) return;
     scope.effect(() => scope.systemPrompt.section({
       name: 'zeron-captains:role',
       order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
       text: () => captainPrompt(cfg, driveDir(cfg)),
       interpolate: false,
     }));
+    for (const spec of driveToolSpecs(cfg)) scope.tools.register(defineTool(spec));
   });
-  for (const spec of driveToolSpecs(cfg)) ctx.tools.register(defineTool(spec));
 }
