@@ -54,10 +54,25 @@ jobs:
       # `NODE_PATH` is the peer anchor the runner has (the pinned SDK prefix
       # installed above), so a local `dsh` on PATH is not what makes this pass;
       # a missing bundle, peer or SDK fails here rather than skipping.
+      # SUR-185: `node --test` exits 0 even when the glob matched nothing, so
+      # the step's file guards and executed-count floor exist to keep a deleted
+      # test file or a shrunken suite red rather than green.
       - name: The Captains plugin unit suite
         env:
           NODE_PATH: ${{ github.workspace }}/crates/harness/src/deepseek/node_modules
-        run: node --test plugins/dsh-captains/test/*.test.mjs
+        run: |
+          set -euo pipefail
+          for file in prompts.test.mjs tools.test.mjs; do
+            if ! test -f "plugins/dsh-captains/test/$file"; then
+              echo "missing plugin test file: $file" >&2
+              exit 1
+            fi
+          done
+          out=$(node --test plugins/dsh-captains/test/*.test.mjs 2>&1) || { printf '%s\n' "$out"; exit 1; }
+          printf '%s\n' "$out"
+          n=$(printf '%s\n' "$out" | sed -n 's/^[^ ]* tests \([0-9][0-9]*\)$/\1/p' | awk '{s+=$1} END {print s+0}')
+          echo "plugin unit tests executed: $n"
+          test "$n" -ge 17
       - name: Record the pass
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
