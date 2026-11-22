@@ -91,6 +91,9 @@ test('a 70 KB file reads truncated at 64 KB', async t => {
 test('writes respect the byte limit and engine-owned folders', async t => {
   const root = await drive(t);
   const { write } = tools(root);
+  // Exactly 256 KiB is inside the limit; one byte more is not (SUR-183).
+  const exact = 'x'.repeat(256 * 1024);
+  assert.equal(await write.execute({ path: 'exact.txt', content: exact }), 'wrote exact.txt (262144 bytes)');
   await assert.rejects(write.execute({ path: 'huge.txt', content: 'x'.repeat(256 * 1024 + 1) }), /256 KB/);
   await assert.rejects(write.execute({ path: 'state/needs-you.json', content: '{}' }), /engine-owned/);
   await assert.rejects(write.execute({ path: 'reports/turn.md', content: '# report' }), /engine-owned/);
