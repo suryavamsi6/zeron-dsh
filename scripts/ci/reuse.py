@@ -61,7 +61,8 @@ NEXTEST = ["scripts/ci/nextest.toml"]
 SUITE_INPUTS: dict[str, list[str]] = {
     "core": [".github/workflows/ui-tests.yml", "scripts/ci/test-core.sh"] + LINUX_SETUP + NEXTEST,
     "deepseek": [".github/workflows/deepseek-compatibility.yml", "crates/harness/src/deepseek/**",
-                 "crates/harness/tests/deepseek*", "crates/harness/tests/fixtures/**"],
+                 "crates/harness/tests/deepseek*", "crates/harness/tests/fixtures/**",
+                 "plugins/dsh-captains/**"],
     "edge": [".github/workflows/preview-tests.yml", "edge/**"],
     "installer": [".github/workflows/linux-installer.yml", "edge/src/install.sh", "scripts/package-linux.sh",
                   "scripts/test-linux-desktop-entry.sh", "dist/zeron.desktop", "dist/zeron.png",

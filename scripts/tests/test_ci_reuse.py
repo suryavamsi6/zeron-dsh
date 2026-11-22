@@ -154,6 +154,13 @@ class FingerprintTests(unittest.TestCase):
                             for f in ("plan.py", "admit.py", "reuse.py", "emergency.py")))
         self.assertEqual(keys(), keys())
 
+    def test_the_captains_plugin_is_a_deepseek_input(self):
+        """SUR-103: a plugin change must invalidate the compatibility pass key,
+        and only that suite's."""
+        self.assertIn("plugins/dsh-captains/**", reuse.SUITE_INPUTS["deepseek"])
+        for suite in ("core", "edge", "installer", "voice", "zgx"):
+            self.assertNotIn("plugins/dsh-captains/**", reuse.SUITE_INPUTS[suite], suite)
+
     def test_unrelated_files_change_nothing(self):
         self.assertEqual(self.changed_after("docs/notes.md", "hi\n"), set())
 

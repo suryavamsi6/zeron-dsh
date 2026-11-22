@@ -100,6 +100,14 @@ class PlanTests(unittest.TestCase):
         f = [{"filename": "docs/x.md", "previous_filename": "apps/ios/Zeron/X.swift", "patch": ""}]
         self.assertTrue(plan.plan(f, "fast")["ios"])
 
+    def test_the_captains_plugin_selects_the_deepseek_suite(self):
+        """SUR-103: the compatibility job runs the plugin unit suite, so a plugin-only
+        change has to schedule it -- on both tiers, because it is not platform-shaped."""
+        plugin = files("plugins/dsh-captains/test/tools.test.mjs", patch="+assert.equal(1, 1);")
+        self.assertEqual(selected(plan.plan(plugin, "fast")), {"deepseek"})
+        self.assertEqual(selected(plan.plan(plugin, "full")), {"deepseek"})
+        self.assertEqual(selected(plan.plan(files("plugins/dsh-captains/index.js"), "fast")), {"deepseek"})
+
     def test_ci_changes_run_everything(self):
         daytime = set(plan.SUITE_JOBS) - set(plan.NIGHTLY_SUITES)
         self.assertEqual(selected(plan.plan(files("scripts/ci/admit.py"), "fast")), daytime)

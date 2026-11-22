@@ -50,6 +50,14 @@ jobs:
         env:
           ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek
         run: node --test crates/harness/tests/deepseek_sdk.test.mjs crates/harness/tests/deepseek_plugins.test.mjs crates/harness/tests/deepseek_chat_export.test.mjs
+      # SUR-103: the bundle's own unit files, separate from the contract cases.
+      # `NODE_PATH` is the peer anchor the runner has (the pinned SDK prefix
+      # installed above), so a local `dsh` on PATH is not what makes this pass;
+      # a missing bundle, peer or SDK fails here rather than skipping.
+      - name: The Captains plugin unit suite
+        env:
+          NODE_PATH: ${{ github.workspace }}/crates/harness/src/deepseek/node_modules
+        run: node --test plugins/dsh-captains/test/*.test.mjs
       - name: Record the pass
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
