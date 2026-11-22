@@ -281,6 +281,10 @@ describe("admin usernames", () => {
 });
 
 describe("the public card", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("exposes exactly the card's fields", async () => {
     // After the beta, so the claim earns nothing (the V3 BETA tests below).
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -377,6 +381,14 @@ describe("the public card", () => {
     await claim("user_limit_read", "limitread");
     const read = (ip: string, path = "/cards/limitread") =>
       SELF.fetch(`https://edge.test${path}`, { headers: { "cf-connecting-ip": ip } });
+    // The binding counts in fixed wall-clock windows — an epoch is
+    // floor(Date.now() / 60s) — so a run of reads that crosses a minute edge
+    // sees the counter reset and its last read let through (SUR-131). Start
+    // the run only once ≥10s of the window remains, a bounded wait of ~11s at
+    // most, and ~1s of reads cannot reach the next edge.
+    for (let into = Date.now() % 60_000; into > 50_000; into = Date.now() % 60_000) {
+      await new Promise((r) => setTimeout(r, 60_500 - into));
+    }
     const statuses = [];
     for (let i = 0; i < 60; i++) statuses.push((await read("203.0.113.7", i % 2 ? "/cards/limitread" : `/@probe${i}`)).status);
     expect(statuses.filter((s) => s === 429)).toEqual([]);
