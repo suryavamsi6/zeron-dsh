@@ -41,6 +41,11 @@ const CHAT: &str = "chat-captain-role";
 const CHAT_PROMOTE: &str = "chat-sur201-promote";
 const CHAT_DEMOTE: &str = "chat-sur201-demote";
 const CHAT_SIDEBAR: &str = "chat-sur201-sidebar";
+const CAP: &str = "chat-sur101-cap";
+const CREW: &str = "chat-sur101-crew";
+const CREW2: &str = "chat-sur101-crew2";
+const CREW3: &str = "chat-sur101-crew3";
+const CHAT_PLAIN: &str = "chat-sur101-plain";
 const DEVICE: &str = "dev-captains";
 const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
@@ -378,6 +383,30 @@ fn needs_you_path(data_dir: &std::path::Path, chat: &str) -> std::path::PathBuf 
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| data_dir.join("deepseek"));
     home.join("captains").join(chat).join("state").join("needs-you.json")
+}
+
+/// `<deepseek home>/captains/<captain>/reports/<chat>.md`, mirroring
+/// `captains::drive_dir` + the `reports/` folder.
+fn crew_report_path(data_dir: &std::path::Path, captain: &str, chat: &str) -> std::path::PathBuf {
+    let home = std::env::var_os("ZERON_DEEPSEEK_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("deepseek"));
+    home.join("captains")
+        .join(captain)
+        .join("reports")
+        .join(format!("{chat}.md"))
+}
+
+/// The roster row set for one Captain `cap` with `crew` and no other rows.
+fn crew_roster(captain: &str, name: &str, crew: &[&str]) -> Vec<RosterRow> {
+    vec![RosterRow {
+        chat_id: captain.into(),
+        name: name.into(),
+        created_at: chrono::Utc::now(),
+        archived: false,
+        crew: crew.iter().map(|id| id.to_string()).collect(),
+    }]
 }
 
 /// `needs-you.json` is written off the event loop (`spawn_blocking` in
@@ -792,6 +821,225 @@ async fn a_sidebar_archived_captain_turn_still_writes_the_file() {
         path.exists(),
         "a sidebar archive is a view concern: the Captain's turn must still write its \
          Needs You file, and nothing was written at {path:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-101 (red): a crew chat's turn must leave its report in the CAPTAIN's
+/// drive — `<drive>/reports/<chatId>.md` — naming the crew chat, the turn's
+/// `completed` status, when it ran, and its last assistant text. Nothing
+/// writes that file today, so this fails at `file_lands`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crew_turn_writes_its_report_into_the_captains_drive() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP, "Ada", &[CREW]));
+    let core = rig.boot();
+    create_chat_with(&core, CREW).await;
+
+    send_to(&core, CREW, "m1", "hold the line");
+    wait_for(
+        || answered_in(&core, CREW, "hold the line") && parked_in(&core, CREW),
+        "the crew turn",
+    )
+    .await;
+
+    // Like `needs-you.json`, the report is written off the event loop, so
+    // `parked` cannot order against it: poll for the file.
+    let path = crew_report_path(&rig.dir, CAP, CREW);
+    assert!(
+        file_lands(&path, Duration::from_secs(15)).await,
+        "a crew turn must write its report at {path:?}; nothing was written"
+    );
+    let body = std::fs::read_to_string(&path).expect("the report reads");
+    assert!(
+        body.starts_with(&format!("# Crew report: {CREW}\n")),
+        "the report names the crew chat: {body:?}"
+    );
+    assert!(
+        body.contains("- Status: completed\n"),
+        "a completed crew turn reports completed: {body:?}"
+    );
+    let at = body
+        .lines()
+        .find_map(|l| l.strip_prefix("- At: "))
+        .expect("the report carries an At line");
+    chrono::DateTime::parse_from_rfc3339(at).expect("At is an ISO timestamp");
+    assert!(
+        body.contains("answered: hold the line"),
+        "the report carries the turn's last assistant text: {body:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-101 (red): the report is per chat, not per turn — a second turn on the
+/// same crew chat replaces the first report, so the file always reads as the
+/// LATEST turn. Nothing writes it today, so this fails at `file_lands`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_crew_turn_replaces_the_first_report() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP, "Ada", &[CREW2]));
+    let core = rig.boot();
+    create_chat_with(&core, CREW2).await;
+
+    send_to(&core, CREW2, "m1", "first");
+    wait_for(
+        || answered_in(&core, CREW2, "first") && parked_in(&core, CREW2),
+        "the first crew turn",
+    )
+    .await;
+    send_to(&core, CREW2, "m2", "second");
+    wait_for(
+        || answered_in(&core, CREW2, "second") && parked_in(&core, CREW2),
+        "the second crew turn",
+    )
+    .await;
+
+    let path = crew_report_path(&rig.dir, CAP, CREW2);
+    assert!(
+        file_lands(&path, Duration::from_secs(15)).await,
+        "a crew turn must write its report at {path:?}; nothing was written"
+    );
+    // The second turn's write lands off the event loop too: once the path
+    // exists the file can still hold the FIRST report, so wait until it
+    // shows the second turn before reading it.
+    wait_for(
+        || {
+            std::fs::read_to_string(&path)
+                .is_ok_and(|body| body.contains("answered: second"))
+        },
+        "the second turn's report",
+    )
+    .await;
+    let body = std::fs::read_to_string(&path).expect("the report reads");
+    assert!(
+        body.contains("answered: second"),
+        "two consecutive turns leave the latest turn in the report: {body:?}"
+    );
+    assert!(
+        !body.contains("answered: first"),
+        "the report is replaced, not appended: {body:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-101 (red): a report carries the turn's text but stays bounded — text
+/// past 4,000 chars is cut and the file says so with a `[truncated]` note.
+/// Nothing writes it today, so this fails at `file_lands`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_crew_turn_report_is_capped_with_a_note() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP, "Ada", &[CREW3]));
+    let core = rig.boot();
+    create_chat_with(&core, CREW3).await;
+
+    let prompt = "x".repeat(5_000);
+    send_to(&core, CREW3, "m1", &prompt);
+    wait_for(
+        || answered_in(&core, CREW3, &prompt) && parked_in(&core, CREW3),
+        "the long crew turn",
+    )
+    .await;
+
+    let path = crew_report_path(&rig.dir, CAP, CREW3);
+    assert!(
+        file_lands(&path, Duration::from_secs(15)).await,
+        "a crew turn must write its report at {path:?}; nothing was written"
+    );
+    let body = std::fs::read_to_string(&path).expect("the report reads");
+    let text = body
+        .split_once("\n\n")
+        .expect("header then the turn text")
+        .1;
+    assert!(
+        text.starts_with("answered: xxxx"),
+        "the body is the turn's text: {:.80}",
+        text
+    );
+    assert!(
+        text.chars().count() <= 4_000 + "[truncated]\n".len() + 2,
+        "the turn text is capped at 4,000 chars plus the truncation note; saw {}",
+        text.chars().count()
+    );
+    assert!(
+        body.contains("[truncated]"),
+        "a capped report says it was truncated: {body:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-101 guard — expected green before the write exists: a Captain's OWN
+/// turn is not a crew turn. It writes its Needs You state (SUR-201) and must
+/// never drop a `reports/<chat>.md` into its own drive.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_captain_turn_writes_no_crew_report() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP, "Ada", &[]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP).await;
+
+    send_to(&core, CAP, "m1", "steady");
+    wait_for(
+        || answered_in(&core, CAP, "steady") && parked_in(&core, CAP),
+        "the captain turn",
+    )
+    .await;
+
+    // A stray write, were there one, lands off the event loop like the Needs
+    // You file: give it a short window before asserting absence.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let path = crew_report_path(&rig.dir, CAP, CAP);
+    assert!(
+        !path.exists(),
+        "a Captain writes its Needs You state, never a crew report; a report \
+         was written at {path:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-101 guard — expected green before the write exists: an ordinary chat
+/// (no roster row, no Captain) must never produce a `reports/*.md` anywhere
+/// under the data dir.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordinary_chat_writes_no_crew_report() {
+    let rig = Rig::new();
+    let core = rig.boot();
+    create_chat_with(&core, CHAT_PLAIN).await;
+
+    send_to(&core, CHAT_PLAIN, "m1", "just a turn");
+    wait_for(
+        || {
+            answered_in(&core, CHAT_PLAIN, "just a turn") && parked_in(&core, CHAT_PLAIN)
+        },
+        "the ordinary turn",
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut stack = vec![rig.dir.clone()];
+    let mut reports = Vec::new();
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the data dir walks") {
+            let path = entry.expect("a dir entry reads").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|ext| ext == "md")
+                && path
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .is_some_and(|name| name == "reports")
+            {
+                reports.push(path);
+            }
+        }
+    }
+    assert!(
+        reports.is_empty(),
+        "an ordinary chat writes no crew report; found {reports:?}"
     );
 
     core.shutdown().await;
