@@ -272,7 +272,7 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
     async fn prepare(
         &self,
         harness: HarnessId,
-        _chat_id: Option<&str>,
+        chat_id: Option<&str>,
         request: &mut zeron_proto::RunRequest,
     ) -> Result<(), String> {
         if !matches!(harness, HarnessId::DeepSeek | HarnessId::Mock) {
@@ -285,6 +285,16 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             "ZERON_DEEPSEEK_HOME".into(),
             self.0.config.deepseek_home.to_string_lossy().into_owned(),
         );
+        // The Captain role this chat plays rides `env` (host-only, never the
+        // wire or the prompt). A missing or unreadable captains.json simply
+        // leaves the run unstamped — ordinary chats must still prepare.
+        if let Some(chat_id) = chat_id
+            && let Ok(registry) = crate::captains::Registry::load(&self.0.config.data_dir)
+            && let Some(value) =
+                crate::captains::captains_env(&registry, &self.0.config.deepseek_home, chat_id)
+        {
+            request.env.insert("ZERON_DEEPSEEK_CAPTAINS".into(), value);
+        }
         // Zeron's own Harness home is the one credential store: the gateway
         // writes it and every run reads it, so a provider configured in the
         // app is the provider the next run uses. A run that must not see the
@@ -507,5 +517,85 @@ mod tests {
                 .is_err()
         );
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn stamp_follows_role_changes_and_stays_out_of_prompt() {
+        async fn prepare(
+            env: &PinRunEnvironment,
+            chat_id: Option<&str>,
+        ) -> zeron_proto::RunRequest {
+            let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+            }))
+            .unwrap();
+            env.prepare(HarnessId::DeepSeek, chat_id, &mut request)
+                .await
+                .unwrap();
+            request
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: temp.path().join("data"),
+            deepseek_home: temp.path().join("deepseek"),
+        };
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+
+        // An ordinary chat — nothing on record — runs unstamped, whether the
+        // dispatch passes a chat id at all.
+        for chat_id in [None, Some("stranger")] {
+            let request = prepare(&env, chat_id).await;
+            assert!(!request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
+        }
+
+        store.promote("chat-1", "ada").unwrap();
+        let request = prepare(&env, Some("chat-1")).await;
+        let stamp: serde_json::Value =
+            serde_json::from_str(&request.env["ZERON_DEEPSEEK_CAPTAINS"]).unwrap();
+        assert_eq!(stamp["role"], "captain");
+        assert_eq!(stamp["chatId"], "chat-1");
+        assert_eq!(stamp["captainId"], "chat-1");
+        assert_eq!(stamp["captainName"], "ada");
+        assert_eq!(
+            stamp["driveRoot"],
+            config
+                .deepseek_home
+                .join("captains")
+                .to_string_lossy()
+                .as_ref()
+        );
+
+        store.add_crew("chat-1", "chat-2").unwrap();
+        let request = prepare(&env, Some("chat-2")).await;
+        let stamp: serde_json::Value =
+            serde_json::from_str(&request.env["ZERON_DEEPSEEK_CAPTAINS"]).unwrap();
+        assert_eq!(stamp["role"], "crew");
+        assert_eq!(stamp["chatId"], "chat-2");
+        assert_eq!(stamp["captainId"], "chat-1");
+        assert_eq!(stamp["captainName"], "ada");
+
+        // Demoting archives the Captain: the next run releases it and its
+        // crew — nothing about the run keeps the old role.
+        store.demote("chat-1").unwrap();
+        for chat_id in ["chat-1", "chat-2"] {
+            let request = prepare(&env, Some(chat_id)).await;
+            assert!(
+                !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+                "{chat_id} is released on the next run"
+            );
+        }
+
+        // The stamp is host-only: it rides `env`, which is serde-skipped on
+        // the wire, and never lands in text a child would read.
+        store.promote("chat-1", "ada").unwrap();
+        let request = prepare(&env, Some("chat-1")).await;
+        assert!(request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(!request.prompt.contains("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(!request.prompt.contains("driveRoot"));
+        let wire = serde_json::to_string(&request).unwrap();
+        assert!(!wire.contains("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(!wire.contains("driveRoot"));
     }
 }
