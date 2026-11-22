@@ -141,13 +141,10 @@ plutil -lint "$PLIST" >/dev/null
 # plugins live in the data dir). Not zgx's generated types or the tests.
 rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
   "$ROOT/apps/zgx/ui/" "$APP/Contents/Resources/ui/"
-rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
-  "$ROOT/apps/zgx/plugins-builtin/" "$APP/Contents/Resources/plugins-builtin/"
-# Each ships the canonical SDK, whatever copy sits in its folder (examples_tests
-# `sdk_copies_match_canonical` keeps those equal too).
-for dir in "$APP/Contents/Resources/plugins-builtin/"*/; do
-  cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
-done
+# Zeron's own plugins (the app's and the repository's Captains bundle), each
+# Luau plugin with the canonical SDK, whatever copy sits in its folder
+# (examples_tests `sdk_copies_match_canonical` keeps those equal too).
+"$ROOT/scripts/stage-plugins-builtin.sh" "$APP/Contents/Resources"
 
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"

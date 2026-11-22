@@ -79,11 +79,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           sparse-checkout: |
-            scripts/ci
-            scripts/tests
+            scripts
             .github
             crates
             apps/zeron
+            apps/zgx/plugins-builtin
+            apps/zgx/plugins-sdk
+            plugins/dsh-captains
       - name: Planner and admission tests
         run: python3 -m unittest discover -s scripts/tests -p 'test_ci_*.py'
       - id: plan
