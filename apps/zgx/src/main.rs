@@ -35,6 +35,7 @@ mod agents;
 mod providers;
 mod appshots;
 mod auth;
+mod captains;
 mod carried_settings;
 mod chat;
 mod cloud;
@@ -92,6 +93,8 @@ mod route_motion_tests;
 mod composer_metrics_tests;
 #[cfg(test)]
 mod composer_layout_tests;
+#[cfg(test)]
+mod captains_tests;
 #[cfg(test)]
 mod mcp_live_tests;
 #[cfg(test)]
@@ -834,6 +837,9 @@ fn script_host_at(cx: &mut WindowContext, path: PathBuf, entry: &str) -> ScriptH
         auth::install(cx, &host);
         agents::install(&host);
         providers::install(&host);
+        // The Captain roster and the four calls that change it
+        // (src/captains.rs): Settings' Captains pages.
+        captains::install(&host);
         acp_registry::install(cx, &host);
         github::install(cx, &host);
         // Cloud and Billing (src/cloud.rs): Settings' pages, the new chat's
