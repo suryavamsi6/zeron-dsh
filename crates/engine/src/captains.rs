@@ -3,9 +3,6 @@
 //! plugin never reads it (it gets its role stamped per run). The Drive
 //! directory is the plugin's to create — this module only computes its path.
 
-// Nothing calls in yet: this commit lands the API and its tests only.
-#![allow(dead_code)]
-
 use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -13,6 +10,8 @@ use std::sync::{Mutex, PoisonError};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use zeron_rpc::{RpcError, methods};
 
 const FILE_NAME: &str = "captains.json";
 
@@ -295,6 +294,10 @@ pub struct CaptainsStore {
     data_dir: PathBuf,
     /// The last committed registry; replaced only after a save succeeds.
     snapshot: Mutex<Registry>,
+    /// Writes that saved and published — the tests pin "one update per
+    /// committed change", so a retry that changes nothing must not count.
+    #[cfg(test)]
+    commits: std::sync::atomic::AtomicUsize,
 }
 
 impl CaptainsStore {
@@ -305,6 +308,8 @@ impl CaptainsStore {
         Ok(CaptainsStore {
             data_dir,
             snapshot: Mutex::new(snapshot),
+            #[cfg(test)]
+            commits: std::sync::atomic::AtomicUsize::new(0),
         })
     }
 
@@ -317,12 +322,23 @@ impl CaptainsStore {
             .clone()
     }
 
+    /// Committed writes, for the tests that pin "one update per committed change".
+    #[cfg(test)]
+    pub fn commits(&self) -> usize {
+        self.commits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// One read/modify/write round: take the process-wide lock, re-read the
-    /// file fresh under it, apply the rules, save atomically, and only then
-    /// publish.
+    /// file fresh under it, and hand that fresh registry to `change` — the
+    /// authoritative checks run there, under the lock that serialises the
+    /// write, so the decision is taken on the state actually committed. A
+    /// `true` result saves atomically and only then publishes; `false` (an
+    /// idempotent retry) commits nothing and is never counted as a write;
+    /// an `Err` refusal likewise leaves the file and the snapshot as they
+    /// were.
     fn mutate(
         &self,
-        change: impl FnOnce(&mut Registry) -> Result<(), String>,
+        change: impl FnOnce(&mut Registry) -> Result<bool, String>,
     ) -> Result<(), String> {
         // Falsifiability anchor: the racing case substitutes this read for the
         // load under the lock (`let mut fresh = _observed;`) and must then see
@@ -333,34 +349,367 @@ impl CaptainsStore {
         test_seam::arrive();
         let _guard = MUTATION.lock().unwrap_or_else(PoisonError::into_inner);
         let mut fresh = Registry::load(&self.data_dir)?;
-        change(&mut fresh)?;
+        let changed = change(&mut fresh)?;
+        if !changed {
+            return Ok(());
+        }
         fresh.save(&self.data_dir)?;
         *self
             .snapshot
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = fresh;
+        // The save landed and the snapshot published: exactly one commit.
+        #[cfg(test)]
+        self.commits
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
     /// Promote `chat_id` to Captain under `name` (see `Registry::promote`).
     pub fn promote(&self, chat_id: &str, name: &str) -> Result<(), String> {
-        self.mutate(|registry| registry.promote(chat_id, name))
+        self.mutate(|registry| registry.promote(chat_id, name).map(|()| true))
     }
 
     /// Demote `chat_id`'s Captain (see `Registry::demote`).
     pub fn demote(&self, chat_id: &str) -> Result<(), String> {
-        self.mutate(|registry| registry.demote(chat_id))
+        self.mutate(|registry| registry.demote(chat_id).map(|()| true))
     }
 
     /// Add `chat_id` to `captain_id`'s crew (see `Registry::add_crew`).
     pub fn add_crew(&self, captain_id: &str, chat_id: &str) -> Result<(), String> {
-        self.mutate(|registry| registry.add_crew(captain_id, chat_id))
+        self.mutate(|registry| {
+            registry.add_crew(captain_id, chat_id).map(|()| true)
+        })
     }
 
     /// Remove `chat_id` from `captain_id`'s crew (see
     /// `Registry::remove_crew`).
     pub fn remove_crew(&self, captain_id: &str, chat_id: &str) -> Result<(), String> {
-        self.mutate(|registry| registry.remove_crew(captain_id, chat_id))
+        self.mutate(|registry| {
+            registry.remove_crew(captain_id, chat_id).map(|()| true)
+        })
+    }
+}
+
+// ── the five Captain RPC methods ────────────────────────────────────────────
+
+/// Whether this RPC serves `method`.
+pub fn handles(method: &str) -> bool {
+    matches!(
+        method,
+        methods::CAPTAINS
+            | methods::PROMOTE_CAPTAIN
+            | methods::DEMOTE_CAPTAIN
+            | methods::ADD_CREW
+            | methods::REMOVE_CREW
+    )
+}
+
+/// One chat row's facts the roster rules read before the registry is touched.
+#[derive(Debug, Clone, Default)]
+pub struct ChatRow {
+    pub space_id: Option<String>,
+    pub parent_chat_id: Option<String>,
+    pub device_id: String,
+    /// The chat's live turn, from the sessions engine.
+    pub turn_in_flight: bool,
+}
+
+/// The host's chat rows, as the roster rules read them.
+pub trait Chats {
+    fn chat(&self, chat_id: &str) -> Option<ChatRow>;
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PromoteParams {
+    chat_id: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DemoteParams {
+    chat_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CrewParams {
+    captain_id: String,
+    chat_id: String,
+}
+
+/// One Captain as the roster projects it: the registry record plus the Drive
+/// path the plugin creates on the Captain's first turn.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RosterEntry {
+    chat_id: String,
+    name: String,
+    created_at: DateTime<Utc>,
+    archived: bool,
+    crew: Vec<String>,
+    drive_path: String,
+}
+
+/// The five Captain methods, over the store and the host's chat rows.
+pub struct CaptainsRpc<'a> {
+    pub store: &'a CaptainsStore,
+    pub chats: &'a dyn Chats,
+    /// This engine's own device id, from `DocHost::device_id()`.
+    pub device_id: &'a str,
+    /// The DeepSeek home the roster projects each Captain's Drive path from.
+    pub deepseek_home: &'a Path,
+}
+
+impl CaptainsRpc<'_> {
+    /// Answer one of the five methods. Every successful reply is the same
+    /// roster projection, mutator or not.
+    pub fn call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
+        // `captains.json` is device-local engine state: only this device's
+        // own window reads or changes it, and it does so before any params
+        // are trusted.
+        if !zeron_rpc::caller().is_local() {
+            return Err(RpcError::Failed(format!(
+                "{method}: the Captain roster is managed from this device's own window"
+            )));
+        }
+        match method {
+            methods::CAPTAINS => Ok(self.roster()),
+            methods::PROMOTE_CAPTAIN => {
+                let params: PromoteParams = zeron_rpc::parse_params(params.clone())?;
+                self.promote(&params)
+            }
+            methods::DEMOTE_CAPTAIN => {
+                let params: DemoteParams = zeron_rpc::parse_params(params.clone())?;
+                self.demote(&params)
+            }
+            methods::ADD_CREW => {
+                let params: CrewParams = zeron_rpc::parse_params(params.clone())?;
+                self.add_crew(&params)
+            }
+            methods::REMOVE_CREW => {
+                let params: CrewParams = zeron_rpc::parse_params(params.clone())?;
+                self.remove_crew(&params)
+            }
+            other => Err(RpcError::UnknownMethod(other.into())),
+        }
+    }
+
+    /// The whole roster, live and archived records alike, each Captain's
+    /// Drive path projected from `deepseek_home`. Pure: nothing here creates
+    /// the directory — the plugin does, on the Captain's first turn.
+    /// Projection is registry-only: it does not consult the chat store, so
+    /// archived or deleted chats appear here as recorded until a repair.
+    fn roster(&self) -> Value {
+        let registry = self.store.snapshot();
+        let captains: Vec<RosterEntry> = registry
+            .captains()
+            .iter()
+            .map(|captain| RosterEntry {
+                chat_id: captain.chat_id.clone(),
+                name: captain.name.clone(),
+                created_at: captain.created_at,
+                archived: captain.archived,
+                crew: captain.crew.clone(),
+                drive_path: drive_dir(self.deepseek_home, &captain.chat_id)
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .collect();
+        json!({ "captains": captains })
+    }
+
+    /// The row gate every roster change passes first: the chat exists, lives
+    /// on this device, and has no turn in flight a roster change would cut
+    /// across (the sessions engine's `turn_in_flight` — the engine keeps no
+    /// other busy flag).
+    /// A fast pre-check only, read outside `MUTATION`: it produces the early
+    /// refusals, and the commit closure re-reads the same facts under the
+    /// lock via `committed_row` — which is the decision.
+    fn row(&self, chat_id: &str) -> Result<ChatRow, RpcError> {
+        let Some(row) = self.chats.chat(chat_id) else {
+            return Err(RpcError::BadParams(format!("no such chat: {chat_id}")));
+        };
+        if row.device_id != self.device_id {
+            return Err(RpcError::BadParams(format!(
+                "{chat_id} belongs to another device"
+            )));
+        }
+        if row.turn_in_flight {
+            return Err(RpcError::BadParams(format!("{chat_id} has a turn in flight")));
+        }
+        Ok(row)
+    }
+
+    /// One chat row re-read under `MUTATION`, with the row gate applied. The
+    /// closure that commits a roster change calls this: the facts the commit
+    /// depends on are then read under the same lock that serialises the write,
+    /// so a chat moved between the pre-check and the commit is observed.
+    ///
+    /// Lock order: `MUTATION` -> (workspace document lock, sessions statuses).
+    /// No engine path takes `MUTATION` while holding either, because this RPC is
+    /// the only caller of `CaptainsStore`; a future caller must keep that order or
+    /// the two locks can deadlock.
+    ///
+    /// The residual: a `moveChat`/`deleteChat` that lands between this
+    /// under-lock re-read and the atomic rename is still unobserved — a window
+    /// now bounded by the save+rename inside the same uninterrupted critical
+    /// section, not by the whole pre-check window. A deleted row still leaves
+    /// its registry record for a later repair, because the chat store does not
+    /// cascade.
+    fn committed_row(&self, chat_id: &str) -> Result<ChatRow, String> {
+        let Some(row) = self.chats.chat(chat_id) else {
+            return Err(format!("no such chat: {chat_id}"));
+        };
+        if row.device_id != self.device_id {
+            return Err(format!("{chat_id} belongs to another device"));
+        }
+        if row.turn_in_flight {
+            return Err(format!("{chat_id} has a turn in flight"));
+        }
+        Ok(row)
+    }
+
+    /// Both rows re-read under `MUTATION`, with the project rule applied to the
+    /// state being committed.
+    fn committed_crew_rows(
+        &self,
+        captain_id: &str,
+        chat_id: &str,
+    ) -> Result<(ChatRow, ChatRow), String> {
+        let captain_row = self.committed_row(captain_id)?;
+        let member_row = self.committed_row(chat_id)?;
+        if captain_row.space_id != member_row.space_id {
+            return Err(format!(
+                "a crew member must be in the Captain's project ({chat_id} is in another project)"
+            ));
+        }
+        Ok((captain_row, member_row))
+    }
+
+    /// `PromoteCaptain`: a retried promote is a committed no-op; renaming a
+    /// live Captain is a different ask and refused. An archived record's
+    /// reactivation, and the rules on what may promote at all, are the
+    /// registry's — checked under the store's lock inside `mutate`.
+    /// Promoting a UI-archived chat (`setChatArchived`) is intentional: the
+    /// Captains registry does not consult the chat store's archived flag;
+    /// archival is a view concern.
+    fn promote(&self, params: &PromoteParams) -> Result<Value, RpcError> {
+        self.row(&params.chat_id)?;
+        self.store
+            .mutate(|registry| {
+                self.committed_row(&params.chat_id)?;
+                if let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| captain.chat_id == params.chat_id && !captain.archived)
+                {
+                    return if captain.name == params.name {
+                        Ok(false)
+                    } else {
+                        Err(format!("{} is already a captain", params.chat_id))
+                    };
+                }
+                registry
+                    .promote(&params.chat_id, &params.name)
+                    .map(|()| true)
+            })
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
+    }
+
+    /// `DemoteCaptain`: the record is kept, archived, crew intact; demoting
+    /// an already-archived Captain is a committed no-op.
+    fn demote(&self, params: &DemoteParams) -> Result<Value, RpcError> {
+        self.row(&params.chat_id)?;
+        self.store
+            .mutate(|registry| {
+                self.committed_row(&params.chat_id)?;
+                let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| captain.chat_id == params.chat_id)
+                else {
+                    return Err(format!("no such captain: {}", params.chat_id));
+                };
+                if captain.archived {
+                    return Ok(false);
+                }
+                registry.demote(&params.chat_id).map(|()| true)
+            })
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
+    }
+
+    /// `AddCrew`: the member must be this device's chat, in the Captain's
+    /// project, and — when a child — of a live Captain, not an ordinary
+    /// chat (a side conversation has no delegation to serve; a Captain's
+    /// own delegation is what crews are for).
+    fn add_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
+        let captain_row = self.row(&params.captain_id)?;
+        let member_row = self.row(&params.chat_id)?;
+        if captain_row.space_id != member_row.space_id {
+            return Err(RpcError::BadParams(format!(
+                "a crew member must be in the Captain's project ({} is in another project)",
+                params.chat_id
+            )));
+        }
+        self.store
+            .mutate(|registry| {
+                let (_, member_row) =
+                    self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                if let Some(parent) = member_row.parent_chat_id.as_deref()
+                    && !registry.is_captain(parent)
+                {
+                    return Err(format!(
+                        "a child of an ordinary chat can't crew: {}",
+                        params.chat_id
+                    ));
+                }
+                // A retried add commits nothing; crewing for ANOTHER live
+                // Captain is the registry's "at most one crew" refusal.
+                if let Some(owner) = registry.captain_of_crew(&params.chat_id)
+                    && owner.chat_id == params.captain_id
+                {
+                    return Ok(false);
+                }
+                registry
+                    .add_crew(&params.captain_id, &params.chat_id)
+                    .map(|()| true)
+            })
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
+    }
+
+    /// `RemoveCrew`: removing a member that isn't there is a committed
+    /// no-op; a Captain that isn't live has no crew to change.
+    fn remove_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
+        self.row(&params.captain_id)?;
+        self.row(&params.chat_id)?;
+        self.store
+            .mutate(|registry| {
+                self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                let Some(captain) = registry
+                    .captains()
+                    .iter()
+                    .find(|captain| {
+                        captain.chat_id == params.captain_id && !captain.archived
+                    })
+                else {
+                    return Err(format!("no such captain: {}", params.captain_id));
+                };
+                if captain.crew.iter().any(|id| id == &params.chat_id) {
+                    registry
+                        .remove_crew(&params.captain_id, &params.chat_id)
+                        .map(|()| true)
+                } else {
+                    Ok(false)
+                }
+            })
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
     }
 }
 
@@ -896,5 +1245,502 @@ mod tests {
             "a failed write leaves the last committed registry"
         );
         assert_eq!(store.snapshot(), committed);
+    }
+
+    // ── SUR-82: the five Captain RPC methods ────────────────────────────────
+
+    use std::collections::HashMap;
+
+    use serde_json::{Value, json};
+    use zeron_rpc::{Caller, RpcError, methods, with_caller};
+
+    /// This engine's own device, as the RPC sees it.
+    const DEVICE: &str = "device-1";
+
+    /// The host's chat rows the rule checks read, as a plain map.
+    #[derive(Default)]
+    struct FakeChats(HashMap<String, ChatRow>);
+
+    impl FakeChats {
+        fn row(mut self, chat_id: &str, space: Option<&str>, parent: Option<&str>) -> Self {
+            self.0.insert(
+                chat_id.to_string(),
+                ChatRow {
+                    space_id: space.map(str::to_string),
+                    parent_chat_id: parent.map(str::to_string),
+                    device_id: DEVICE.to_string(),
+                    turn_in_flight: false,
+                },
+            );
+            self
+        }
+
+        fn other_device(mut self, chat_id: &str) -> Self {
+            if let Some(row) = self.0.get_mut(chat_id) {
+                row.device_id = "device-2".to_string();
+            }
+            self
+        }
+
+        fn busy(mut self, chat_id: &str) -> Self {
+            if let Some(row) = self.0.get_mut(chat_id) {
+                row.turn_in_flight = true;
+            }
+            self
+        }
+    }
+
+    impl Chats for FakeChats {
+        fn chat(&self, chat_id: &str) -> Option<ChatRow> {
+            self.0.get(chat_id).cloned()
+        }
+    }
+
+    /// A store over a temp dir, the chat rows, and the DeepSeek home the
+    /// roster projects Drive paths from.
+    struct Rig {
+        _dir: tempfile::TempDir,
+        home: std::path::PathBuf,
+        store: CaptainsStore,
+        chats: FakeChats,
+    }
+
+    impl Rig {
+        fn new(chats: FakeChats) -> Rig {
+            let dir = tempfile::tempdir().unwrap();
+            let home = dir.path().join("deepseek");
+            std::fs::create_dir(&home).unwrap();
+            let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+            Rig {
+                _dir: dir,
+                home,
+                store,
+                chats,
+            }
+        }
+
+        fn rpc(&self) -> CaptainsRpc<'_> {
+            CaptainsRpc {
+                store: &self.store,
+                chats: &self.chats,
+                device_id: DEVICE,
+                deepseek_home: &self.home,
+            }
+        }
+
+        fn call(&self, method: &str, params: Value) -> Result<Value, RpcError> {
+            self.rpc().call(method, &params)
+        }
+
+        fn roster(&self) -> Value {
+            self.call(methods::CAPTAINS, json!({})).unwrap()
+        }
+
+        fn file(&self) -> Vec<u8> {
+            std::fs::read(self._dir.path().join("captains.json")).unwrap_or_default()
+        }
+    }
+
+    fn entry<'a>(roster: &'a Value, chat_id: &str) -> Option<&'a Value> {
+        roster["captains"]
+            .as_array()?
+            .iter()
+            .find(|captain| captain["chatId"] == chat_id)
+    }
+
+    fn crew(roster: &Value, chat_id: &str) -> Vec<String> {
+        entry(roster, chat_id)
+            .and_then(|captain| captain["crew"].as_array())
+            .map(|list| {
+                list.iter()
+                    .filter_map(|id| id.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn bad_params(result: Result<Value, RpcError>, needle: &str) {
+        match result {
+            Err(RpcError::BadParams(message)) => {
+                assert!(
+                    message.contains(needle),
+                    "the refusal names the wrong rule ({needle:?} missing): {message}"
+                );
+            }
+            other => panic!("expected BadParams naming {needle:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_roster_starts_empty_and_names_each_drive_path() {
+        let rig = Rig::new(FakeChats::default().row("cap-a", Some("space-1"), None));
+        assert_eq!(
+            rig.roster(),
+            json!({ "captains": [] }),
+            "a fresh store has an empty roster"
+        );
+
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+
+        let roster = rig.roster();
+        let captain = entry(&roster, "cap-a").expect("cap-a is in the roster");
+        assert_eq!(captain["name"], "Ada");
+        assert_eq!(captain["archived"], false);
+        assert_eq!(captain["crew"], json!([]));
+        let drive = rig.home.join("captains").join("cap-a");
+        assert_eq!(
+            captain["drivePath"],
+            Value::String(drive.to_string_lossy().into_owned()),
+            "the roster sends the projected Drive path"
+        );
+        assert!(
+            !drive.exists(),
+            "the roster creates no Drive directory: the plugin does, on the first turn"
+        );
+    }
+
+    #[test]
+    fn a_committed_change_is_one_update_and_a_retry_adds_none() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+
+        let promote = json!({"chatId": "cap-a", "name": "Ada"});
+        rig.call(methods::PROMOTE_CAPTAIN, promote.clone()).unwrap();
+        assert_eq!(rig.store.commits(), 1, "a committed change is one update");
+        rig.call(methods::PROMOTE_CAPTAIN, promote).unwrap();
+        assert_eq!(
+            rig.store.commits(),
+            1,
+            "a retried promote commits nothing"
+        );
+
+        let add = json!({"captainId": "cap-a", "chatId": "chat-x"});
+        rig.call(methods::ADD_CREW, add.clone()).unwrap();
+        assert_eq!(rig.store.commits(), 2);
+        rig.call(methods::ADD_CREW, add).unwrap();
+        assert_eq!(rig.store.commits(), 2, "a retried add commits nothing");
+        assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-x".to_string()]);
+
+        let demote = json!({"chatId": "cap-a"});
+        rig.call(methods::DEMOTE_CAPTAIN, demote.clone()).unwrap();
+        assert_eq!(rig.store.commits(), 3);
+        assert_eq!(
+            entry(&rig.roster(), "cap-a").unwrap()["archived"],
+            true,
+            "demote archives the record"
+        );
+        rig.call(methods::DEMOTE_CAPTAIN, demote).unwrap();
+        assert_eq!(
+            rig.store.commits(),
+            3,
+            "a retried demote commits nothing"
+        );
+
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        assert_eq!(
+            rig.store.commits(),
+            4,
+            "re-promoting an archived Captain reactivates it"
+        );
+        assert_eq!(entry(&rig.roster(), "cap-a").unwrap()["archived"], false);
+        assert_eq!(
+            crew(&rig.roster(), "cap-a"),
+            vec!["chat-x".to_string()],
+            "a crew that is still free comes back with the reactivation"
+        );
+    }
+
+    #[test]
+    fn add_crew_refuses_a_chat_from_another_project() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-2"), None)
+                .row("chat-y", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        let before = rig.file();
+
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "chat-x"}),
+            ),
+            "project",
+        );
+        assert!(
+            crew(&rig.roster(), "cap-a").is_empty(),
+            "a refused add leaves the prior membership alone"
+        );
+        assert_eq!(rig.file(), before, "a refused add writes nothing");
+
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-y"}),
+        )
+        .unwrap();
+        assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-y".to_string()]);
+    }
+
+    #[test]
+    fn add_crew_refuses_another_crews_member_and_a_child_of_an_ordinary_chat() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("cap-b", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None)
+                .row("chat-plain", Some("space-1"), None)
+                .row("child-z", Some("space-1"), Some("chat-plain"))
+                .row("child-w", Some("space-1"), Some("cap-a")),
+        );
+        for captain in ["cap-a", "cap-b"] {
+            rig.call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": captain, "name": captain}),
+            )
+            .unwrap();
+        }
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-b", "chatId": "chat-x"}),
+        )
+        .unwrap();
+
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "chat-x"}),
+            ),
+            "one crew",
+        );
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "child-z"}),
+            ),
+            "child",
+        );
+        assert!(
+            crew(&rig.roster(), "cap-a").is_empty(),
+            "neither refusal adds a member"
+        );
+
+        // A child of a Captain is the rule's other side: it may crew for it.
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "child-w"}),
+        )
+        .unwrap();
+        assert_eq!(crew(&rig.roster(), "cap-a"), vec!["child-w".to_string()]);
+    }
+
+    /// A chat row that moves to another project after its first read: the
+    /// interleaving a concurrent chat move produces between the pre-check and
+    /// the commit. The rule must be checked again on the state actually
+    /// committed, not only on the row the pre-check saw.
+    struct MovingChat {
+        member: String,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Chats for MovingChat {
+        fn chat(&self, chat_id: &str) -> Option<ChatRow> {
+            let space = if chat_id == self.member {
+                let seen = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen >= 1 { "space-2" } else { "space-1" }
+            } else {
+                "space-1"
+            };
+            Some(ChatRow {
+                space_id: Some(space.to_string()),
+                parent_chat_id: None,
+                device_id: DEVICE.to_string(),
+                turn_in_flight: false,
+            })
+        }
+    }
+
+    #[test]
+    fn add_crew_rechecks_the_project_under_the_store_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        store.promote("cap-a", "Ada").unwrap();
+        assert_eq!(store.commits(), 1);
+        let chats = MovingChat {
+            member: "chat-x".to_string(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+
+        bad_params(
+            rpc.call(
+                methods::ADD_CREW,
+                &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+            ),
+            "project",
+        );
+        assert_eq!(
+            store.commits(),
+            1,
+            "a move between the pre-check and the commit must not commit the add"
+        );
+        let registry = store.snapshot();
+        let captain = registry.captains().iter().find(|c| c.chat_id == "cap-a").unwrap();
+        assert!(captain.crew.is_empty(), "the roster kept the move out: {:?}", captain.crew);
+    }
+
+    #[test]
+    fn a_busy_chat_is_refused_before_the_registry_is_written() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-y", Some("space-1"), None)
+                .busy("chat-y"),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        let before = rig.file();
+
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "chat-y"}),
+            ),
+            "turn in flight",
+        );
+        assert_eq!(
+            rig.store.commits(),
+            1,
+            "a busy chat is refused before the commit"
+        );
+        assert_eq!(rig.file(), before, "a busy refusal writes nothing");
+        assert!(crew(&rig.roster(), "cap-a").is_empty());
+    }
+
+    #[test]
+    fn peer_and_agent_callers_are_refused() {
+        let rig = Rig::new(FakeChats::default().row("cap-a", Some("space-1"), None));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        for caller in [
+            Caller::Peer { device: None },
+            Caller::Agent {
+                chat: Some("cap-a".to_string()),
+            },
+        ] {
+            let rpc = rig.rpc();
+            let refused = runtime.block_on(with_caller(caller, async {
+                rpc.call(
+                    methods::PROMOTE_CAPTAIN,
+                    &json!({"chatId": "cap-a", "name": "Ada"}),
+                )
+            }));
+            match refused {
+                Err(RpcError::Failed(message)) => assert!(
+                    message.contains(methods::PROMOTE_CAPTAIN),
+                    "the refusal names the method: {message}"
+                ),
+                other => panic!("expected a refused caller, got {other:?}"),
+            }
+        }
+        assert_eq!(rig.store.commits(), 0, "a refused caller writes nothing");
+
+        for method in [
+            methods::CAPTAINS,
+            methods::PROMOTE_CAPTAIN,
+            methods::DEMOTE_CAPTAIN,
+            methods::ADD_CREW,
+            methods::REMOVE_CREW,
+        ] {
+            assert!(handles(method), "the RPC serves {method}");
+        }
+        assert!(!handles(methods::SCHEDULES));
+        assert!(!handles(methods::WATCH_CHATS));
+    }
+
+    #[test]
+    fn params_naming_helm_busy_are_refused() {
+        // The registry has no busy state to change, so a params object that
+        // tries to set one is refused rather than silently ignored.
+        let rig = Rig::new(FakeChats::default().row("cap-a", Some("space-1"), None));
+        bad_params(
+            rig.call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": "cap-a", "name": "Ada", "helm_busy": true}),
+            ),
+            "helm_busy",
+        );
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "cap-a", "busy": true}),
+            ),
+            "busy",
+        );
+        assert_eq!(rig.store.commits(), 0, "a refused params object writes nothing");
+    }
+
+    #[test]
+    fn a_chat_on_another_device_or_missing_is_refused() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None)
+                .other_device("chat-x"),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "chat-x"}),
+            ),
+            "another device",
+        );
+        bad_params(
+            rig.call(
+                methods::ADD_CREW,
+                json!({"captainId": "cap-a", "chatId": "ghost"}),
+            ),
+            "no such chat",
+        );
+        bad_params(
+            rig.call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": "ghost", "name": "Nobody"}),
+            ),
+            "no such chat",
+        );
+        assert!(crew(&rig.roster(), "cap-a").is_empty());
     }
 }

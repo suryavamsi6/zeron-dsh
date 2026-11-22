@@ -149,6 +149,16 @@ pub mod methods {
     /// binds the caller's chat as the session identity — the bridge never
     /// trusts a session, cwd, or agent kind the model sends.
     pub const SCHEDULE_MCP: &str = "ScheduleMcp";
+    /// This device's Captain roster: the roster ({} -> `{captains: [...]}`), one chat
+    /// promoted ({chatId, name} -> the roster), one demoted ({chatId} -> the roster),
+    /// one chat added to a crew ({captainId, chatId} -> the roster) and one removed
+    /// ({captainId, chatId} -> the roster). `captains.json` is device-local engine
+    /// state: only this device's own window reads or changes it.
+    pub const CAPTAINS: &str = "Captains";
+    pub const PROMOTE_CAPTAIN: &str = "PromoteCaptain";
+    pub const DEMOTE_CAPTAIN: &str = "DemoteCaptain";
+    pub const ADD_CREW: &str = "AddCrew";
+    pub const REMOVE_CREW: &str = "RemoveCrew";
     /// DSH's token meter, read where it lives: the sessions it records ({} ->
     /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
     /// that carries `tokenUsage`) and one session's exact projections

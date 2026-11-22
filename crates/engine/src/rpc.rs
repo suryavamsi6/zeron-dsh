@@ -969,6 +969,8 @@ pub struct EngineRpc {
     plugins: Option<crate::plugins::Plugins>,
     /// The engine-owned schedule service (absent in bare test assemblies).
     schedules: Option<crate::schedules::Schedules>,
+    /// The device-local Captain roster (absent in bare test assemblies).
+    captains: Option<std::sync::Arc<crate::captains::CaptainsStore>>,
     /// DSH's own settings and account service, started on first use.
     dsh_gateway: std::sync::Arc<
         std::sync::OnceLock<std::sync::Arc<zeron_harness::deepseek::gateway::Gateway>>,
@@ -1082,6 +1084,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             schedules: None,
+            captains: None,
             dsh_gateway: Default::default(),
             engine_info,
         }
@@ -1144,6 +1147,15 @@ impl EngineRpc {
     /// Attach the schedule service (Schedules / ScheduleSave / …).
     pub fn with_schedules(mut self, schedules: crate::schedules::Schedules) -> Self {
         self.schedules = Some(schedules);
+        self
+    }
+
+    /// Attach the Captain roster store (Captains / PromoteCaptain / …).
+    pub fn with_captains(
+        mut self,
+        captains: std::sync::Arc<crate::captains::CaptainsStore>,
+    ) -> Self {
+        self.captains = Some(captains);
         self
     }
 
@@ -3625,6 +3637,24 @@ impl crate::remote_terminals::Relay for EngineRpc {
     }
 }
 
+/// `captains::Chats` over the host's own chat rows and the sessions engine.
+struct CaptainsChats {
+    workspace: WorkspaceHost,
+    sessions: SessionsEngine,
+}
+
+impl crate::captains::Chats for CaptainsChats {
+    fn chat(&self, chat_id: &str) -> Option<crate::captains::ChatRow> {
+        let chat = self.workspace.chat(chat_id).ok().flatten()?;
+        Some(crate::captains::ChatRow {
+            space_id: chat.space_id,
+            parent_chat_id: chat.parent_chat_id,
+            device_id: chat.device_id,
+            turn_in_flight: self.sessions.turn_in_flight(chat_id),
+        })
+    }
+}
+
 #[async_trait]
 impl RpcService for EngineRpc {
     async fn handle(&self, method: &str, params: serde_json::Value) -> Result<RpcReply, RpcError> {
@@ -3676,6 +3706,33 @@ impl RpcService for EngineRpc {
                 return Err(RpcError::Failed(format!("{method}: no schedule service")));
             };
             let value = crate::schedules::call(&schedules, method, &params)?;
+            return Ok(RpcReply::Value(value));
+        }
+        // The Captain roster is `{data_dir}/captains.json` — device-local
+        // engine state only this device's own window reads or changes.
+        if crate::captains::handles(method) {
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: the Captain roster is managed from this device's own window"
+                )));
+            }
+            let Some(store) = self.captains.clone() else {
+                return Err(RpcError::Failed(format!("{method}: no captains store")));
+            };
+            let chats = CaptainsChats {
+                workspace: self.workspace.clone(),
+                sessions: self.sessions.clone(),
+            };
+            let home =
+                crate::agent_accounts::AgentAccountsConfig::detect(self.repos.data_dir())
+                    .deepseek_home;
+            let value = crate::captains::CaptainsRpc {
+                store: &store,
+                chats: &chats,
+                device_id: self.doc_host.device_id(),
+                deepseek_home: &home,
+            }
+            .call(method, &params)?;
             return Ok(RpcReply::Value(value));
         }
         // A chat's DeepSeek schedule bridge forwards each of its stdin MCP
