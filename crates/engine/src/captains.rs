@@ -310,13 +310,24 @@ pub fn valid_captain_id(id: &str) -> Result<(), String> {
     }
 }
 
-/// The plugin's name rule (`config.js`): 1-80 characters, no line breaks.
+// The plugin measures the same name with JS `String.length`
+// (`config.js:23`, called unguarded from `index.js:54`), which counts UTF-16
+// code units, so the limit is stated in that unit — not in `chars()` scalars.
+const MAX_NAME_UNITS: usize = 80;
+
+/// The plugin's name rule (`config.js`): 1-80 UTF-16 code units, no line
+/// breaks. An astral character is one `chars()` scalar but two UTF-16 code
+/// units, so the engine must count code units the way `String.length` does or
+/// it stamps names the plugin throws on.
 pub fn valid_captain_name(name: &str) -> Result<(), String> {
-    if !name.is_empty() && name.chars().count() <= 80 && !name.contains(['\r', '\n']) {
+    if !name.is_empty()
+        && name.encode_utf16().count() <= MAX_NAME_UNITS
+        && !name.contains(['\r', '\n'])
+    {
         Ok(())
     } else {
         Err(format!(
-            "invalid Captain name: {name:?} (allowed: 1-80 characters, no line breaks)"
+            "invalid Captain name: {name:?} (allowed: 1-{MAX_NAME_UNITS} UTF-16 code units, no line breaks)"
         ))
     }
 }
@@ -2176,5 +2187,87 @@ mod tests {
         registry.promote("cap-a", "A & B").unwrap();
         assert_eq!(registry.captains()[0].name, "A & B");
         registry.promote("cap-b", &"y".repeat(80)).unwrap();
+    }
+
+    /// The plugin measures a name with JS `String.length`, which counts UTF-16
+    /// code units. An astral character is one `chars()` scalar but two code
+    /// units, so the two predicates diverge from 41 astral characters on: 41
+    /// scalars look legal here and 82 code units are refused there. This pins
+    /// the boundary the two rules have to share.
+    #[test]
+    fn the_name_rule_counts_utf16_code_units_like_the_plugin() {
+        // 40 astral characters are 40 scalars and 80 UTF-16 code units: the
+        // plugin accepts the name, so a promote must accept it too.
+        let at_the_limit = "\u{1F680}".repeat(40);
+        assert_eq!(at_the_limit.chars().count(), 40);
+        assert_eq!(at_the_limit.encode_utf16().count(), 80);
+        let mut registry = Registry::default();
+        registry
+            .promote("cap-40", &at_the_limit)
+            .expect("80 UTF-16 code units are inside the plugin's 1-80 rule");
+        assert_eq!(registry.captains()[0].name, at_the_limit);
+
+        // 41 astral characters are 41 scalars and 82 UTF-16 code units: the
+        // plugin throws on the name, so the engine must refuse it rather than
+        // stamp a row that takes that chat's every run down.
+        let over_the_limit = "\u{1F680}".repeat(41);
+        assert_eq!(
+            over_the_limit.chars().count(),
+            41,
+            "the scalar count still looks legal"
+        );
+        assert_eq!(
+            over_the_limit.encode_utf16().count(),
+            82,
+            "the plugin's count refuses it"
+        );
+        let refused = registry
+            .promote("cap-41", &over_the_limit)
+            .expect_err("82 UTF-16 code units break the plugin's 1-80 rule");
+        assert!(
+            refused.contains("UTF-16"),
+            "the message must name the unit the rule counts: {refused}"
+        );
+        assert_eq!(
+            registry.captains().len(),
+            1,
+            "a refused promote must not create a record"
+        );
+    }
+
+    /// A crew row is checked on its **own** chat id as well as on its
+    /// Captain's row: an id the plugin's id rule refuses must not be stamped
+    /// and must not be given a Drive.
+    #[test]
+    fn a_crew_row_with_an_invalid_chat_id_is_refused() {
+        let at = "2026-11-01T00:00:00Z".parse().unwrap();
+        let registry = Registry {
+            captains: vec![Captain {
+                chat_id: "cap-ok".to_string(),
+                name: "Grace".to_string(),
+                created_at: at,
+                archived: false,
+                crew: vec!["bad/id".to_string()],
+            }],
+        };
+        assert!(
+            valid_captain_row("bad/id", "cap-ok", "Grace").is_err(),
+            "the crew chat's own id is invalid"
+        );
+        assert!(
+            captains_env(&registry, Path::new("/deepseek-home"), "bad/id").is_none(),
+            "a crew chat with an invalid id was stamped"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        assert_eq!(
+            ensure_drive(&registry, &home, "bad/id").unwrap(),
+            None,
+            "a crew chat with an invalid id was provisioned"
+        );
+        assert!(
+            !captains_root(&home).exists(),
+            "a refused crew row created something on disk"
+        );
     }
 }

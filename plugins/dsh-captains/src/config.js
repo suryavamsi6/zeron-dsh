@@ -20,6 +20,9 @@ export function normalizeConfig(raw) {
   if (typeof captainId !== 'string' || !idPattern.test(captainId)) {
     throw new Error('zeron-captains: captainId must be 1-128 characters of [A-Za-z0-9_-]');
   }
+  // `.length` counts UTF-16 code units — an astral character counts twice.
+  // This is the same rule as the engine's `valid_captain_name`, which counts
+  // `encode_utf16()` units so a stamped row can never fail this check.
   if (typeof captainName !== 'string' || captainName.length < 1 || captainName.length > 80 || /[\r\n]/.test(captainName)) {
     throw new Error('zeron-captains: captainName must be a string of 1-80 characters');
   }
