@@ -2547,6 +2547,23 @@
       "links_and_search": "链接与搜索",
       "zoom": "缩放"
     },
+    "import_chats": {
+      "title": "导入聊天",
+      "description": "把 DeepSeek v3 导出作为只读聊天导入。",
+      "terms": "导入 deepseek 聊天 导出 zip 只读 对话",
+      "action": {
+        "label": "导入 DeepSeek 聊天…",
+        "description": "选择 DeepSeek v3 导出的 ZIP。其中的对话会出现在你的聊天旁，可阅读，不能发送。",
+        "terms": "导入 deepseek 导出 zip 聊天 只读"
+      },
+      "choose": "选择文件…",
+      "busy": "正在导入…",
+      "imported": "{n, plural, =0 {未导入聊天。} other {已导入 # 个聊天。}}",
+      "already": "{n, plural, =0 {之前都不在这里。} other {其中 # 个之前已存在。}}",
+      "kept": "保留 {kept}/{total} 个对话。",
+      "failed": "导入未完成。",
+      "retry": "重试"
+    },
     "browser_history": {
       "title": "历史记录",
       "visited": "访问过的页面",
@@ -3117,6 +3134,7 @@
     "get_started": "开始使用"
   },
   "chat": {
+    "read_only": "此聊天从 DeepSeek 导入，为只读。",
     "aloud": {
       "read": "朗读",
       "stop": "停止朗读",

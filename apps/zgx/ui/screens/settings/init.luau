@@ -29,6 +29,7 @@ local mcp = require("@app/screens/settings/mcp")
 local devices = require("@app/screens/settings/devices")
 local projects_page = require("@app/screens/settings/projects")
 local files = require("@app/screens/settings/files")
+local import_page = require("@app/screens/settings/import")
 local browser = require("@app/screens/settings/browser")
 local browser_history = require("@app/screens/settings/browser_history")
 local shortcuts = require("@app/screens/settings/shortcuts")
@@ -106,6 +107,15 @@ settings.add {
 	icon = "info-square",
 	group = "Zeron",
 	view = about.view,
+}
+-- After About, so the pages before it keep the list's places: the import
+-- action belongs to this Mac's own files, not to one of them.
+settings.add {
+	id = import_page.ID,
+	title = import_page.TITLE,
+	icon = "download",
+	group = "Zeron",
+	view = import_page.view,
 }
 
 -- Cloud and Billing, only while the account has Cloud (the shipping app's

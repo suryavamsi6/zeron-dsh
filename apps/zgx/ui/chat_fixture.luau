@@ -53,11 +53,19 @@ local function long(n: number): { any }
 	return out
 end
 local TRANSCRIPTS: { [string]: { any } } = {
+	zimported = {
+		{ id = "imp1", role = "user", text = "Plan the migration" },
+		{ id = "imp2", role = "assistant", text = "Here is the plan: move the tables, then the reads.", model = "DeepSeek" },
+	},
 	s1 = long(30),
 	s2 = { { id = "x1", role = "user", text = "Hello there" }, { id = "x2", role = "assistant", text = "Hi! What shall we work on?", model = "Opus" } },
 	s3 = { { id = "y1", role = "user", text = "Hi" } },
 }
 local META: { [string]: any } = {
+	-- A chat imported from a DeepSeek v3 export: the host's `readOnly`
+	-- (`session_value`, src/chat.rs) says no turn may start.
+	-- (The id sorts after the seeded chats, so the page still opens s1.)
+	zimported = { title = "Imported from DeepSeek", project = "atlas", plan = false, readOnly = true },
 	s1 = { title = "Long chat", project = "atlas", model = "deepseek-flash", effort = "high", access = "full", plan = false },
 	s2 = { title = "Short chat", project = "atlas", model = "deepseek-v4-pro", effort = "medium", access = "edits", plan = false, agent = "deepseek" },
 	-- A chat saved on a gateway model, before its route rode with it.
@@ -1127,7 +1135,11 @@ end }
 local function seed()
 	local chats: { any } = {}
 	for id, m in META do
-		table.insert(chats, { id = id, title = m.title or id, project = m.project, device = "mac", updated = 0, created = 0, agent = m.agent })
+		-- (The imported chat is this fixture's to open by its command, not one
+		-- of the sidebar's: its rows are the engine's to list.)
+		if id ~= "zimported" then
+			table.insert(chats, { id = id, title = m.title or id, project = m.project, device = "mac", updated = 0, created = 0, agent = m.agent })
+		end
 	end
 	table.sort(chats, function(a, b)
 		return (a.id :: string) < (b.id :: string)
@@ -2248,6 +2260,13 @@ ui.command {
 	title = "Mention s1",
 	run = function()
 		require("@app/screens/chat/shared").mention_chat("s1")
+	end,
+}
+ui.command {
+	id = "open_imported",
+	title = "An imported, read-only chat",
+	run = function()
+		route.open_session("zimported")
 	end,
 }
 for _, id in { "s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9" } do

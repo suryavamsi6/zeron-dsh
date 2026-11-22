@@ -2547,6 +2547,23 @@
       "links_and_search": "Links and search",
       "zoom": "Zoom"
     },
+    "import_chats": {
+      "title": "Import chats",
+      "description": "Bring a DeepSeek v3 export in as read-only chats.",
+      "terms": "import deepseek chats export zip read only conversations",
+      "action": {
+        "label": "Import DeepSeek chats…",
+        "description": "Choose a DeepSeek v3 export ZIP. Its conversations open beside your own and can be read, never sent to.",
+        "terms": "import deepseek export zip chats read only"
+      },
+      "choose": "Choose file…",
+      "busy": "Importing…",
+      "imported": "{n, plural, =0 {No chats imported.} one {# chat imported.} other {# chats imported.}}",
+      "already": "{n, plural, =0 {None were here before.} one {# was already here.} other {# were already here.}}",
+      "kept": "{kept} of {total} conversations kept.",
+      "failed": "The import didn’t finish.",
+      "retry": "Try again"
+    },
     "browser_history": {
       "title": "History",
       "visited": "Pages visited",
@@ -3117,6 +3134,7 @@
     "get_started": "Get started"
   },
   "chat": {
+    "read_only": "This chat was imported from DeepSeek and is read-only.",
     "aloud": {
       "read": "Read aloud",
       "stop": "Stop reading",

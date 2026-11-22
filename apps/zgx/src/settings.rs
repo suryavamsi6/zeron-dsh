@@ -100,6 +100,9 @@ const ENGINE_METHODS: &[&str] = &[
     // Whether this window has the keys: banners set to "only when in the
     // background" hold while it does.
     "SetViewportFocus",
+    // A settings page's import of a DeepSeek v3 export ZIP (SUR-120); the
+    // method is device-local and validates the path itself.
+    "ImportDeepSeekChats",
 ];
 
 pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
