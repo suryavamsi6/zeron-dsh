@@ -18,9 +18,29 @@ the engine zgx starts keeps its data in `~/.zeron-staging`: your production
 account, chats and devices aren't there. `ZERON_ZGX_ENV=production` points a
 build at production instead (`src/auth.rs` lists the other overrides).
 
-You need Rust 1.85 or newer (edition 2024). We develop on macOS; Linux
-should work but is untested. The app is this folder: `apps/zgx` in
-zeronsh/zeron, or the root of zeronsh/zeron-zgx, which is a copy of it.
+You need Rust 1.85 or newer (edition 2024). We develop on macOS; Linux builds,
+runs and renders offscreen shots too, with one link-time caveat covered below.
+The app is this folder: `apps/zgx` in zeronsh/zeron, or the root of
+zeronsh/zeron-zgx, which is a copy of it.
+
+On Linux the link needs one local aid. The ONNX Runtime that `ort-sys`
+downloads (`download-binaries`, one of its defaults) is built against a newer
+libstdc++ than a stable distribution ships: GCC 13 split
+`std::string::_M_replace` and moved its aliasing path out of line, so that
+library refers to two `_M_replace_cold` symbols, one for `char` and one for
+`wchar_t`, and GCC 12's libstdc++ never emitted either. The link then stops
+with `undefined symbol: ...::_M_replace_cold(...)`. Installing a newer
+libstdc++ is not the answer on an older host: a GCC-13+ build of it needs a
+newer libc than the loader there provides, so the process dies at load with
+`version 'GLIBC_2.38' not found` rather than at link. What works is a
+two-symbol shim that forwards both calls to the installed library's own
+`_M_replace`, put on the link line (`-L<dir> -lisoc23`) and, because `-L` sets
+no runtime path, its directory on `LD_LIBRARY_PATH` when running. The shim
+is a host build aid: it is not in this repository and CI does not use it. If
+you build against a sysroot, point all four libstdc++ names at the same host
+library (`libstdc++.so` and `libstdc++.so.6`, in both `lib/` and `usr/lib/`),
+because `-lstdc++` resolves `.so` while the loader resolves `.so.6`, and a
+half-fixed sysroot passes or fails depending on `-L` order.
 
 On macOS you also need Zig 0.16 (`brew install zig@0.16`): Ghostty draws the
 panel's terminals there (zgx-desktop's `ghostty` feature), and zgx builds it
