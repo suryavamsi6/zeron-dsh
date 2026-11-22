@@ -208,6 +208,10 @@ test('the captains bundle confines Drive tools', { timeout: 300000 }, async t =>
   const source = resolve(here, '../../../plugins/dsh-captains');
   const bundle = join(checkout, 'dsh-captains');
   await cp(source, bundle, { recursive: true });
+  // A real install supplies the dsh-tools peer next to the bundle. This copy
+  // lives in a temp dir with no dsh on PATH, so link the peer in the same way
+  // the installed layout would; without it the tools cannot be defined at all.
+  await symlink(join(sdkRoot, 'node_modules'), join(bundle, 'node_modules'), 'dir');
   const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
     SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
   const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
@@ -216,9 +220,14 @@ test('the captains bundle confines Drive tools', { timeout: 300000 }, async t =>
 
   const script = `
 import assert from 'node:assert/strict';
+import { mkdir, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 const drive = process.argv[1];
 const plugin = await import('zeron-dsh-captains');
 assert.equal(plugin.name, 'zeron-captains');
+// The entry re-exports the validation it applies, so callers share one rule.
+assert.equal(typeof plugin.normalizeConfig, 'function', 'the entry dropped its normalizeConfig re-export');
+assert.throws(() => plugin.normalizeConfig({ role: 'boss' }), /unknown role/);
 const captain = { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
 const crew = { role: 'crew', chatId: 'crew-1', captainId: 'captain-1', captainName: 'B', driveRoot: drive };
 
@@ -266,6 +275,24 @@ await assert.rejects(write.execute({ path: '/etc/passwd', content: 'x' }), outsi
 // The engine owns state/ and reports/ for writing; the Captain reads them.
 await assert.rejects(write.execute({ path: 'state/needs-you.json', content: '{}' }), /engine-owned/);
 await assert.rejects(write.execute({ path: 'reports/turn-1.md', content: '# report' }), /engine-owned/);
+// The guard is checked on the resolved path: a display prefix must not smuggle
+// a write into either folder.
+for (const target of ['.//state/needs-you.json', './/reports/turn-1.md', '././/state/needs-you.json']) {
+  await assert.rejects(write.execute({ path: target, content: 'x' }), /engine-owned/, target + ' slipped past the engine-owned guard');
+}
+// A symlink alias inside the Drive still names the engine's folder.
+await mkdir(join(drive, 'state'), { recursive: true });
+await symlink(join(drive, 'state'), join(drive, 'alias'));
+await assert.rejects(write.execute({ path: 'alias/needs-you.json', content: '{}' }), /engine-owned/,
+  'a symlink alias reached the engine-owned folder');
+// Positive controls: a prefix is not the folder.
+for (const target of ['notes/x.md', 'stateful/x.md']) {
+  await write.execute({ path: target, content: 'ok' });
+  assert.equal(await read.execute({ path: target }), 'ok', target);
+}
+// Writing through a symlinked folder lands at the real path and says so.
+await symlink(join(drive, 'notes'), join(drive, 'notes-alias'));
+assert.equal(await write.execute({ path: 'notes-alias/y.txt', content: 'abc' }), 'wrote notes/y.txt (3 bytes)');
 
 // A read-only run cannot write the Drive.
 process.env.DSH_PERMISSION_MODE = 'read-only';
@@ -274,7 +301,8 @@ delete process.env.DSH_PERMISSION_MODE;
 
 console.log('confined');
 `;
-  const call = await run(['--input-type=module', '-e', script, drive], { cwd: profile, env, timeout: 60000 });
+  const call = await run(['--input-type=module', '-e', script, drive],
+    { cwd: profile, env: { ...env, NODE_PATH: join(sdkRoot, 'node_modules') }, timeout: 60000 });
   assert.equal(call.code, 0, `the Drive tools are not confined: ${report(call)}`);
   assert.match(call.stdout, /^confined$/m);
 });
