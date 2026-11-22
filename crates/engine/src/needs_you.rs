@@ -1,12 +1,14 @@
-//! `state/needs-you.json` — the Drive's "Needs you" list, written at the end
-//! of a Captain's turn.
+//! `state/needs-you.json` — the Drive's "Needs you" list, written when a
+//! Captain's turn ends.
 //!
 //! The list is parsed out of the Drive's `DIGEST.md` (`## Needs you` bullets).
 //! The file is rewritten only when the items change, so a poller can watch its
-//! mtime; a turn that fails writes nothing and the last good list survives.
+//! mtime; a turn that fails or is interrupted writes nothing and the last good
+//! list survives, with the outcome saying so.
 
 use chrono::{DateTime, Utc};
 use std::path::Path;
+use zeron_proto::DoneStatus;
 
 /// The file's name inside `<drive>/state/`.
 pub const FILE: &str = "needs-you.json";
@@ -17,16 +19,28 @@ pub const VERSION: u32 = 1;
 /// A digest that lists more than this many asks is a digest nobody reads.
 const CAP: usize = 50;
 
-/// What one `record_needs_you` call did.
+/// What a turn end did to the file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The items changed and the file was rewritten.
+    Wrote,
+    /// The items are identical: nothing was written and `updatedAt` is the
+    /// previous one.
+    Unchanged,
+    /// The turn did not complete: the last good list was kept and nothing was
+    /// written.
+    KeptLastGood,
+}
+
+/// What one call did, for the caller to trace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
-    /// Whether the file was rewritten (the items changed).
-    pub changed: bool,
-    /// How many items the new list holds.
+    pub outcome: Outcome,
+    /// How many items the list holds after the call.
     pub items: usize,
 }
 
-/// The `## Needs you` bullets of `markdown`: `-`, `*` and `1.` list items,
+/// The `## Needs you` bullets of `markdown`: `-`, `*` and `N.` list items,
 /// trimmed, empties dropped, capped. Harmless on a file with no such section.
 pub fn parse_needs_you(markdown: &str) -> Vec<String> {
     let _ = markdown;
@@ -40,9 +54,21 @@ pub fn parse_needs_you(markdown: &str) -> Vec<String> {
 pub fn record_needs_you(drive: &Path, now: DateTime<Utc>) -> Result<Recorded, String> {
     let _ = (drive, now);
     Ok(Recorded {
-        changed: false,
+        outcome: Outcome::Unchanged,
         items: 0,
     })
+}
+
+/// The turn-end rule: a completed turn snapshots the digest; an errored or
+/// interrupted turn keeps the last good list and writes nothing.
+pub fn record_turn_end(
+    drive: &Path,
+    status: DoneStatus,
+    now: DateTime<Utc>,
+) -> Result<Recorded, String> {
+    // RED SCAFFOLD: the failed-turn branch is the implementation step.
+    let _ = status;
+    record_needs_you(drive, now)
 }
 
 #[cfg(test)]
@@ -94,7 +120,7 @@ mod tests {
         assert_eq!(
             record(dir.path()),
             Recorded {
-                changed: true,
+                outcome: Outcome::Wrote,
                 items: 1
             }
         );
@@ -118,10 +144,13 @@ mod tests {
     fn an_unchanged_list_is_not_rewritten() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_digest(dir.path(), "## Needs you\n- one ask\n- another ask\n");
-        assert!(record(dir.path()).changed);
+        assert_eq!(record(dir.path()).outcome, Outcome::Wrote);
         let path = dir.path().join("state").join(FILE);
         let first = std::fs::read_to_string(&path).expect("first");
-        let first_mtime = std::fs::metadata(&path).expect("metadata").modified().expect("mtime");
+        let first_mtime = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
         // Filesystems with coarse mtimes must not make this assertion flaky.
         std::thread::sleep(std::time::Duration::from_millis(20));
 
@@ -130,17 +159,19 @@ mod tests {
             dir.path(),
             "## Needs you\n\n- one ask\n\n- another ask\n\n## New\n- later\n",
         );
-        let second = record(dir.path());
         assert_eq!(
-            second,
+            record(dir.path()),
             Recorded {
-                changed: false,
+                outcome: Outcome::Unchanged,
                 items: 2
             }
         );
         assert_eq!(std::fs::read_to_string(&path).expect("second"), first);
         assert_eq!(
-            std::fs::metadata(&path).expect("metadata").modified().expect("mtime"),
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
             first_mtime,
             "an unchanged list does not touch the file"
         );
@@ -150,12 +181,12 @@ mod tests {
     fn a_new_ask_rewrites_the_file() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_digest(dir.path(), "## Needs you\n- one ask\n");
-        assert!(record(dir.path()).changed);
+        assert_eq!(record(dir.path()).outcome, Outcome::Wrote);
         write_digest(dir.path(), "## Needs you\n- one ask\n- a second ask\n");
         assert_eq!(
             record(dir.path()),
             Recorded {
-                changed: true,
+                outcome: Outcome::Wrote,
                 items: 2
             }
         );
@@ -173,7 +204,7 @@ mod tests {
         assert_eq!(
             record(dir.path()),
             Recorded {
-                changed: true,
+                outcome: Outcome::Wrote,
                 items: 0
             }
         );
@@ -184,16 +215,101 @@ mod tests {
     fn a_digest_without_the_section_empties_the_list() {
         let dir = tempfile::tempdir().expect("tempdir");
         write_digest(dir.path(), "## Needs you\n- one ask\n");
-        assert!(record(dir.path()).changed);
+        assert_eq!(record(dir.path()).outcome, Outcome::Wrote);
         // The Captain cleared its asks; the file must say so, once.
         write_digest(dir.path(), "## New\n- nothing waiting\n");
         assert_eq!(
             record(dir.path()),
             Recorded {
-                changed: true,
+                outcome: Outcome::Wrote,
                 items: 0
             }
         );
         assert_eq!(stored(dir.path())["items"], serde_json::json!([]));
+    }
+
+    /// The first red case: a failed turn must not clobber the list, and the
+    /// returned outcome must say the last good list was kept.
+    #[test]
+    fn an_errored_turn_keeps_the_last_good_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_digest(dir.path(), "## Needs you\n- keep me\n");
+        assert_eq!(record(dir.path()).outcome, Outcome::Wrote);
+        let path = dir.path().join("state").join(FILE);
+        let before = std::fs::read_to_string(&path).expect("before");
+        let before_stamp = stored(dir.path())["updatedAt"]
+            .as_str()
+            .expect("updatedAt")
+            .to_owned();
+        let before_mtime = std::fs::metadata(&path)
+            .expect("metadata")
+            .modified()
+            .expect("mtime");
+
+        // The sidecar died mid-turn after the digest changed: the new ask must
+        // not overwrite the list the person last saw.
+        write_digest(dir.path(), "## Needs you\n- half-written ask\n");
+        let now = Utc::now();
+        assert_eq!(
+            record_turn_end(dir.path(), DoneStatus::Errored, now).expect("record"),
+            Recorded {
+                outcome: Outcome::KeptLastGood,
+                items: 1
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("after"), before);
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("metadata")
+                .modified()
+                .expect("mtime"),
+            before_mtime,
+            "a failed turn does not touch the file"
+        );
+        assert_eq!(
+            stored(dir.path())["updatedAt"],
+            serde_json::json!(before_stamp),
+            "the previous updatedAt survives"
+        );
+    }
+
+    /// The second red case: an interrupted (sidecar-death) turn is the same
+    /// rule as an errored one — keep the last good list.
+    #[test]
+    fn an_interrupted_turn_keeps_the_last_good_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_digest(dir.path(), "## Needs you\n- keep me\n");
+        assert_eq!(record(dir.path()).outcome, Outcome::Wrote);
+        let path = dir.path().join("state").join(FILE);
+        let before = std::fs::read_to_string(&path).expect("before");
+
+        write_digest(dir.path(), "## Needs you\n- interrupted ask\n");
+        assert_eq!(
+            record_turn_end(dir.path(), DoneStatus::Interrupted, Utc::now()).expect("record"),
+            Recorded {
+                outcome: Outcome::KeptLastGood,
+                items: 1
+            }
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("after"), before);
+    }
+
+    /// A completed turn still snapshots, so the failed-turn branch is a branch
+    /// and not a second implementation.
+    #[test]
+    fn a_completed_turn_records_the_new_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_digest(dir.path(), "## Needs you\n- one ask\n");
+        assert_eq!(
+            record_turn_end(dir.path(), DoneStatus::Completed, Utc::now()).expect("record"),
+            Recorded {
+                outcome: Outcome::Wrote,
+                items: 1
+            }
+        );
+        assert_eq!(
+            stored(dir.path())["items"],
+            serde_json::json!(["one ask"])
+        );
     }
 }

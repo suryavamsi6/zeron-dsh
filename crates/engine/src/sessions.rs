@@ -513,6 +513,20 @@ impl SessionsEngine {
         let _ = self.inner.data_dir.set(dir.into());
     }
 
+    /// The DeepSeek home a Captain's Drive lives under: the turn-end
+    /// `state/needs-you.json` snapshot resolves the Drive from it.
+    pub fn use_captains_home(&self, _path: std::path::PathBuf) {
+        // RED SCAFFOLD: stored and used in the implementation step.
+    }
+
+    /// The per-run turn end: a live Captain's completed turn snapshots its
+    /// Digest; a failed or interrupted turn keeps the last good list. Ordinary
+    /// chats, crew chats and archived Captains write nothing.
+    fn captain_turn_ended(&self, _chat_id: &str, _status: DoneStatus) -> bool {
+        // RED SCAFFOLD: the seam is implemented in the next step.
+        false
+    }
+
     /// Record the loopback IPC port this engine serves. Runs started after
     /// this carry Zeron's MCP server (see [`Inner::zeron_mcp`]); until then —
     /// or with 0 — agents get no Zeron tools rather than a dead server.
@@ -8274,4 +8288,146 @@ mod tests {
         sessions.ipc_port_ready(limit).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
+    // ── SUR-100: the needs-you snapshot at a Captain turn's end ──────────
+
+    use std::time::Duration;
+
+    const NEEDS_YOU_REGISTRY: &str = r#"{"captains":[{"chat_id":"cap-a","name":"Ada","created_at":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#;
+
+    fn needs_you_engine(dir: &std::path::Path, registry: &str) -> (SessionsEngine, std::path::PathBuf) {
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), registry).expect("registry");
+        let home = dir.join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.join("journals")).expect("journal")),
+            Arc::new(HarnessRegistry::new()),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        (sessions, home)
+    }
+
+    fn seed_digest(home: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let drive = crate::captains::drive_dir(home, "cap-a");
+        std::fs::create_dir_all(&drive).expect("drive");
+        std::fs::write(drive.join("DIGEST.md"), body).expect("digest");
+        drive
+    }
+
+    async fn wait_for(path: &std::path::Path) -> bool {
+        for _ in 0..60 {
+            if path.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_captain_turn_records_its_needs_you_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        assert!(
+            sessions.captain_turn_ended("cap-a", DoneStatus::Completed),
+            "a live Captain's completed turn schedules the snapshot"
+        );
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for(&path).await, "the file is written: {}", path.display());
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(stored["items"], serde_json::json!(["approve the deploy"]));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_chat_never_writes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        seed_digest(&home, "## Needs you\n- not mine\n");
+        assert!(!sessions.captain_turn_ended("plain", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut files = 0;
+        for captain_dir in std::fs::read_dir(home.join("captains")).into_iter().flatten() {
+            let path = captain_dir.expect("entry").path().join("state").join(crate::needs_you::FILE);
+            if path.exists() {
+                files += 1;
+            }
+        }
+        assert_eq!(files, 0, "an ordinary chat writes no state");
+    }
+
+    #[tokio::test]
+    async fn a_crew_chat_writes_no_state() {
+        let registry = r#"{"captains":[{"chat_id":"cap-a","name":"Ada","created_at":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        assert!(!sessions.captain_turn_ended("crew-b", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !drive.join("state").join(crate::needs_you::FILE).exists(),
+            "a crew chat writes nothing into the Captain's state"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archived_captain_writes_no_state() {
+        let registry = r#"{"captains":[{"chat_id":"cap-a","name":"Ada","created_at":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- paused\n");
+        assert!(!sessions.captain_turn_ended("cap-a", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!drive.join("state").join(crate::needs_you::FILE).exists());
+    }
+
+    /// The seam pin: `publish` is the shared event sink, so a synthesized
+    /// `Done` reaching it must not record anything. Moving the call back into
+    /// `publish` makes this test red.
+    #[tokio::test]
+    async fn a_synthesized_done_does_not_record_needs_you() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- synthesized\n");
+        sessions.inner.publish(
+            "cap-a",
+            &AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !drive.join("state").join(crate::needs_you::FILE).exists(),
+            "a Done with no turn behind it records nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_errored_captain_turn_keeps_the_last_good_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- keep me\n");
+        crate::needs_you::record_needs_you(&drive, Utc::now()).expect("seed");
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        let before = std::fs::read_to_string(&path).expect("before");
+        std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- half-written\n").expect("digest");
+
+        assert!(
+            sessions.captain_turn_ended("cap-a", DoneStatus::Errored),
+            "a live Captain's failed turn is still a turn end worth tracing"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("after"),
+            before,
+            "a failed turn does not clobber the last good list"
+        );
+    }
+
 }
