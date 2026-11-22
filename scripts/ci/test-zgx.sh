@@ -2,23 +2,38 @@
 # The apps/zgx tests CI runs (.github/workflows/zgx-tests.yml), with the known
 # failures in scripts/ci/zgx-known-failures.txt let through:
 #
-#   scripts/ci/test-zgx.sh rust      cargo test --bin zeron-zgx (its unit tests,
-#                                    src/plugins/*_tests.rs among them), the
-#                                    known ones skipped by exact name, and the
-#                                    `rust-macos:` ones on the macOS runner only
-#                                    known ones skipped by exact name
-#   scripts/ci/test-zgx.sh tests     cargo test --test '*' (apps/zgx/tests/*.rs,
-#                                    the app's integration tests), every binary
-#                                    run however others fail (--no-fail-fast),
-#                                    the known ones skipped by exact name
-#   scripts/ci/test-zgx.sh ui [zgx]  zgx test ui (the Luau UI tests), with the
-#                                    zgx CLI given or on PATH; fails on any FAIL
-#                                    not listed, and names listed ones that pass
+#   scripts/ci/test-zgx.sh rust [n]   cargo test --bin zeron-zgx (its unit tests,
+#                                     src/plugins/*_tests.rs among them), the
+#                                     known ones skipped by exact name, and the
+#                                     `rust-macos:` ones on the macOS runner
+#                                     only. With n, the Linux job's shard (1 or
+#                                     2, SUR-174): shard 1 runs the modules in
+#                                     SHARD1, shard 2 every other test.
+#   scripts/ci/test-zgx.sh tests      cargo test --test '*' (apps/zgx/tests/*.rs,
+#                                     the app's integration tests), every binary
+#                                     run however others fail (--no-fail-fast),
+#                                     the known ones skipped by exact name
+#   scripts/ci/test-zgx.sh ui [zgx]   zgx test ui (the Luau UI tests), with the
+#                                     zgx CLI given or on PATH; fails on any FAIL
+#                                     not listed, and names listed ones that pass
 set -euo pipefail
 root="$(cd "$(dirname "$0")/../.." && pwd)"
 known="$root/scripts/ci/zgx-known-failures.txt"
 
 listed() { sed -n "s/^$1: //p" "$known"; }
+
+# The unit tests' shard 1 (SUR-174), split by measured duration, not count.
+# transcript_paint_tests is ~90 s on its own: each test repaints a whole
+# transcript on lavapipe behind a static GPU mutex, so the module is one long
+# serial chain. Everything else parallelizes over the runner's cores and sums
+# to about the same wall time (measured 87 s vs 100 s at four threads), so the
+# shard holds only 6 tests of 789. Pairing the paints with anything bigger
+# made the shard slower both ways: they inflate whatever shares their process.
+# Shard 2 is everything not here, so a test added anywhere, a new module among
+# them, always lands in a shard. The names are libtest path prefixes.
+SHARD1=(
+  transcript_paint_tests:: # 6 tests, ~90 s serial: whole transcripts repainted on lavapipe
+)
 
 case "${1:-}" in
   rust)
@@ -33,6 +48,43 @@ case "${1:-}" in
     # (A test the macOS runner can't pass, which the other runners keep running.)
     if [ "$(uname -s)" = Darwin ]; then skip_listed rust-macos; fi
     cd "$root/apps/zgx"
+    shard="${2:-}"
+    if [ -n "$shard" ]; then
+      # Every test the binary lists, by exact name: a prefix that matches
+      # nothing warns (a renamed module would drift to shard 2 unnoticed).
+      all=()
+      while IFS= read -r name; do all+=("$name"); done \
+        < <(cargo test --locked --bin zeron-zgx -- --list | sed -n 's/: test$//p')
+      one=()
+      seen=" "
+      for name in "${all[@]}"; do
+        for prefix in "${SHARD1[@]}"; do
+          case "$name" in
+            "$prefix"*) one+=("$name"); seen="$seen$prefix "; break ;;
+          esac
+        done
+      done
+      for prefix in "${SHARD1[@]}"; do
+        case "$seen" in *"$prefix "*) ;; *) echo "::warning::shard 1 prefix $prefix matches no test" >&2 ;; esac
+      done
+      case "$shard" in
+        1)
+          # No filters would run everything; an empty list is a stale SHARD1.
+          if [ ${#one[@]} -eq 0 ]; then
+            echo "::error::shard 1 matched no test; fix SHARD1 in $0" >&2; exit 1
+          fi
+          echo "unit-test shard 1: ${#one[@]} of ${#all[@]} tests"
+          exec cargo test --locked --bin zeron-zgx -- --exact ${one[@]+"${one[@]}"} ${skips[@]+"${skips[@]}"}
+          ;;
+        2)
+          args=()
+          for name in ${one[@]+"${one[@]}"}; do args+=(--skip "$name"); done
+          echo "unit-test shard 2: $((${#all[@]} - ${#one[@]})) of ${#all[@]} tests"
+          exec cargo test --locked --bin zeron-zgx -- --exact ${args[@]+"${args[@]}"} ${skips[@]+"${skips[@]}"}
+          ;;
+        *) echo "usage: $0 rust [1|2] | tests | ui [zgx]" >&2; exit 2 ;;
+      esac
+    fi
     # (`${a[@]+…}`: an empty list under `set -u`, which macOS's bash 3.2
     # calls unbound.)
     exec cargo test --locked --bin zeron-zgx -- --exact ${skips[@]+"${skips[@]}"}
@@ -72,7 +124,7 @@ case "${1:-}" in
     fi
     ;;
   *)
-    echo "usage: $0 rust | tests | ui [zgx]" >&2
+    echo "usage: $0 rust [1|2] | tests | ui [zgx]" >&2
     exit 2
     ;;
 esac
