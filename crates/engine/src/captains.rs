@@ -245,6 +245,42 @@ pub fn drive_dir(deepseek_home: &Path, captain_id: &str) -> PathBuf {
     deepseek_home.join("captains").join(captain_id)
 }
 
+/// The `ZERON_DEEPSEEK_CAPTAINS` payload a run is stamped with: the role
+/// `chat_id` plays in `registry`, or `None` for an ordinary chat. The plugin
+/// validates exactly these camelCase keys. `driveRoot` is the parent
+/// `<deepseek_home>/captains`; a Captain's own drive lives at [`drive_dir`].
+pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) -> Option<String> {
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Stamp<'a> {
+        role: &'a str,
+        chat_id: &'a str,
+        captain_id: &'a str,
+        captain_name: &'a str,
+        drive_root: String,
+    }
+
+    let drive_root = deepseek_home.join("captains").to_string_lossy().into_owned();
+    let (role, captain_id, captain_name) = match registry.run_role(chat_id) {
+        RunRole::None => return None,
+        RunRole::Captain { name } => ("captain", chat_id.to_string(), name),
+        RunRole::Crew {
+            captain_id,
+            captain_name,
+        } => ("crew", captain_id, captain_name),
+    };
+    Some(
+        serde_json::to_string(&Stamp {
+            role,
+            chat_id,
+            captain_id: &captain_id,
+            captain_name: &captain_name,
+            drive_root,
+        })
+        .expect("a captains stamp serialises"),
+    )
+}
+
 /// Serialises every `CaptainsStore` mutation process-wide: two independent
 /// stores over the same `captains.json` still take turns under it.
 static MUTATION: Mutex<()> = Mutex::new(());
@@ -658,6 +694,94 @@ mod tests {
             std::fs::read_dir(&home).unwrap().next().is_none(),
             "drive_dir creates nothing"
         );
+    }
+
+    #[test]
+    fn captains_env_names_a_captain() {
+        let home = Path::new("/deepseek-home");
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+
+        let stamp: serde_json::Value =
+            serde_json::from_str(&captains_env(&registry, home, "chat-1").unwrap()).unwrap();
+        assert_eq!(stamp["role"], "captain");
+        assert_eq!(stamp["chatId"], "chat-1");
+        assert_eq!(stamp["captainId"], "chat-1");
+        assert_eq!(stamp["captainName"], "ada");
+        assert_eq!(
+            stamp["driveRoot"],
+            home.join("captains").to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn captains_env_names_a_crew_member() {
+        let home = Path::new("/deepseek-home");
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry.add_crew("chat-1", "chat-2").unwrap();
+
+        let stamp: serde_json::Value =
+            serde_json::from_str(&captains_env(&registry, home, "chat-2").unwrap()).unwrap();
+        assert_eq!(stamp["role"], "crew");
+        assert_eq!(stamp["chatId"], "chat-2");
+        assert_eq!(stamp["captainId"], "chat-1");
+        assert_eq!(stamp["captainName"], "ada");
+        assert_eq!(
+            stamp["driveRoot"],
+            home.join("captains").to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn captains_env_is_none_for_an_archived_captain() {
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry.add_crew("chat-1", "chat-2").unwrap();
+        registry.demote("chat-1").unwrap();
+
+        let home = Path::new("/deepseek-home");
+        assert_eq!(captains_env(&registry, home, "chat-1"), None);
+        assert_eq!(
+            captains_env(&registry, home, "chat-2"),
+            None,
+            "an archived Captain's crew is released too"
+        );
+    }
+
+    #[test]
+    fn captains_env_is_none_for_an_unrelated_chat() {
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        assert_eq!(
+            captains_env(&registry, Path::new("/deepseek-home"), "stranger"),
+            None
+        );
+    }
+
+    #[test]
+    fn captains_env_serializes_the_keys_the_plugin_validates() {
+        let home = Path::new("/deepseek-home");
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry.add_crew("chat-1", "chat-2").unwrap();
+
+        for chat_id in ["chat-1", "chat-2"] {
+            let stamp: serde_json::Value =
+                serde_json::from_str(&captains_env(&registry, home, chat_id).unwrap()).unwrap();
+            let mut keys: Vec<&str> = stamp
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["captainId", "captainName", "chatId", "driveRoot", "role"],
+                "{chat_id} is stamped with exactly the plugin's keys"
+            );
+        }
     }
 
     #[test]
