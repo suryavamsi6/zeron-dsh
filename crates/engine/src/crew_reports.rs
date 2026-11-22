@@ -21,6 +21,19 @@ const CAP: usize = 4_000;
 /// The note a capped body ends with.
 const TRUNCATED: &str = "[truncated]";
 
+/// The wake line's copy of the turn's last reply is bounded at this many
+/// chars.
+const REPLY_CAP: usize = 600;
+
+/// The outcome word the report's Status line and the wake line share.
+fn status_word(status: DoneStatus) -> &'static str {
+    match status {
+        DoneStatus::Completed => "completed",
+        DoneStatus::Interrupted => "aborted",
+        DoneStatus::Errored => "error",
+    }
+}
+
 /// `<drive>/reports/<chat_id>.md`, or `None` when `chat_id` is not a bare
 /// filename: empty, `.`, `..`, or anything containing `/`, `\` or NUL.
 pub fn report_path(drive: &Path, chat_id: &str) -> Option<PathBuf> {
@@ -51,11 +64,7 @@ pub fn write_report(
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     let mut temp = tempfile::NamedTempFile::new_in(&dir)
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    let word = match status {
-        DoneStatus::Completed => "completed",
-        DoneStatus::Interrupted => "aborted",
-        DoneStatus::Errored => "error",
-    };
+    let word = status_word(status);
     let mut body: String = text.chars().take(CAP).collect();
     if text.chars().count() > CAP {
         body.push_str(TRUNCATED);
@@ -72,6 +81,33 @@ pub fn write_report(
     temp.persist(&path)
         .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
     Ok(())
+}
+
+/// The line a crew turn's end queues to the chat's Captain (SUR-87): the
+/// header — the crew chat's title ("a crew chat" when untitled), its short
+/// id, the turn's outcome word — then the turn's last reply bounded at 600
+/// chars, then where the full report is. `written` is whether the report
+/// file landed: when it did not, the pointer says the report is pending
+/// rather than naming a file that is not there.
+pub fn report_text(
+    title: &str,
+    chat_id: &str,
+    status: DoneStatus,
+    text: &str,
+    written: bool,
+) -> String {
+    let title = if title.is_empty() { "a crew chat" } else { title };
+    let short: String = chat_id.chars().take(8).collect();
+    let reply: String = text.chars().take(REPLY_CAP).collect();
+    let pointer = if written {
+        format!("Full report: {DIR}/{chat_id}.md")
+    } else {
+        format!("Full report: pending — {DIR}/{chat_id}.md is unavailable")
+    };
+    format!(
+        "[crew report] {title} ({short}): {}\n{reply}\n{pointer}",
+        status_word(status)
+    )
 }
 
 #[cfg(test)]
