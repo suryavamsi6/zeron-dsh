@@ -65,6 +65,7 @@ pub mod keep_running;
 pub mod heap;
 pub mod managed;
 mod model_catalogs;
+pub mod needs_you;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
@@ -456,10 +457,12 @@ impl EngineCore {
                 uploads.clone(),
             )
         });
+        let captains_home = agent_accounts_config.deepseek_home.clone();
         // Logins started from another device publish their callback port to
         // the P2P service, which serves it to that device alone.
         let agent_accounts =
             AgentAccounts::with_callback_routes(agent_accounts_config, previews.callback_routes());
+        sessions.use_captains_home(captains_home);
         registry.set_account_environment(Arc::new(agent_accounts::PinRunEnvironment(
             agent_accounts.clone(),
         )));

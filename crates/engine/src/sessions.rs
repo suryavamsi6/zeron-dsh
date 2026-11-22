@@ -275,6 +275,10 @@ struct Inner {
     /// This engine's data dir, once assembly knows it: where the person's own
     /// MCP servers live ([`crate::user_mcp`]). Absent in bare tests.
     data_dir: OnceLock<std::path::PathBuf>,
+    /// The DeepSeek home a Captain's Drive lives under
+    /// ([`crate::captains::drive_dir`]): the turn-end needs-you snapshot
+    /// resolves the Drive from it. Absent in bare tests.
+    captains_home: OnceLock<std::path::PathBuf>,
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
     mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
@@ -477,6 +481,7 @@ impl SessionsEngine {
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
                 ipc_token_file: Mutex::new(None),
                 data_dir: OnceLock::new(),
+                captains_home: OnceLock::new(),
                 mcp_endpoint: Mutex::new(None),
                 viewers: Arc::default(),
                 journal,
@@ -511,6 +516,19 @@ impl SessionsEngine {
     /// engine's data dir. Once, at assembly.
     pub fn use_data_dir(&self, dir: impl Into<std::path::PathBuf>) {
         let _ = self.inner.data_dir.set(dir.into());
+    }
+
+    /// The DeepSeek home a Captain's Drive lives under: the turn-end
+    /// `state/needs-you.json` snapshot resolves the Drive from it.
+    pub fn use_captains_home(&self, path: std::path::PathBuf) {
+        let _ = self.inner.captains_home.set(path);
+    }
+
+    /// The per-run turn end: a live Captain's completed turn snapshots its
+    /// Digest; a failed or interrupted turn keeps the last good list. Ordinary
+    /// chats, crew chats and archived Captains write nothing.
+    fn captain_turn_ended(&self, chat_id: &str, status: DoneStatus) -> bool {
+        self.inner.captain_turn_ended(chat_id, status)
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -2798,6 +2816,51 @@ impl Inner {
                 event
             })
             .collect()
+    }
+
+    /// The per-run turn end the needs-you snapshot hangs off: a live Captain's
+    /// completed turn snapshots its Digest, a failed or interrupted turn keeps
+    /// the last good list ([`crate::needs_you::record_turn_end`]). `false` —
+    /// nothing scheduled — for ordinary chats, crew chats and archived
+    /// Captains, and for an engine with no data dir or captains home yet. The
+    /// write itself runs off the event loop; its outcome is traced, never
+    /// propagated.
+    fn captain_turn_ended(&self, chat_id: &str, status: DoneStatus) -> bool {
+        let (Some(data_dir), Some(home)) = (self.data_dir.get(), self.captains_home.get()) else {
+            return false;
+        };
+        let live_captain = match crate::captains::Registry::load(data_dir) {
+            Ok(registry) => matches!(
+                registry.run_role(chat_id),
+                crate::captains::RunRole::Captain { .. }
+            ),
+            Err(error) => {
+                tracing::warn!(chat = %chat_id, error = %error, "captains registry load failed");
+                return false;
+            }
+        };
+        if !live_captain {
+            return false;
+        }
+        let drive = crate::captains::drive_dir(home, chat_id);
+        let chat_id = chat_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
+                Ok(recorded) => {
+                    let outcome = recorded.outcome;
+                    tracing::debug!(
+                        chat = %chat_id,
+                        ?outcome,
+                        items = recorded.items,
+                        "captain turn end"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
+                }
+            }
+        });
+        true
     }
 
     fn publish(&self, chat_id: &str, event: &AgentEvent) -> u64 {
@@ -6294,6 +6357,7 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
+            inner.captain_turn_ended(&chat_id, *status);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -8274,4 +8338,146 @@ mod tests {
         sessions.ipc_port_ready(limit).await;
         assert_eq!(start.elapsed(), Duration::ZERO);
     }
+    // ── SUR-100: the needs-you snapshot at a Captain turn's end ──────────
+
+    use std::time::Duration;
+
+    const NEEDS_YOU_REGISTRY: &str = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#;
+
+    fn needs_you_engine(dir: &std::path::Path, registry: &str) -> (SessionsEngine, std::path::PathBuf) {
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), registry).expect("registry");
+        let home = dir.join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.join("journals")).expect("journal")),
+            Arc::new(HarnessRegistry::new()),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        (sessions, home)
+    }
+
+    fn seed_digest(home: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let drive = crate::captains::drive_dir(home, "cap-a");
+        std::fs::create_dir_all(&drive).expect("drive");
+        std::fs::write(drive.join("DIGEST.md"), body).expect("digest");
+        drive
+    }
+
+    async fn wait_for(path: &std::path::Path) -> bool {
+        for _ in 0..60 {
+            if path.exists() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_captain_turn_records_its_needs_you_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        assert!(
+            sessions.captain_turn_ended("cap-a", DoneStatus::Completed),
+            "a live Captain's completed turn schedules the snapshot"
+        );
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for(&path).await, "the file is written: {}", path.display());
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(stored["items"], serde_json::json!(["approve the deploy"]));
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_chat_never_writes_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        seed_digest(&home, "## Needs you\n- not mine\n");
+        assert!(!sessions.captain_turn_ended("plain", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let mut files = 0;
+        for captain_dir in std::fs::read_dir(home.join("captains")).into_iter().flatten() {
+            let path = captain_dir.expect("entry").path().join("state").join(crate::needs_you::FILE);
+            if path.exists() {
+                files += 1;
+            }
+        }
+        assert_eq!(files, 0, "an ordinary chat writes no state");
+    }
+
+    #[tokio::test]
+    async fn a_crew_chat_writes_no_state() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        assert!(!sessions.captain_turn_ended("crew-b", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !drive.join("state").join(crate::needs_you::FILE).exists(),
+            "a crew chat writes nothing into the Captain's state"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archived_captain_writes_no_state() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- paused\n");
+        assert!(!sessions.captain_turn_ended("cap-a", DoneStatus::Completed));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!drive.join("state").join(crate::needs_you::FILE).exists());
+    }
+
+    /// The seam pin: `publish` is the shared event sink, so a synthesized
+    /// `Done` reaching it must not record anything. Moving the call back into
+    /// `publish` makes this test red.
+    #[tokio::test]
+    async fn a_synthesized_done_does_not_record_needs_you() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- synthesized\n");
+        sessions.inner.publish(
+            "cap-a",
+            &AgentEvent::Done {
+                status: DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            },
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !drive.join("state").join(crate::needs_you::FILE).exists(),
+            "a Done with no turn behind it records nothing"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_errored_captain_turn_keeps_the_last_good_list() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let drive = seed_digest(&home, "## Needs you\n- keep me\n");
+        crate::needs_you::record_needs_you(&drive, Utc::now()).expect("seed");
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        let before = std::fs::read_to_string(&path).expect("before");
+        std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- half-written\n").expect("digest");
+
+        assert!(
+            sessions.captain_turn_ended("cap-a", DoneStatus::Errored),
+            "a live Captain's failed turn is still a turn end worth tracing"
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert_eq!(
+            std::fs::read_to_string(&path).expect("after"),
+            before,
+            "a failed turn does not clobber the last good list"
+        );
+    }
+
 }
