@@ -9,23 +9,23 @@ export function driveDir(cfg) {
   return cfg.driveRoot;
 }
 
-export function resolveInDrive(drive, rel) {
-  if (typeof rel !== 'string') throw new Error(OUTSIDE);
-  if (rel.includes('\0')) throw new Error(OUTSIDE);
-  if (path.isAbsolute(rel)) throw new Error(OUTSIDE);
-  if (rel.split(/[\\/]/).includes('..')) throw new Error(OUTSIDE);
-  const root = path.resolve(drive);
-  const target = path.resolve(root, rel);
-  if (target !== root && !target.startsWith(root + path.sep)) throw new Error(OUTSIDE);
+const ENGINE_OWNED = new Set(['state', 'reports']);
 
-  // A symlinked segment carries I/O wherever the link points, so the nearest
-  // existing ancestor must sit inside the Drive's real path too.
+export function isEngineOwned(first, platform = process.platform) {
+  // Windows resolves `state.` (and `state `) to `state`, so a win32 segment
+  // loses its trailing dots and spaces before any comparison.
+  let name = platform === 'win32' ? first.replace(/[. ]+$/, '') : first;
+  if (name === '' || name === '.') return false;
+  if (platform === 'win32' || platform === 'darwin') name = name.toLowerCase();
+  return ENGINE_OWNED.has(name);
+}
+
+function resolveReal(target) {
+  const rest = [];
   let ancestor = target;
-  let realAncestor;
   for (;;) {
     try {
-      realAncestor = fs.realpathSync(ancestor);
-      break;
+      return { realAncestor: fs.realpathSync(ancestor), rest };
     } catch (error) {
       if (error.code !== 'ENOENT' && error.code !== 'ENOTDIR') throw error;
       // A dangling symlink names a target that cannot be verified inside.
@@ -38,14 +38,36 @@ export function resolveInDrive(drive, rel) {
       if (link) throw new Error(OUTSIDE);
       const parent = path.dirname(ancestor);
       if (parent === ancestor) throw new Error(OUTSIDE);
+      rest.unshift(path.basename(ancestor));
       ancestor = parent;
     }
   }
+}
+
+export function nearestRealAncestor(target) {
+  return resolveReal(target).realAncestor;
+}
+
+export function resolveInDrive(drive, rel) {
+  if (typeof rel !== 'string') throw new Error(OUTSIDE);
+  if (rel.includes('\0')) throw new Error(OUTSIDE);
+  if (path.isAbsolute(rel)) throw new Error(OUTSIDE);
+  if (rel.split(/[\\/]/).includes('..')) throw new Error(OUTSIDE);
+  const root = path.resolve(drive);
+  const target = path.resolve(root, rel);
+  if (target !== root && !target.startsWith(root + path.sep)) throw new Error(OUTSIDE);
+
+  // A symlinked segment carries I/O wherever the link points, so the physical
+  // destination — the target's real path when it exists, or the nearest
+  // existing ancestor's real path plus the segments still to be created —
+  // must sit inside the Drive's real path too.
   const realDrive = fs.realpathSync(root);
-  if (realAncestor !== realDrive && !realAncestor.startsWith(realDrive + path.sep)) {
+  const { realAncestor, rest } = resolveReal(target);
+  const realTarget = path.join(realAncestor, ...rest);
+  if (realTarget !== realDrive && !realTarget.startsWith(realDrive + path.sep)) {
     throw new Error(OUTSIDE);
   }
-  return target;
+  return { target, realTarget, realDrive };
 }
 
 let tmpCounter = 0;
@@ -65,17 +87,17 @@ export function driveToolSpecs(cfg) {
       },
       output,
       async execute({ path: rel }) {
-        const target = resolveInDrive(drive, rel);
-        const stat = fs.statSync(target);
+        const { realTarget } = resolveInDrive(drive, rel);
+        const stat = fs.statSync(realTarget);
         if (stat.isDirectory()) {
-          return fs.readdirSync(target, { withFileTypes: true })
+          return fs.readdirSync(realTarget, { withFileTypes: true })
             .filter(entry => entry.isFile() || entry.isDirectory())
             .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
             .map(entry => entry.name + (entry.isDirectory() ? '/' : ''))
             .join('\n');
         }
         if (stat.size > READ_CAP) {
-          const fd = fs.openSync(target, 'r');
+          const fd = fs.openSync(realTarget, 'r');
           try {
             const body = Buffer.alloc(READ_CAP);
             const count = fs.readSync(fd, body, 0, READ_CAP, 0);
@@ -84,7 +106,7 @@ export function driveToolSpecs(cfg) {
             fs.closeSync(fd);
           }
         }
-        return fs.readFileSync(target, 'utf8');
+        return fs.readFileSync(realTarget, 'utf8');
       },
     },
     {
@@ -99,22 +121,27 @@ export function driveToolSpecs(cfg) {
         if (process.env.DSH_PERMISSION_MODE === 'read-only') {
           throw new Error('the Captain Drive is read-only in this run');
         }
-        const display = typeof rel === 'string' ? rel.replace(/^(\.[\\/])+/, '') : rel;
-        const [first] = typeof rel === 'string' ? display.split(/[\\/]/) : [];
-        if (first === 'state' || first === 'reports') {
+        const { target, realTarget, realDrive } = resolveInDrive(drive, rel);
+        const relative = path.relative(realDrive, realTarget);
+        const [first] = relative.split(path.sep);
+        if (isEngineOwned(first)) {
           throw new Error(`'${first}/' is engine-owned; the engine writes it, not the model`);
         }
+        const display = relative.split(path.sep).join('/');
         const bytes = Buffer.byteLength(content);
         if (bytes > WRITE_CAP) {
           throw new Error('content exceeds the 256 KB Captain Drive write limit');
         }
-        const target = resolveInDrive(drive, rel);
-        const dir = path.dirname(target);
+        // Resolution and I/O are not atomic: a symlink swapped between
+        // resolveInDrive and this rename can still redirect the write to
+        // wherever the new link points. Checking the real path narrows the
+        // window; it does not close it.
+        const dir = path.dirname(realTarget);
         fs.mkdirSync(dir, { recursive: true });
-        const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${tmpCounter++}.tmp`);
+        const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
         try {
           fs.writeFileSync(tmp, content);
-          fs.renameSync(tmp, target);
+          fs.renameSync(tmp, realTarget);
         } catch (error) {
           try {
             fs.unlinkSync(tmp);
