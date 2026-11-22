@@ -3735,6 +3735,27 @@ impl RpcService for EngineRpc {
             .call(method, &params)?;
             return Ok(RpcReply::Value(value));
         }
+        // A DeepSeek v3 export's conversations become this device's chats:
+        // the .zip lives on this machine's disk ([`local_only`]), and the
+        // rows the import writes are this device's own.
+        if crate::deepseek_import::handles(method) {
+            if !zeron_rpc::caller().is_local() {
+                return Err(RpcError::Failed(format!(
+                    "{method}: imports read this device's own files"
+                )));
+            }
+            // Node, SQLite and fs all block — the import runs off the
+            // dispatcher thread (same shape as IMPORT_LOCAL_WORKSPACE).
+            let store = self.doc_host.store().clone();
+            let workspace = self.workspace.clone();
+            let device_id = self.doc_host.device_id().to_string();
+            let value = tokio::task::spawn_blocking(move || {
+                crate::deepseek_import::call(store, workspace, device_id, params)
+            })
+            .await
+            .map_err(|e| RpcError::Failed(e.to_string()))??;
+            return Ok(RpcReply::Value(value));
+        }
         // A chat's DeepSeek schedule bridge forwards each of its stdin MCP
         // frames to this method; the engine binds the caller's session, cwd
         // and subagent status from the IPC handshake (its `x-zeron-chat`,

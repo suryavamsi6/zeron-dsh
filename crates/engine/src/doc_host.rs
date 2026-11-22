@@ -4517,6 +4517,7 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
     ) -> Result<String, EngineError> {
         tracing::debug!(target: "first_word", chat = %chat_id, "queue command");
+        self.ensure_sendable(chat_id)?;
         match &payload {
             SessionCommandPayload::Run { request, .. } => {
                 crate::sessions::ensure_run_harness(self.harness_for_request(chat_id, request))?;
@@ -4569,6 +4570,23 @@ impl DocHost {
         self.nudge_remote_host(chat_id);
         self.spawn_command_delivery(chat_id, entry, transfers);
         Ok(id)
+    }
+
+    /// An imported chat is a transcript, not a live session: `imported` on
+    /// its row IS the read-only marker (proto `Chat::imported`), so no send
+    /// may be queued into one. Every adoption point — command, queued row,
+    /// drain, dispatch — shares this one refusal, so the caller hears the
+    /// reason wherever the send was tried. A workspace-less host cannot know
+    /// a chat was imported and lets the send through.
+    pub(crate) fn ensure_sendable(&self, chat_id: &str) -> Result<(), EngineError> {
+        let imported = self
+            .workspace()
+            .and_then(|ws| ws.chat(chat_id).ok().flatten())
+            .is_some_and(|chat| chat.imported.is_some());
+        if imported {
+            return Err(EngineError::Other(crate::deepseek_import::READ_ONLY.into()));
+        }
+        Ok(())
     }
 
     /// A send revives an archived chat on every device (best-effort).
@@ -4651,6 +4669,7 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
         config: Option<zeron_proto::ChatConfig>,
     ) -> Result<String, EngineError> {
+        self.ensure_sendable(chat_id)?;
         let handle = self.open(chat_id)?;
         let id = new_id();
         let item = QueuedMessage {
@@ -5441,6 +5460,7 @@ impl DocHost {
             return Err(EngineError::Other("sessions engine not wired".into()));
         };
         let chat_id = &handle.chat_id;
+        self.ensure_sendable(chat_id)?;
         // Keep the queue row's identity when it becomes a real user message.
         // The submitting viewport learns this id from QueueMessage and can
         // therefore wait without disturbing the active turn's runway, then
@@ -6642,6 +6662,7 @@ impl DocHost {
         entry: &SessionCommandEntry,
     ) -> Result<(SessionCommandStatus, Option<String>), EngineError> {
         let chat_id = &handle.chat_id;
+        self.ensure_sendable(chat_id)?;
         if let Some(message_id) = self.cancelled_by_stop(handle, entry) {
             // Still the user's message: it waits at the head of the paused
             // queue, to send, edit or remove — never stranded unrun in the

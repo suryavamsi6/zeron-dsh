@@ -1431,6 +1431,7 @@ impl Tools {
                 last_seen_at: None,
                 room_gen: None,
                 sleep: None,
+                imported: None,
             };
             let delivered = self
                 .deliver(&chat, space.as_ref(), &harnesses, None, prompt, "run")

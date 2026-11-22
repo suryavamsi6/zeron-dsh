@@ -269,6 +269,12 @@ impl WorkspaceDoc {
             )?,
             None => row.delete("sourceContext")?,
         }
+        match &chat.imported {
+            Some(imported) => {
+                row.insert("imported", LoroValue::from(serde_json::to_value(imported)?))?
+            }
+            None => row.delete("imported")?,
+        }
         match &chat.config {
             Some(config) => row.insert("config", LoroValue::from(serde_json::to_value(config)?))?,
             None => row.delete("config")?,
@@ -772,6 +778,8 @@ pub(crate) struct RawChat {
     slept_at: Option<i64>,
     #[serde(default)]
     sleep_woke_at: Option<i64>,
+    #[serde(default)]
+    imported: Option<zeron_proto::ImportedChat>,
 }
 
 /// Decode a chat row's `config` leniently: unknown enum values (a newer
@@ -820,6 +828,7 @@ impl From<RawChat> for Chat {
                 at: dt(raw.slept_at.unwrap_or(until)),
                 woke_at: raw.sleep_woke_at.map(dt),
             }),
+            imported: raw.imported,
         }
     }
 }
@@ -959,6 +968,7 @@ mod tests {
             last_seen_at: None,
             room_gen: None,
             sleep: None,
+            imported: None,
         }
     }
 
@@ -1373,5 +1383,59 @@ mod tests {
         ));
         // Everything else on the row survived the conflict.
         assert_eq!(a.chat("chat-1").unwrap().unwrap().device_id, "dev-a");
+    }
+
+    #[test]
+    fn imported_marker_survives_the_doc_round_trip() {
+        let ws = WorkspaceDoc::new();
+        let chat: zeron_proto::Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat-1",
+            "deviceId": "device-1",
+            "title": "DeepSeek conversation",
+            "archived": false,
+            "cwd": "/repo",
+            "branch": "main",
+            "checkoutId": "checkout-1",
+            "sourceContext": null,
+            "config": null,
+            "lastMessagePreview": "Last message",
+            "lastMessageAt": "2026-11-22T07:59:00Z",
+            "createdAt": "2026-11-22T07:00:00Z",
+            "harnessSessionId": null,
+            "harnessSessionCwd": null,
+            "harnessSessionHarness": null,
+            "spaceId": "space-1",
+            "lastSeenAt": null,
+            "roomGen": null,
+            "parentChatId": null,
+            "childKind": null,
+            "sleep": null,
+            "imported": {
+                "source": "deepseek-v3",
+                "sourceId": "conv-1",
+                "importedAt": "2026-11-22T08:00:00Z"
+            }
+        }))
+        .unwrap();
+
+        ws.upsert_chat(&chat).unwrap();
+        let read = ws.chat(&chat.id).unwrap().unwrap();
+        assert_eq!(
+            read.imported.as_ref().map(|i| i.source_id.as_str()),
+            Some("conv-1")
+        );
+
+        let mut again = read;
+        again.archived = true;
+        ws.upsert_chat(&again).unwrap();
+        assert_eq!(
+            ws.chat(&chat.id)
+                .unwrap()
+                .unwrap()
+                .imported
+                .as_ref()
+                .map(|i| i.source_id.as_str()),
+            Some("conv-1")
+        );
     }
 }

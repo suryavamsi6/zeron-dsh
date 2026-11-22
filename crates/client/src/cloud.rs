@@ -695,6 +695,7 @@ impl Client {
             parent_chat_id: None,
             child_kind: None,
             sleep: None,
+            imported: None,
         };
         self.inner.registry_write(|doc| doc.upsert_chat(&chat))?;
         Ok(chat_id)

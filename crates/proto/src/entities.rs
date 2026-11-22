@@ -257,6 +257,22 @@ pub struct ConversationSourceContext {
     pub observed_at: DateTime<Utc>,
 }
 
+/// Where an imported conversation came from. Presence on a `Chat` IS the
+/// read-only marker: an imported chat has no local provider session and must
+/// never start a turn here. There is deliberately no `read_only` bool — a
+/// field that can only ever be `true` would imply a configurability we do not
+/// have.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedChat {
+    /// The exporting app: `"deepseek-v3"`.
+    pub source: String,
+    /// The exporter's own conversation id: the stable identity a re-import
+    /// matches, so the same conversation is never imported twice.
+    pub source_id: String,
+    pub imported_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Chat {
@@ -341,6 +357,10 @@ pub struct Chat {
     /// peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sleep: Option<ChatSleep>,
+    /// Set when this chat was imported from another app's export. Its
+    /// presence makes the chat read-only (see [`ImportedChat`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported: Option<ImportedChat>,
 }
 
 /// A chat put to sleep ([`Chat::sleep`]).
@@ -2405,6 +2425,74 @@ mod tests {
             serde_json::from_value::<WorkspaceFileChanges>(value).unwrap(),
             changes
         );
+    }
+
+    #[test]
+    fn imported_block_round_trips() {
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat-1",
+            "deviceId": "device-1",
+            "title": "DeepSeek conversation",
+            "archived": false,
+            "cwd": "/repo",
+            "branch": "main",
+            "checkoutId": "checkout-1",
+            "sourceContext": null,
+            "config": null,
+            "lastMessagePreview": "Last message",
+            "lastMessageAt": "2026-11-22T07:59:00Z",
+            "createdAt": "2026-11-22T07:00:00Z",
+            "harnessSessionId": null,
+            "harnessSessionCwd": null,
+            "harnessSessionHarness": null,
+            "spaceId": "space-1",
+            "lastSeenAt": null,
+            "roomGen": null,
+            "parentChatId": null,
+            "childKind": null,
+            "sleep": null,
+            "imported": {
+                "source": "deepseek-v3",
+                "sourceId": "conv-1",
+                "importedAt": "2026-11-22T08:00:00Z"
+            }
+        }))
+        .unwrap();
+
+        let back = serde_json::to_value(&chat).unwrap();
+        assert_eq!(back["imported"]["source"], "deepseek-v3");
+        assert_eq!(back["imported"]["sourceId"], "conv-1");
+    }
+
+    #[test]
+    fn chat_without_imported_keeps_the_key_absent() {
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "id": "chat-1",
+            "deviceId": "device-1",
+            "title": null,
+            "archived": false,
+            "cwd": null,
+            "branch": null,
+            "checkoutId": null,
+            "sourceContext": null,
+            "config": null,
+            "lastMessagePreview": null,
+            "lastMessageAt": null,
+            "createdAt": "2026-11-22T07:00:00Z",
+            "harnessSessionId": null,
+            "harnessSessionCwd": null,
+            "harnessSessionHarness": null,
+            "spaceId": null,
+            "lastSeenAt": null,
+            "roomGen": null,
+            "parentChatId": null,
+            "childKind": null,
+            "sleep": null
+        }))
+        .unwrap();
+
+        let back = serde_json::to_value(&chat).unwrap();
+        assert!(back.get("imported").is_none());
     }
 }
 

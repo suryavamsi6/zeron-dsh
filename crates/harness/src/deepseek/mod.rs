@@ -1,3 +1,4 @@
+pub mod chat_export;
 pub mod gateway;
 pub mod plugins;
 mod normalize;
