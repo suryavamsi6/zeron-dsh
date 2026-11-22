@@ -1531,6 +1531,61 @@ mod tests {
         );
     }
 
+    /// SUR-191: the Captain roster is device-local engine state, so a peer's
+    /// call must be refused **by the relay**, not one hop later by the engine.
+    /// Before this, the five methods were missing from `local_only`, so the
+    /// guard forwarded them as a peer and only the engine's own check stopped
+    /// them — the relay/engine lists disagreeing, which is the defect this
+    /// pins.
+    #[tokio::test]
+    async fn the_relay_refuses_the_captain_roster() {
+        use crate::{RpcReply, RpcService, methods};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counts(Arc<AtomicUsize>);
+        #[async_trait::async_trait]
+        impl RpcService for Counts {
+            async fn handle(
+                &self,
+                _method: &str,
+                _params: serde_json::Value,
+            ) -> Result<RpcReply, crate::RpcError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(RpcReply::Value(serde_json::json!({})))
+            }
+        }
+
+        let reached = Arc::new(AtomicUsize::new(0));
+        let guard = super::RelayGuard {
+            inner: Arc::new(Counts(reached.clone())),
+            device: None,
+        };
+        for method in [
+            methods::CAPTAINS,
+            methods::PROMOTE_CAPTAIN,
+            methods::DEMOTE_CAPTAIN,
+            methods::ADD_CREW,
+            methods::REMOVE_CREW,
+        ] {
+            let error = match guard.handle(method, serde_json::json!({})).await {
+                Ok(_) => panic!("a peer must not reach {method}"),
+                Err(error) => error,
+            };
+            assert!(
+                error
+                    .to_string()
+                    .contains("only answered over this device's local IPC"),
+                "{method} reached the service instead of being refused by the relay: {error}"
+            );
+        }
+        assert_eq!(
+            reached.load(Ordering::SeqCst),
+            0,
+            "a refused roster call reached the service"
+        );
+    }
+
     #[tokio::test(start_paused = true)]
     async fn blocked_relay_upload_closes_link_and_fails_pending_rpc() {
         use tokio_tungstenite::{WebSocketStream, tungstenite::protocol::Role};

@@ -905,6 +905,13 @@ pub fn local_only(method: &str) -> bool {
             | methods::SCHEDULE_SAVE
             | methods::SCHEDULE_DELETE
             | methods::SCHEDULE_RUN_NOW
+            // This device's Captain roster: `captains.json` is device-local
+            // engine state only this device's own window reads or changes.
+            | methods::CAPTAINS
+            | methods::PROMOTE_CAPTAIN
+            | methods::DEMOTE_CAPTAIN
+            | methods::ADD_CREW
+            | methods::REMOVE_CREW
             // A device-local .zip path read into this device's own chats.
             | methods::IMPORT_DEEPSEEK_CHATS
             // The person's own MCP servers: one file on this device, read
