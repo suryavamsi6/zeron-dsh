@@ -126,6 +126,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/ui-tests.yml
     with:
       core: true
@@ -137,6 +138,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/deepseek-compatibility.yml
     with:
       rust-tests: false
@@ -148,6 +150,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/preview-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).edge || '' }}
@@ -158,6 +161,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/linux-installer.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).installer || '' }}
@@ -168,6 +172,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/voice-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).voice || '' }}
@@ -179,6 +184,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/windows.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).windows || '' }}
@@ -190,6 +196,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/macos.yml
     with:
       native: false
@@ -203,6 +210,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/android.yml
     # Only what android.yml uses, and only on pushes to main, which publish: pull
     # requests and the merge queue (code not on main yet) sign with a debug key.
@@ -221,6 +229,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/zgx-tests.yml
     with:
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}

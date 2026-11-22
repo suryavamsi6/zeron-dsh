@@ -34,6 +34,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'tests') }}
     runs-on: windows-2022
     timeout-minutes: 60
@@ -43,25 +44,31 @@ jobs:
         with:
           save-rust-cache: 'true'
       - name: Build tests
-        run: >-
-          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked
-          -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine
-          --lib --bins
-          --test background_engine --test noop_browser
-          --test worktree_on_run --test auth
+        run: |
+          # Start-Transcript keeps the exit status while a copy lands in
+          # $RUNNER_TEMP\first-red.log for the first-red excerpt (SUR-173).
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Build tests'
+          cargo nextest run --config-file scripts/ci/nextest.toml --no-run --release --locked `
+            -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine `
+            --lib --bins `
+            --test background_engine --test noop_browser `
+            --test worktree_on_run --test auth
       # Same selection as before, minus the deleted GPUI app and its shader layout:
       #   harness SDK normalization and shared lifecycle tests
       #   application and updater, worktree paths, engine unit/catalog/login/auth
       - name: Harness, application, updater and engine tests
         env:
           RUST_BACKTRACE: '1'
-        run: >-
-          cargo nextest run --config-file scripts/ci/nextest.toml --release --locked --no-fail-fast
-          -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine
-          --lib --bins
-          --test background_engine --test noop_browser
-          --test worktree_on_run --test auth
-          -E "package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_))))"
+        run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Harness, application, updater and engine tests'
+          cargo nextest run --config-file scripts/ci/nextest.toml --release --locked --no-fail-fast `
+            -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine `
+            --lib --bins `
+            --test background_engine --test noop_browser `
+            --test worktree_on_run --test auth `
+            -E "package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_))))"
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
@@ -70,26 +77,36 @@ jobs:
           key: ${{ inputs.pass-key }}-tests
 
   # Restores the cache `tests` saves: the same dependencies, built with the same profile.
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }
   app:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'app') }}
     runs-on: windows-2022
     timeout-minutes: 45
@@ -101,11 +118,22 @@ jobs:
         # next: the same flags, so it doesn't build it again.)
         env:
           LUAU_CXXFLAGS: -DNDEBUG
-        run: cargo build --release --locked -p zeron
+        run: |
+          # Start-Transcript keeps the exit status while a copy lands in
+          # $RUNNER_TEMP\first-red.log for the first-red excerpt (SUR-173).
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Build the zeron binary'
+          cargo build --release --locked -p zeron
       - name: Verify portable and installer packaging
-        run: ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
+        run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Verify portable and installer packaging'
+          ./scripts/package-windows.ps1 -ReleasesUrl "https://github.com/$env:GITHUB_REPOSITORY/releases/latest/download"
       - name: Installer install/uninstall
-        run: ./scripts/test-windows-installer.ps1
+        run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Installer install/uninstall'
+          ./scripts/test-windows-installer.ps1
       - name: Build the desktop app
         # (The startup test checks its subsystem: `zeron-zgx.exe` is the
         # desktop app, `zeron.exe` the CLI beside it. Its own workspace, built
@@ -116,6 +144,8 @@ jobs:
           # directory instead of the runner's shared cache (SUR-129).
           ORT_CACHE_DIR: ${{ runner.temp }}\ort-cache
         run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: Build the desktop app'
           # Cargo's build-dir layout v2 (default since Rust 1.100) nests build
           # script `OUT_DIR`s one level deeper. `ort-sys`'s `copy_dylibs` walks
           # three ancestors up from `OUT_DIR` to find the profile directory, so
@@ -135,9 +165,14 @@ jobs:
           # executable, which is where the pre-1.100 layout put it.
           Copy-Item -Force -ErrorAction SilentlyContinue apps\zgx\target\release\build\*.dll apps\zgx\target\release\
       - name: GUI subsystem and redirected CLI output
-        run: ./scripts/test-windows-startup.ps1
+        run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: GUI subsystem and redirected CLI output'
+          ./scripts/test-windows-startup.ps1
       - name: CLI startup without HOME
         run: |
+          Start-Transcript -LiteralPath (Join-Path $env:RUNNER_TEMP 'first-red.log') -Append | Out-Null
+          Write-Output 'first-red-step: CLI startup without HOME'
           # Exercise real path resolution without touching the runner's account.
           # Port zero cannot connect to another running engine.
           $env:HOME = $null
@@ -177,19 +212,28 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-app
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }

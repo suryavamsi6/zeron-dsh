@@ -50,6 +50,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/deepseek-compatibility.yml
 
   zgx:

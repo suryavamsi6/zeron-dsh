@@ -20,6 +20,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -36,7 +37,10 @@ jobs:
         with:
           rust-cache: deepseek-compatibility
       - name: Install the pinned official SDK
-        run: npm ci --prefix crates/harness/src/deepseek --ignore-scripts --no-audit --no-fund
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Install the pinned official SDK'
+          npm ci --prefix crates/harness/src/deepseek --ignore-scripts --no-audit --no-fund
       # The one end-to-end check that the sidecar and the pinned runtime still
       # agree on plan mode: `/plan off` on a resumed run has to leave the state
       # the model is told about. Loopback-only (a local mock model), so it needs
@@ -45,11 +49,17 @@ jobs:
       - name: The pinned runtime agrees with the sidecar on plan mode
         env:
           ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek
-        run: cargo nextest run --run-ignored ignored-only --locked -p zeron-harness -E 'test(sdk_runtime_round_trip_and_resume)'
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: The pinned runtime agrees with the sidecar on plan mode'
+          cargo nextest run --run-ignored ignored-only --locked -p zeron-harness -E 'test(sdk_runtime_round_trip_and_resume)'
       - name: Mock-backed SDK contract
         env:
           ZERON_DEEPSEEK_SDK_DIR: ${{ github.workspace }}/crates/harness/src/deepseek
-        run: node --test crates/harness/tests/deepseek_sdk.test.mjs crates/harness/tests/deepseek_plugins.test.mjs crates/harness/tests/deepseek_chat_export.test.mjs
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Mock-backed SDK contract'
+          node --test crates/harness/tests/deepseek_sdk.test.mjs crates/harness/tests/deepseek_plugins.test.mjs crates/harness/tests/deepseek_chat_export.test.mjs
       # SUR-103: the bundle's own unit files, separate from the contract cases.
       # `NODE_PATH` is the peer anchor the runner has (the pinned SDK prefix
       # installed above), so a local `dsh` on PATH is not what makes this pass;
@@ -62,6 +72,8 @@ jobs:
           NODE_PATH: ${{ github.workspace }}/crates/harness/src/deepseek/node_modules
         run: |
           set -euo pipefail
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: The Captains plugin unit suite'
           for file in prompts.test.mjs tools.test.mjs; do
             if ! test -f "plugins/dsh-captains/test/$file"; then
               echo "missing plugin test file: $file" >&2
@@ -80,26 +92,36 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-deepseek-compatibility
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }
   rust-tests:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     if: inputs.rust-tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -109,20 +131,32 @@ jobs:
         with:
           rust-cache: core
       - name: Harness and engine tests
-        run: scripts/ci/test-core.sh
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Harness and engine tests'
+          scripts/ci/test-core.sh
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }

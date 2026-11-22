@@ -74,6 +74,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     runs-on: ubuntu-latest
     # Main's pushes and dispatches sign with the release key; everything else
     # (pull requests, the merge queue, nightlies, other branches) takes no
@@ -148,10 +149,15 @@ jobs:
 
       - name: assemble release APK and Play App Bundle
         working-directory: apps/android
-        run: ./gradlew :app:assembleRelease :app:bundleRelease -PzeronVersionCode="$BUILD_NUMBER" --console=plain --no-configuration-cache
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: assemble release APK and Play App Bundle'
+          ./gradlew :app:assembleRelease :app:bundleRelease -PzeronVersionCode="$BUILD_NUMBER" --console=plain --no-configuration-cache
 
       - name: package
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: package'
           mkdir -p out/android
           apk="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.apk"
           aab="out/android/zeron-$VERSION-$BUILD_NUMBER-android-arm64.aab"
@@ -191,21 +197,30 @@ jobs:
       - name: remove signing key
         if: always()
         run: rm -f "$RUNNER_TEMP/zeron-release.jks"
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }
 
   play:
