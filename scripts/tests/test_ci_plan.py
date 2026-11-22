@@ -159,15 +159,15 @@ class PlanTests(unittest.TestCase):
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")
-        # result + core x2 + deepseek + voice + ios-core + apk + zgx-linux + zgx-linux-ui;
-        # windows x2; ios-tests + zgx-macos
-        self.assertEqual(counts, {"linux": 9, "windows": 2, "macos": 2})
+        # result + core x2 + deepseek + voice + ios-core + apk + zgx-linux x2
+        # + zgx-linux-ui; windows x2; ios-tests + zgx-macos
+        self.assertEqual(counts, {"linux": 10, "windows": 2, "macos": 2})
         main = plan.reservation(plan.jobs_to_run(suites), "push", "refs/heads/main")
-        self.assertEqual(main["linux"], 10)  # + android publish
-        self.assertEqual(plan.format_reservation(counts), "linux=9 windows=2 macos=2")
+        self.assertEqual(main["linux"], 11)  # + android publish
+        self.assertEqual(plan.format_reservation(counts), "linux=10 windows=2 macos=2")
         daytime = plan.reservation(plan.jobs_to_run(plan.plan(files("Cargo.lock"), "full")), "push",
                                    "refs/heads/main")
-        self.assertEqual(daytime, {"linux": 9, "windows": 2, "macos": 2})  # no voice
+        self.assertEqual(daytime, {"linux": 10, "windows": 2, "macos": 2})  # no voice
         self.assertEqual(plan.reservation(plan.jobs_to_run({s: False for s in plan.SUITE_JOBS}), "push",
                                           "refs/heads/main"),
                          {"linux": 1, "windows": 0, "macos": 0})
