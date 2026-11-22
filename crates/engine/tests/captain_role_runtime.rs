@@ -46,6 +46,16 @@ const CREW: &str = "chat-sur101-crew";
 const CREW2: &str = "chat-sur101-crew2";
 const CREW3: &str = "chat-sur101-crew3";
 const CHAT_PLAIN: &str = "chat-sur101-plain";
+const CAP87: &str = "chat-sur87-cap";
+const CREW87: &str = "chat-sur87-crew";
+const CAP87B: &str = "chat-sur87-cap-b";
+const CREW87B: &str = "chat-sur87-crew-b";
+const CAP87C: &str = "chat-sur87-cap-c";
+const CREW87C: &str = "chat-sur87-crew-c";
+const CAP87D: &str = "chat-sur87-cap-d";
+const CREW87D: &str = "chat-sur87-crew-d";
+const CAP87E: &str = "chat-sur87-cap-e";
+const CREW87E: &str = "chat-sur87-crew-e";
 const DEVICE: &str = "dev-captains";
 const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
@@ -419,6 +429,12 @@ async fn file_lands(path: &std::path::Path, within: Duration) -> bool {
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
     path.exists()
+}
+
+/// Poll `rig.recorded()` until it has `len` entries, so a wake dispatched off
+/// the turn-end path is observed without racing it.
+async fn wait_runs(rig: &Rig, len: usize, label: &str) {
+    wait_for(|| rig.recorded().len() == len, label).await;
 }
 
 /// One `captains.json` row, serialized exactly as `captains::Captain`
@@ -1040,6 +1056,329 @@ async fn an_ordinary_chat_writes_no_crew_report() {
     assert!(
         reports.is_empty(),
         "an ordinary chat writes no crew report; found {reports:?}"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-87 (red): a crew turn that finalizes queues its report line to the
+/// crew chat's Captain — the auto path then starts the idle Captain's turn
+/// on it. Nothing sends the line today, so this times out waiting for the
+/// wake's `run()`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_crew_report_wakes_an_idle_captain() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87, "Ada", &[CREW87]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87).await;
+    create_chat_with(&core, CREW87).await;
+
+    send_to(&core, CREW87, "m1", "hold the line");
+    wait_for(
+        || answered_in(&core, CREW87, "hold the line") && parked_in(&core, CREW87),
+        "the crew turn",
+    )
+    .await;
+
+    // The first run is the crew's; the wake must dispatch the Captain's.
+    wait_runs(&rig, 2, "the wake to the Captain").await;
+    {
+        let runs = rig.recorded();
+        assert_eq!(
+            runs.len(),
+            2,
+            "a crew turn must wake its Captain exactly once; saw {} run(s)",
+            runs.len()
+        );
+        let wake = &runs[1].prompt;
+        assert!(
+            wake.starts_with("[crew report] Pre-titled ("),
+            "the wake is the issue's report line; saw {wake:?}"
+        );
+        assert!(
+            wake.contains("): completed"),
+            "the wake carries the turn's status; saw {wake:?}"
+        );
+        assert!(
+            wake.contains("answered: hold the line"),
+            "the wake carries the turn's last reply; saw {wake:?}"
+        );
+        assert!(
+            wake.trim_end()
+                .ends_with(&format!("Full report: reports/{CREW87}.md")),
+            "the wake points at the report it describes; saw {wake:?}"
+        );
+    }
+
+    core.shutdown().await;
+}
+
+/// SUR-87 (red): the wake rides the auto path — a Captain mid-turn is not
+/// started a second turn; the line is held and reaches the transcript at the
+/// turn's boundary. Nothing sends it today, so this times out on the wake
+/// text in the Captain's transcript.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_wake_waits_for_a_busy_captain() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87B, "Ada", &[CREW87B]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87B).await;
+    create_chat_with(&core, CREW87B).await;
+
+    // The gate arms the NEXT dispatched turn — the Captain's own, here — so
+    // the crew's runs straight through while the Captain is held mid-flight.
+    rig.gate.hold();
+    send_to(&core, CAP87B, "c1", "start something");
+    wait_runs(&rig, 1, "the Captain's held turn").await;
+
+    send_to(&core, CREW87B, "m1", "crew work");
+    wait_for(
+        || answered_in(&core, CREW87B, "crew work") && parked_in(&core, CREW87B),
+        "the crew turn",
+    )
+    .await;
+
+    // A wake dispatched as a second turn would already have run: it must be
+    // held for the boundary, not dropped.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        rig.recorded().len(),
+        2,
+        "a busy Captain must not be started a second turn mid-flight; the wake is held, not dropped"
+    );
+
+    rig.gate.release();
+    wait_for(
+        || {
+            core.doc_host
+                .open(CAP87B)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .iter()
+                .any(|e| {
+                    e.parts.iter().any(|p| {
+                        matches!(p, zeron_doc::MessagePart::Text { text, .. } if text.contains("[crew report] Pre-titled ("))
+                    })
+                })
+        },
+        "the wake delivered at the Captain's turn boundary",
+    )
+    .await;
+
+    core.shutdown().await;
+}
+
+/// SUR-87 guard — expected green before the wake exists: a Captain whose
+/// roster row went archived mid-turn is not a live target — the wake must
+/// check the roster BEFORE enqueuing, because `queue_command`'s
+/// `unarchive_on_send` would otherwise flip the archived chat row back.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_archived_captain_gets_no_wake() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87C, "Ada", &[CREW87C]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87C).await;
+    create_chat_with(&core, CREW87C).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    rig.gate.hold();
+    send_to(&core, CREW87C, "m1", "crew work");
+    wait_runs(&rig, 1, "the held crew run").await;
+
+    // Both halves of "archived" land mid-turn: the roster row is what the
+    // wake's target resolution must read (the roster RPCs refuse a chat with
+    // a turn in flight, so the file moves under the turn), and the chat row
+    // is what a naive send's `unarchive_on_send` would revive.
+    write_roster(
+        &rig.dir,
+        vec![RosterRow {
+            chat_id: CAP87C.into(),
+            name: "Ada".into(),
+            created_at: chrono::Utc::now(),
+            archived: true,
+            crew: vec![CREW87C.into()],
+        }],
+    );
+    client
+        .call(
+            zeron_rpc::methods::MUTATE,
+            serde_json::json!({
+                "op": "setChatArchived", "chatId": CAP87C, "archived": true
+            }),
+        )
+        .await
+        .expect("setChatArchived");
+
+    rig.gate.release();
+    wait_for(
+        || answered_in(&core, CREW87C, "crew work") && parked_in(&core, CREW87C),
+        "the held crew turn",
+    )
+    .await;
+
+    // A stray wake, were there one, lands off the turn-end path: give it a
+    // short window before asserting absence.
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        rig.recorded().len(),
+        1,
+        "an archived Captain is not woken; saw {} run(s)",
+        rig.recorded().len()
+    );
+    let row = core
+        .workspace
+        .chat(CAP87C)
+        .expect("the Captain row reads")
+        .expect("the Captain row exists");
+    assert!(
+        row.archived,
+        "a wake must never unarchive the Captain's chat row"
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-87 guard — expected green before the wake exists: no roster row
+/// resolves the Captain at all (a deleted Captain reads this way to the
+/// roster), so the wake must not fall back to the stale chat row — nothing
+/// is enqueued.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deleted_captain_gets_no_wake() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87D, "Ada", &[CREW87D]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87D).await;
+    create_chat_with(&core, CREW87D).await;
+
+    rig.gate.hold();
+    send_to(&core, CREW87D, "m1", "crew work");
+    wait_runs(&rig, 1, "the held crew run").await;
+
+    // The Captain's roster row gone mid-turn — what a delete looks like to
+    // the roster the wake resolves through. The chat row itself stays.
+    write_roster(&rig.dir, Vec::new());
+
+    rig.gate.release();
+    wait_for(
+        || answered_in(&core, CREW87D, "crew work") && parked_in(&core, CREW87D),
+        "the held crew turn",
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        rig.recorded().len(),
+        1,
+        "a deleted Captain (no roster row) is not woken; saw {} run(s)",
+        rig.recorded().len()
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-87 guard — expected green before the wake exists: a crew turn stopped
+/// mid-flight settles `interrupted`, not `completed`, and is not reported.
+/// The fake agent only consults its interrupt token once parked between
+/// turns, so the gate stays held while the interrupt lands — the run task's
+/// own grace then synthesizes the terminal `Done{interrupted}` — and the
+/// canned `Done{completed}` never leaves the agent. `parked_in` can only go
+/// true on that settle while the gate holds, so the wait measures the
+/// interrupt, not the release.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupted_crew_turn_sends_no_wake() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87E, "Ada", &[CREW87E]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87E).await;
+    create_chat_with(&core, CREW87E).await;
+
+    rig.gate.hold();
+    send_to(&core, CREW87E, "m1", "crew work");
+    wait_runs(&rig, 1, "the held crew run").await;
+
+    // A Stop names its turn through `based_on` — the doc's last entry when
+    // queued. Queue only once that is the assistant's streaming entry, or
+    // the interrupt reads as aimed at a turn already past and is superseded.
+    wait_for(
+        || {
+            core.doc_host
+                .open(CREW87E)
+                .ok()
+                .and_then(|h| h.doc().read_entries().ok())
+                .unwrap_or_default()
+                .last()
+                .is_some_and(|e| e.role == MessageRole::Assistant)
+        },
+        "the crew turn's streaming entry",
+    )
+    .await;
+
+    // The same public entry a client's Stop takes.
+    core.doc_host
+        .queue_command(CREW87E, SessionCommandPayload::Interrupt {})
+        .expect("queue interrupt command");
+
+    wait_for(
+        || parked_in(&core, CREW87E),
+        "the interrupt settling the crew turn",
+    )
+    .await;
+
+    // Let the held agent go: its `Done{completed}` send fails on the dead
+    // stream — the run already settled interrupted.
+    rig.gate.release();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        rig.recorded().len(),
+        1,
+        "an interrupted crew turn is not reported; saw {} run(s)",
+        rig.recorded().len()
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-87 guard — expected green before the wake exists: a Captain's OWN
+/// turn is not a crew turn — nothing reports it back to itself: no second
+/// run, and no report line in its transcript (a stray wake steered into its
+/// parked runtime would read as one).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_captains_own_turn_sends_no_wake() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP87, "Ada", &[]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP87).await;
+
+    send_to(&core, CAP87, "m1", "steady");
+    wait_for(
+        || answered_in(&core, CAP87, "steady") && parked_in(&core, CAP87),
+        "the captain turn",
+    )
+    .await;
+
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(
+        rig.recorded().len(),
+        1,
+        "a Captain's own turn sends no wake; saw {} run(s)",
+        rig.recorded().len()
+    );
+    let reported = core
+        .doc_host
+        .open(CAP87)
+        .ok()
+        .and_then(|h| h.doc().read_entries().ok())
+        .unwrap_or_default()
+        .iter()
+        .any(|e| {
+            e.parts
+                .iter()
+                .any(|p| matches!(p, MessagePart::Text { text, .. } if text.contains("[crew report]")))
+        });
+    assert!(
+        !reported,
+        "a Captain's transcript carries no report line"
     );
 
     core.shutdown().await;
