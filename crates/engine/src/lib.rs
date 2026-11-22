@@ -65,6 +65,7 @@ pub mod keep_running;
 pub mod heap;
 pub mod managed;
 mod model_catalogs;
+pub mod needs_you;
 mod plugin_agents;
 pub mod plugins;
 pub mod profile;
