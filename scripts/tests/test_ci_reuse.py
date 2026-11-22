@@ -158,7 +158,7 @@ class FingerprintTests(unittest.TestCase):
         """SUR-103: a plugin change must invalidate the compatibility pass key,
         and only that suite's."""
         self.assertIn("plugins/dsh-captains/**", reuse.SUITE_INPUTS["deepseek"])
-        for suite in ("core", "edge", "installer", "voice", "zgx"):
+        for suite in set(reuse.SUITE_INPUTS) - {"deepseek"}:
             self.assertNotIn("plugins/dsh-captains/**", reuse.SUITE_INPUTS[suite], suite)
 
     def test_unrelated_files_change_nothing(self):
