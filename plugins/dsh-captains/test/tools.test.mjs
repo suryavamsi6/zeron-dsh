@@ -227,3 +227,25 @@ test('an already-created root agent is latched once, not twice', async t => {
   assert.equal(sections.length, 1, 'the latch and the event double-registered the section');
   assert.equal(tools.length, 2, 'the latch and the event doubled the Drive tools');
 });
+
+test('the stamped drive root is the drive itself, not its parent', async t => {
+  // The engine stamps `driveRoot` as the Captain's drive. A payload whose root
+  // were the parent directory would put the tools one level up from the files
+  // `ensure_drive` creates; this pins the layout the engine must stamp.
+  const parent = await mkdtemp(join(tmpdir(), 'captains-parent-'));
+  t.after(() => rm(parent, { recursive: true, force: true }));
+  const root = join(parent, 'captains', 'captain-1');
+  await mkdir(root, { recursive: true });
+  assert.equal(driveDir(captain(root)), root, 'the row root is the drive');
+  const { read, write } = tools(root);
+  assert.equal(
+    await write.execute({ path: 'notes/plan.md', content: 'plan' }),
+    'wrote notes/plan.md (4 bytes)'
+  );
+  assert.equal(await read.execute({ path: 'notes/plan.md' }), 'plan');
+  // Nothing was created beside the drive: a write resolved against the parent
+  // would have landed in `captains/` or beside it.
+  assert.deepEqual((await readdir(parent)).sort(), ['captains']);
+  assert.deepEqual((await readdir(join(parent, 'captains'))).sort(), ['captain-1']);
+  assert.deepEqual((await readdir(root)).sort(), ['notes']);
+});
