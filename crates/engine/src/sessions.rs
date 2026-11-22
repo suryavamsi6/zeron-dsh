@@ -276,8 +276,9 @@ struct Inner {
     /// MCP servers live ([`crate::user_mcp`]). Absent in bare tests.
     data_dir: OnceLock<std::path::PathBuf>,
     /// The DeepSeek home a Captain's Drive lives under
-    /// ([`crate::captains::drive_dir`]): the turn-end needs-you snapshot
-    /// resolves the Drive from it. Absent in bare tests.
+    /// ([`crate::captains::drive_dir`]): the dispatch-time role stamp
+    /// (`stamp_captain_role`) and the turn-end needs-you snapshot resolve
+    /// it from here. Absent in bare tests.
     captains_home: OnceLock<std::path::PathBuf>,
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
@@ -1014,11 +1015,21 @@ impl SessionsEngine {
         if !self.turn_in_flight(chat_id) {
             return false;
         }
+        // The stored configuration carries the Captain stamp its dispatch
+        // resolved; the raw send is stamped the same way before comparing,
+        // or a routine prompt would read as a configuration change.
+        let stamped = request.map(|(id, r)| {
+            let mut request = r.clone();
+            self.stamp_captain_role(chat_id, id, &mut request);
+            (id, request)
+        });
         let live = lock(&self.inner.runs).get(chat_id).map(|h| {
             (
                 h.runtime_config.harness_id,
                 h.steerable
-                    && request.is_none_or(|(id, r)| h.runtime_config.route(id, r).is_some()),
+                    && stamped
+                        .as_ref()
+                        .is_none_or(|(id, r)| h.runtime_config.route(*id, r).is_some()),
             )
         });
         live.is_some_and(|(harness, routable)| routable && !self.steers_mid_turn(harness))
@@ -1192,6 +1203,40 @@ impl SessionsEngine {
         request.env.insert(STAMP.to_owned(), provider);
     }
 
+    /// The Captain role a chat plays is launch configuration: a run's
+    /// `prepare` stamps it into `env` ([`crate::captains::captains_env`]),
+    /// so the routing decision must compare it too — a promote or demote
+    /// since the parked runtime launched is a different runtime, not a
+    /// steer into the role it still holds. Resolved here, ahead of
+    /// `route`, so both the request the decision checks and the one a
+    /// fresh run then stores as its `RuntimeConfig` already carry the
+    /// stamp. `None` means no key: an ordinary or demoted chat compares
+    /// unstamped, and a re-dispatch still holding a stale stamp drops it
+    /// rather than keeping the old role.
+    fn stamp_captain_role(&self, chat_id: &str, harness_id: HarnessId, request: &mut RunRequest) {
+        const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
+        if harness_id != HarnessId::DeepSeek {
+            return;
+        }
+        let (Some(data_dir), Some(home)) =
+            (self.inner.data_dir.get(), self.inner.captains_home.get())
+        else {
+            return;
+        };
+        let registry = match crate::captains::Registry::load(data_dir) {
+            Ok(registry) => registry,
+            Err(error) => {
+                tracing::warn!(chat = %chat_id, error = %error, "captains registry load failed");
+                return;
+            }
+        };
+        if let Some(value) = crate::captains::captains_env(&registry, home, chat_id) {
+            request.env.insert(CAPTAINS_ENV.to_owned(), value);
+        } else {
+            request.env.remove(CAPTAINS_ENV);
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn dispatch_inner(
         &self,
@@ -1229,6 +1274,11 @@ impl SessionsEngine {
         if harness_id == HarnessId::DeepSeek {
             Self::stamp_provider_route(&mut request);
         }
+        // The Captain stamp is part of what `route` compares (env): a
+        // parked runtime's stored request got it at its own dispatch, so
+        // this send carries it too and a role change reads as a changed
+        // launch configuration, never a steer.
+        self.stamp_captain_role(chat_id, harness_id, &mut request);
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
