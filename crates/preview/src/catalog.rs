@@ -487,6 +487,11 @@ mod tests {
             test_run: false,
         }
     }
+    fn leaked_secret(advertised: &str) -> Option<&'static str> {
+        ["s3cr3t-abc", "hunter2", "user:pass", "key=1", "--token", "--password"]
+            .into_iter()
+            .find(|secret| advertised.contains(secret))
+    }
     #[test]
     fn an_advertised_service_carries_no_argument_but_its_script() {
         let temp = tempfile::tempdir().unwrap();
@@ -495,7 +500,7 @@ mod tests {
                 .unwrap();
         let mut listener = server(3000, 1, "server.js");
         listener.args.extend([
-            "--token=abc".into(),
+            "--token=s3cr3t-abc".into(),
             "--password".into(),
             "hunter2".into(),
             "https://user:pass@host/x?key=1".into(),
@@ -505,9 +510,15 @@ mod tests {
             .unwrap();
         let advertised = serde_json::to_string(&catalog.snapshot().services).unwrap();
         assert!(advertised.contains(r#""process":"node server.js""#), "{advertised}");
-        for secret in ["abc", "hunter2", "user:pass", "key=1", "--token", "--password"] {
-            assert!(!advertised.contains(secret), "{secret} in {advertised}");
+        if let Some(secret) = leaked_secret(&advertised) {
+            panic!("{secret} in {advertised}");
         }
+    }
+    #[test]
+    fn the_secret_scan_ignores_uuids_that_happen_to_spell_abc() {
+        let uuid_with_abc = r#"{"id":"f95dbffc-b750-45db-b598-ced6eabcd72e"}"#;
+        assert_eq!(leaked_secret(uuid_with_abc), None);
+        assert_eq!(leaked_secret("--token=s3cr3t-abc"), Some("s3cr3t-abc"));
     }
     #[test]
     fn urls_survive_port_changes_daemon_restarts_and_multiple_services() {
