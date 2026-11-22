@@ -68,9 +68,22 @@ pub struct ExportedConversation {
     pub turns: Vec<ExportedTurn>,
 }
 
+/// The most conversations the Rust side asks the parser for. Passing a ceiling
+/// above the parser's own default is what lets the engine count what an export
+/// holds before it keeps the newest 1000; above this the count is unknowable.
+pub const MAX_PARSED_CONVERSATIONS: usize = 10_000;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ChatExport {
+    pub conversations: Vec<ExportedConversation>,
+    /// How many conversations the parser returned, or `None` when the export
+    /// held at least `MAX_PARSED_CONVERSATIONS`.
+    pub total: Option<usize>,
+}
+
 /// Read `zip` through the pinned v3 parser and return its normalized
 /// conversations, in the parser's order.
-pub fn read_chat_export(zip: &Path) -> Result<Vec<ExportedConversation>, String> {
+pub fn read_chat_export(zip: &Path) -> Result<ChatExport, String> {
     let metadata = std::fs::metadata(zip)
         .map_err(|error| format!("cannot read {}: {error}", zip.display()))?;
     if metadata.len() > 256 * 1024 * 1024 {
@@ -100,7 +113,11 @@ pub fn read_chat_export(zip: &Path) -> Result<Vec<ExportedConversation>, String>
     if conversations.iter().any(|c| c.id.trim().is_empty()) {
         return Err("the export has a conversation with no id".into());
     }
-    Ok(conversations)
+    // RED SCAFFOLD: the parsed count is carried in the implementation step.
+    Ok(ChatExport {
+        conversations,
+        total: None,
+    })
 }
 
 /// The first `max` bytes of `s`, not splitting a UTF-8 character.

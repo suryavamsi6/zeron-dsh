@@ -16,7 +16,9 @@ fn fixture() -> PathBuf {
 
 #[test]
 fn the_v3_export_reads_into_normalized_conversations() {
-    let conversations = read_chat_export(&fixture()).expect("the fixture parses");
+    let export = read_chat_export(&fixture()).expect("the fixture parses");
+    assert_eq!(export.total, Some(2), "the fixture holds two conversations");
+    let conversations = export.conversations;
     assert_eq!(conversations.len(), 2, "both conversations import");
 
     // The parser orders newest-updated first; the engine keeps that order.

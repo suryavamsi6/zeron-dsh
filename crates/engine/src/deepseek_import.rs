@@ -92,6 +92,10 @@ pub struct Outcome {
     pub imported: usize,
     pub already_present: usize,
     pub chats: Vec<String>,
+    /// How many conversations the parser found, or `None` at the parser ceiling.
+    pub total: Option<usize>,
+    /// How many of the newest the import considered (`min(parsed, 1000)`).
+    pub kept: usize,
 }
 
 /// The importer: transcript bytes through [`TranscriptStore`], rows through
@@ -123,7 +127,7 @@ impl ChatImporter {
     /// imports must not both find a row missing and mint it twice.
     pub fn import(&self, zip: &Path) -> Result<Outcome, EngineError> {
         let _guard = import_lock();
-        let conversations = zeron_harness::deepseek::chat_export::read_chat_export(zip)
+        let export = zeron_harness::deepseek::chat_export::read_chat_export(zip)
             .map_err(EngineError::Other)?;
         // One stamp for the whole call: every row the import writes says
         // the same "when".
@@ -132,8 +136,11 @@ impl ChatImporter {
             imported: 0,
             already_present: 0,
             chats: Vec::new(),
+            // RED SCAFFOLD: set from the export in the implementation step.
+            total: None,
+            kept: 0,
         };
-        for conversation in &conversations {
+        for conversation in newest_for_import(&export.conversations) {
             // A conversation with no usable turns (an empty session, or one whose
             // messages were all CONTENT_FILTER) would land as an empty clickable
             // chat. The parser reports it faithfully; the importer declines it, so
@@ -250,6 +257,12 @@ impl ChatImporter {
     }
 }
 
+/// The newest conversations an import keeps. The parser ranks newest-first.
+fn newest_for_import(conversations: &[ExportedConversation]) -> &[ExportedConversation] {
+    // RED SCAFFOLD: the 1000 cap is applied in the implementation step.
+    conversations
+}
+
 /// Two concurrent imports over the same export would both see no row and
 /// push the same turns twice into one doc; the whole `import` call is one
 /// critical section.
@@ -340,6 +353,27 @@ mod tests {
             .read_entries()
             .unwrap()
             .len()
+    }
+
+    #[test]
+    fn the_import_keeps_the_newest_thousand() {
+        let all: Vec<ExportedConversation> = (0..=1000)
+            .map(|i| ExportedConversation {
+                id: format!("c{i:04}"),
+                title: None,
+                inserted_at: None,
+                updated_at: None,
+                turns: vec![ExportedTurn {
+                    role: ExportedRole::User,
+                    text: format!("turn {i}"),
+                    thinking: String::new(),
+                    links: Vec::new(),
+                }],
+            })
+            .collect();
+        let kept = newest_for_import(&all);
+        assert_eq!(kept.len(), 1000);
+        assert_eq!(kept[0].id, "c0000", "newest first");
     }
 
     #[tokio::test]

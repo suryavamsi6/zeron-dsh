@@ -103,6 +103,8 @@ async fn an_export_imports_as_read_only_chats_with_ordered_transcripts() {
         serde_json::json!(["deepseek-s2", "deepseek-s1"]),
         "{summary}"
     );
+    assert_eq!(summary["total"], 2, "the export holds two conversations");
+    assert_eq!(summary["kept"], 2, "both are considered");
 
     // The row is present, clickable, and says where it came from — that is the
     // read-only marker, so it is persisted, not a UI state.
