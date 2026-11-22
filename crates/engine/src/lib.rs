@@ -216,6 +216,8 @@ pub struct EngineCore {
     pub plugins: plugins::Plugins,
     /// Engine-owned scheduled tasks (`{data}/schedules.json` + the runner).
     pub schedules: schedules::Schedules,
+    /// The device-local Captain roster (`{data}/captains.json`).
+    pub captains: std::sync::Arc<captains::CaptainsStore>,
     workspace_scope: WorkspaceScope,
     /// Auth service (attached by [`Engine::run`]; a lazy dev-mode instance otherwise).
     auth: std::sync::Mutex<Option<Auth>>,
@@ -502,6 +504,11 @@ impl EngineCore {
             }),
         );
         schedules.start();
+        // The Captain roster is device-local engine state: cheap to open
+        // (one JSON file read), with no worker of its own.
+        let captains = std::sync::Arc::new(
+            captains::CaptainsStore::open(data_dir.to_path_buf()).map_err(EngineError::Other)?,
+        );
         Ok(Self {
             sessions,
             doc_host,
@@ -524,6 +531,7 @@ impl EngineCore {
             local_import,
             plugins,
             schedules,
+            captains,
             workspace_scope: profile.scope(),
             auth: std::sync::Mutex::new(None),
             links: std::sync::Mutex::new(None),
@@ -695,7 +703,8 @@ impl EngineCore {
         .with_harness_updates(self.harness_updates.clone())
         .with_viewport_focus(self.viewport_focus.clone())
         .with_plugins(self.plugins.clone())
-        .with_schedules(self.schedules.clone());
+        .with_schedules(self.schedules.clone())
+        .with_captains(self.captains.clone());
         if let Some(links) = self.links() {
             rpc = rpc.with_links(links);
         }
