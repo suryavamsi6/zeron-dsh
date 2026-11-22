@@ -70,8 +70,9 @@ jobs:
           done
           out=$(node --test plugins/dsh-captains/test/*.test.mjs 2>&1) || { printf '%s\n' "$out"; exit 1; }
           printf '%s\n' "$out"
-          n=$(printf '%s\n' "$out" | sed -n 's/^[^ ]* tests \([0-9][0-9]*\)$/\1/p' | awk '{s+=$1} END {print s+0}')
-          echo "plugin unit tests executed: $n"
+          # 17 is the reviewed passing count when SUR-185 landed; lowering it is a deliberate change, and it counts `pass` rather than `tests` because a suite where every case is skipped still reports `tests 17` and exits 0.
+          n=$(printf '%s\n' "$out" | sed -n 's/^[^ ]* pass \([0-9][0-9]*\)$/\1/p' | awk '{s+=$1} END {print s+0}')
+          echo "plugin unit tests passing: $n"
           test "$n" -ge 17
       - name: Record the pass
         if: inputs.pass-key != ''
