@@ -43,14 +43,20 @@ const driveDir = cfg => cfg.driveRoot;
 
 export function apply(ctx, config) {
   const cfg = normalizeConfig(config);
-  if (cfg.role === 'none') return;
-  if (cfg.role === 'captain') {
-    ctx.effect?.(() => ctx.systemPrompt.section({
+  if (cfg.role !== 'captain') return;
+  // The plugin context is process-wide, so a section registered at load would
+  // reach every native child session too. Wait for `agent/created` instead and
+  // register into each created agent's own scope, skipping subagents: the
+  // Captain row belongs to the root agent alone.
+  ctx.on('agent/created', ({ agent }) => {
+    const scope = agent?.ctx;
+    if (!scope?.systemPrompt || agent.session?.header?.origin === 'subagent') return;
+    scope.effect(() => scope.systemPrompt.section({
       name: 'zeron-captains:role',
-      order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
+      order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
       text: () => captainPrompt(cfg, driveDir(cfg)),
       interpolate: false,
     }));
-    for (const spec of driveToolSpecs(cfg)) ctx.tools.register(defineTool(spec));
-  }
+  });
+  for (const spec of driveToolSpecs(cfg)) ctx.tools.register(defineTool(spec));
 }
