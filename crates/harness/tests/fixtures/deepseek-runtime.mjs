@@ -141,9 +141,12 @@ async function handle(request) {
   reply(id, { kind: 'prompt', messageId });
   event(sessionId, 'agent/inbox/spliced', { inserted: [{ id: messageId, source: { kind: 'user' } }] });
   notify('session.status', { sessionId, status: 'running' });
-  event(sessionId, 'turn/start', { turn: 1 });
+  // A runtime that has announced a turn has already created the session, so the
+  // store record is durable before `turn/start` is observable: a host that stops
+  // on that event can always resume the session it watched start.
   await mkdir(process.env.DSH_HOME, { recursive: true });
   await writeFile(join(process.env.DSH_HOME, `${sessionId}.fixture`), 'persisted');
+  event(sessionId, 'turn/start', { turn: 1 });
   if (text === 'wait-for-stop') return;
   if (text === 'approval') {
     event(sessionId, 'tool/call', { callId: 'call-1', name: 'bash', arguments: '{"command":"true"}' });
