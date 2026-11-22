@@ -1,7 +1,8 @@
 //! `captains.json` is engine-owned state recording which chats are Captains
 //! and who is in each crew. The engine is the only writer; the dsh-captains
 //! plugin never reads it (it gets its role stamped per run). The Drive
-//! directory is the plugin's to create — this module only computes its path.
+//! directory is the engine's too: `ensure_drive` creates it, idempotently,
+//! before a Captain or crew chat's first dispatch.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -235,13 +236,19 @@ impl Registry {
     }
 }
 
+/// `<deepseek_home>/captains` — the root every Captain Drive lives under,
+/// and the `driveRoot` the run stamp reports.
+pub fn captains_root(deepseek_home: &Path) -> PathBuf {
+    deepseek_home.join("captains")
+}
+
 /// `<deepseek_home>/captains/<captain_id>` — where a Captain's Drive
-/// directory belongs. Pure: computes the path; the plugin creates it. The id
-/// is used as given: validating a request id against the live registry
-/// belongs at the RPC boundary (SUR-82) — this module's ids are engine-issued
-/// chat ids.
+/// directory belongs. Pure: computes the path; `ensure_drive` creates it.
+/// The id is used as given: validating a request id against the live
+/// registry belongs at the RPC boundary (SUR-82) — this module's ids are
+/// engine-issued chat ids.
 pub fn drive_dir(deepseek_home: &Path, captain_id: &str) -> PathBuf {
-    deepseek_home.join("captains").join(captain_id)
+    captains_root(deepseek_home).join(captain_id)
 }
 
 /// The `ZERON_DEEPSEEK_CAPTAINS` payload a run is stamped with: the role
@@ -259,7 +266,7 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
         drive_root: String,
     }
 
-    let drive_root = deepseek_home.join("captains").to_string_lossy().into_owned();
+    let drive_root = captains_root(deepseek_home).to_string_lossy().into_owned();
     let (role, captain_id, captain_name) = match registry.run_role(chat_id) {
         RunRole::None => return None,
         RunRole::Captain { name } => ("captain", chat_id.to_string(), name),
@@ -278,6 +285,69 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
         })
         .expect("a captains stamp serialises"),
     )
+}
+
+/// The subdirectories every Captain Drive starts with.
+const DRIVE_DIRS: [&str; 5] = ["skills", "reports", "renders", "handoffs", "state"];
+
+/// Create `chat_id`'s Captain Drive when its run role has one: a Captain's
+/// own `drive_dir(deepseek_home, chat_id)`, or its Captain's drive for a crew
+/// chat (the crew chat gets no drive of its own). An ordinary chat is
+/// `Ok(None)` — nothing is created, not even the `captains` root.
+///
+/// The directories are made recursively and the starter files are
+/// create-if-absent only, so an edit survives a retry and two simultaneous
+/// first calls both succeed with one file per name.
+pub fn ensure_drive(
+    registry: &Registry,
+    deepseek_home: &Path,
+    chat_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    let (captain_id, captain_name) = match registry.run_role(chat_id) {
+        RunRole::None => return Ok(None),
+        RunRole::Captain { name } => (chat_id.to_string(), name),
+        RunRole::Crew {
+            captain_id,
+            captain_name,
+        } => (captain_id, captain_name),
+    };
+    let drive = captains_root(deepseek_home).join(&captain_id);
+    for dir in DRIVE_DIRS {
+        let sub = drive.join(dir);
+        std::fs::create_dir_all(&sub)
+            .map_err(|error| format!("cannot create {}: {error}", sub.display()))?;
+    }
+    write_starter(
+        &drive.join("AGENTS.md"),
+        &format!("# {captain_name}: Captain rules\n\nCrew chats never read this file.\n"),
+    )?;
+    write_starter(
+        &drive.join("CREW.md"),
+        "# Crew rules\n\nEvery crew chat reads this file on every turn.\n",
+    )?;
+    write_starter(&drive.join("NOTES.md"), "# Plan and notes\n")?;
+    write_starter(
+        &drive.join("DIGEST.md"),
+        "## Needs you\n\n## New\n\n## In progress\n\n",
+    )?;
+    Ok(Some(drive))
+}
+
+/// Write `contents` to `path` only when `path` does not exist: the first
+/// writer wins, and a retry or a concurrent caller gets `AlreadyExists` and
+/// leaves the file alone.
+fn write_starter(path: &Path, contents: &str) -> Result<(), String> {
+    let mut file = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(format!("cannot create {}: {error}", path.display())),
+    };
+    file.write_all(contents.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
 /// Serialises every `CaptainsStore` mutation process-wide: two independent
@@ -1131,6 +1201,99 @@ mod tests {
                 "{chat_id} is stamped with exactly the plugin's keys"
             );
         }
+    }
+
+    #[test]
+    fn ensure_drive_creates_the_exact_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+
+        let drive = ensure_drive(&registry, &home, "cap-a").unwrap().unwrap();
+        assert_eq!(drive, home.join("captains").join("cap-a"));
+
+        let mut entries: Vec<String> = std::fs::read_dir(&drive)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        entries.sort();
+        assert_eq!(
+            entries,
+            [
+                "AGENTS.md",
+                "CREW.md",
+                "DIGEST.md",
+                "NOTES.md",
+                "handoffs",
+                "renders",
+                "reports",
+                "skills",
+                "state",
+            ]
+        );
+        for file in ["AGENTS.md", "CREW.md", "NOTES.md", "DIGEST.md"] {
+            assert!(drive.join(file).is_file(), "{file} is not a file");
+        }
+        for sub in ["skills", "reports", "renders", "handoffs", "state"] {
+            assert!(drive.join(sub).is_dir(), "{sub}/ is not a directory");
+        }
+
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(digest, "## Needs you\n\n## New\n\n## In progress\n\n");
+    }
+
+    #[test]
+    fn ensure_drive_keeps_an_edited_notes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        let drive = ensure_drive(&registry, &home, "cap-a").unwrap().unwrap();
+
+        let edited = b"# my own notes\nnot the starter\n";
+        std::fs::write(drive.join("NOTES.md"), edited).unwrap();
+        let again = ensure_drive(&registry, &home, "cap-a").unwrap().unwrap();
+
+        assert_eq!(again, drive);
+        assert_eq!(
+            std::fs::read(drive.join("NOTES.md")).unwrap(),
+            edited,
+            "a retry rewrote an edited starter file"
+        );
+        for file in ["AGENTS.md", "CREW.md", "DIGEST.md"] {
+            assert!(drive.join(file).is_file(), "{file} missing after a retry");
+        }
+    }
+
+    #[test]
+    fn ensure_drive_creates_nothing_for_an_ordinary_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        let registry = Registry::default();
+
+        assert_eq!(ensure_drive(&registry, &home, "chat-x").unwrap(), None);
+        assert!(
+            !home.join("captains").exists(),
+            "an ordinary chat created the captains root"
+        );
+    }
+
+    #[test]
+    fn ensure_drive_of_a_crew_member_lands_in_the_captains_drive() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        registry.add_crew("cap-a", "chat-y").unwrap();
+
+        let captain_drive = ensure_drive(&registry, &home, "cap-a").unwrap().unwrap();
+        let crew_drive = ensure_drive(&registry, &home, "chat-y").unwrap().unwrap();
+        assert_eq!(crew_drive, captain_drive);
+        assert_eq!(crew_drive, home.join("captains").join("cap-a"));
+
+        let agents = std::fs::read_to_string(crew_drive.join("AGENTS.md")).unwrap();
+        assert!(agents.starts_with("# ada: Captain rules"), "{agents}");
     }
 
     #[test]

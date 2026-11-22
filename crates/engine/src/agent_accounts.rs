@@ -307,6 +307,14 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
         {
             request.env.entry("DEEPSEEK_API_KEY".into()).or_insert(key);
         }
+        // The Captain Drive is engine-owned: a Captain or crew chat's first
+        // dispatch provisions it (create-if-absent, so an edit survives a
+        // retry), and a failure refuses the run rather than letting it start
+        // half-provisioned. An ordinary chat creates nothing.
+        if let Some(chat_id) = chat_id {
+            let registry = crate::captains::Registry::load(&self.0.config.data_dir)?;
+            crate::captains::ensure_drive(&registry, &self.0.config.deepseek_home, chat_id)?;
+        }
         Ok(())
     }
 
@@ -597,5 +605,48 @@ mod tests {
         let wire = serde_json::to_string(&request).unwrap();
         assert!(!wire.contains("ZERON_DEEPSEEK_CAPTAINS"));
         assert!(!wire.contains("driveRoot"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_prepares_the_captains_drive() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+        store.promote("cap-a", "ada").unwrap();
+
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+        env.prepare(HarnessId::DeepSeek, Some("cap-a"), &mut request)
+            .await
+            .unwrap();
+
+        let drive = config.deepseek_home.join("captains/cap-a");
+        for file in ["AGENTS.md", "CREW.md", "NOTES.md", "DIGEST.md"] {
+            assert!(drive.join(file).is_file(), "the drive lost {file}");
+        }
+        for dir in ["skills", "reports", "renders", "handoffs", "state"] {
+            assert!(drive.join(dir).is_dir(), "the drive lost {dir}/");
+        }
+
+        let mut ordinary: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+        env.prepare(HarnessId::DeepSeek, Some("chat-x"), &mut ordinary)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_dir(config.deepseek_home.join("captains"))
+                .unwrap()
+                .count(),
+            1,
+            "an ordinary chat grew a second drive"
+        );
     }
 }
