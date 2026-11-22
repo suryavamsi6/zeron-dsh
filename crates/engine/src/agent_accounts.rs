@@ -738,4 +738,40 @@ mod tests {
             "a refused row created something on disk"
         );
     }
+
+    /// SUR-191: the dispatch path already tolerates a malformed registry — the
+    /// load is an `if let Ok`, so a run proceeds unstamped and creates nothing.
+    /// This is the half the issue flagged unverified, and the half that shows
+    /// startup dying on the same file is the two paths disagreeing. Expected
+    /// green before the startup fix: it pins the `Ok` side of the property.
+    #[tokio::test]
+    async fn a_malformed_roster_leaves_a_run_unstamped() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        std::fs::write(
+            config.data_dir.join("captains.json"),
+            b"{\"captains\": [",
+        )
+        .unwrap();
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+        env.prepare(HarnessId::DeepSeek, Some("cap-a"), &mut request)
+            .await
+            .expect("a malformed roster must not refuse an ordinary run");
+        assert!(
+            !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+            "a malformed roster stamped a role"
+        );
+        assert!(
+            !config.deepseek_home.exists(),
+            "a malformed roster created something on disk"
+        );
+    }
 }

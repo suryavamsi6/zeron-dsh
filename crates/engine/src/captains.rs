@@ -432,10 +432,24 @@ pub struct CaptainsStore {
 }
 
 impl CaptainsStore {
-    /// Open the store over `data_dir`, loading `captains.json` once. A
-    /// malformed file is `Err`; nothing is published.
+    /// Open the store over `data_dir`, loading `captains.json` once. A file
+    /// that won't load degrades rather than stopping the engine: reads serve
+    /// an empty roster while the file is unreadable, and a mutation is
+    /// refused with the parse error (which names the path) because `mutate`
+    /// reloads the file under `MUTATION` — so a repaired file is written
+    /// normally on the next mutation and the degrade is no latch.
     pub fn open(data_dir: PathBuf) -> Result<CaptainsStore, String> {
-        let snapshot = Registry::load(&data_dir)?;
+        let snapshot = match Registry::load(&data_dir) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    data_dir = %data_dir.display(),
+                    "captains registry load failed; starting with an empty roster"
+                );
+                Registry::default()
+            }
+        };
         Ok(CaptainsStore {
             data_dir,
             snapshot: Mutex::new(snapshot),
@@ -551,6 +565,25 @@ pub trait Chats {
     fn chat(&self, chat_id: &str) -> Option<ChatRow>;
 }
 
+/// The row gate every roster change passes first: the chat exists, lives
+/// on this device, and has no turn in flight a roster change would cut
+/// across (the sessions engine's `turn_in_flight` — the engine keeps no
+/// other busy flag). One decision with two callers — `row` maps the refusal
+/// into `RpcError::BadParams`, `committed_row` keeps the `String` the
+/// commit closure propagates.
+fn row_gate(chat_id: &str, row: Option<ChatRow>, device_id: &str) -> Result<ChatRow, String> {
+    let Some(row) = row else {
+        return Err(format!("no such chat: {chat_id}"));
+    };
+    if row.device_id != device_id {
+        return Err(format!("{chat_id} belongs to another device"));
+    }
+    if row.turn_in_flight {
+        return Err(format!("{chat_id} has a turn in flight"));
+    }
+    Ok(row)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PromoteParams {
@@ -652,26 +685,13 @@ impl CaptainsRpc<'_> {
         json!({ "captains": captains })
     }
 
-    /// The row gate every roster change passes first: the chat exists, lives
-    /// on this device, and has no turn in flight a roster change would cut
-    /// across (the sessions engine's `turn_in_flight` — the engine keeps no
-    /// other busy flag).
     /// A fast pre-check only, read outside `MUTATION`: it produces the early
     /// refusals, and the commit closure re-reads the same facts under the
-    /// lock via `committed_row` — which is the decision.
+    /// lock via `committed_row` — which is the decision. The gate itself is
+    /// [`row_gate`].
     fn row(&self, chat_id: &str) -> Result<ChatRow, RpcError> {
-        let Some(row) = self.chats.chat(chat_id) else {
-            return Err(RpcError::BadParams(format!("no such chat: {chat_id}")));
-        };
-        if row.device_id != self.device_id {
-            return Err(RpcError::BadParams(format!(
-                "{chat_id} belongs to another device"
-            )));
-        }
-        if row.turn_in_flight {
-            return Err(RpcError::BadParams(format!("{chat_id} has a turn in flight")));
-        }
-        Ok(row)
+        row_gate(chat_id, self.chats.chat(chat_id), self.device_id)
+            .map_err(RpcError::BadParams)
     }
 
     /// One chat row re-read under `MUTATION`, with the row gate applied. The
@@ -684,23 +704,18 @@ impl CaptainsRpc<'_> {
     /// the only caller of `CaptainsStore`; a future caller must keep that order or
     /// the two locks can deadlock.
     ///
-    /// The residual: a `moveChat`/`deleteChat` that lands between this
-    /// under-lock re-read and the atomic rename is still unobserved — a window
-    /// now bounded by the save+rename inside the same uninterrupted critical
-    /// section, not by the whole pre-check window. A deleted row still leaves
-    /// its registry record for a later repair, because the chat store does not
-    /// cascade.
+    /// The residual: an `upsert_chat`, `set_chat_archived` or `delete_chat`
+    /// that lands between this under-lock re-read and the atomic rename is
+    /// still unobserved — a window now bounded by the save+rename inside the
+    /// same uninterrupted critical section, not by the whole pre-check
+    /// window. A turn that starts between the under-lock re-read and the
+    /// rename samples the previous role and is corrected on its next turn.
+    /// A deleted row still leaves its registry record, because the chat
+    /// store does not cascade; what that record means for the roster —
+    /// whether it is pruned or repaired — is SUR-189's decision, not made
+    /// here.
     fn committed_row(&self, chat_id: &str) -> Result<ChatRow, String> {
-        let Some(row) = self.chats.chat(chat_id) else {
-            return Err(format!("no such chat: {chat_id}"));
-        };
-        if row.device_id != self.device_id {
-            return Err(format!("{chat_id} belongs to another device"));
-        }
-        if row.turn_in_flight {
-            return Err(format!("{chat_id} has a turn in flight"));
-        }
-        Ok(row)
+        row_gate(chat_id, self.chats.chat(chat_id), self.device_id)
     }
 
     /// Both rows re-read under `MUTATION`, with the project rule applied to the
@@ -2269,5 +2284,102 @@ mod tests {
             !captains_root(&home).exists(),
             "a refused crew row created something on disk"
         );
+    }
+
+    /// SUR-191: the row gate is one decision with two callers — the pre-check
+    /// (`row`, read before `MUTATION`) and the commit re-read (`committed_row`,
+    /// read under it). They must refuse the same three facts with the same
+    /// words. This is a **pin, not a bug red**: it passes before and after the
+    /// dedup, and it exists so the refactor cannot quietly change either
+    /// message.
+    #[test]
+    fn the_row_gate_refuses_the_same_three_facts_on_both_paths() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Answers every read with the same row: the pre-check's path.
+        struct Fixed(Option<ChatRow>);
+        impl Chats for Fixed {
+            fn chat(&self, _chat_id: &str) -> Option<ChatRow> {
+                self.0.clone()
+            }
+        }
+
+        /// Answers the pre-check with a good row and the under-lock re-read with
+        /// the violated one, so the commit's own gate is what refuses.
+        struct Flips {
+            after: Option<ChatRow>,
+            calls: AtomicUsize,
+        }
+        impl Chats for Flips {
+            fn chat(&self, _chat_id: &str) -> Option<ChatRow> {
+                if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Some(ChatRow {
+                        device_id: DEVICE.to_string(),
+                        ..ChatRow::default()
+                    })
+                } else {
+                    self.after.clone()
+                }
+            }
+        }
+
+        fn refused(store: &CaptainsStore, chats: &dyn Chats, home: &Path, params: Value) -> String {
+            let rpc = CaptainsRpc {
+                store,
+                chats,
+                device_id: DEVICE,
+                deepseek_home: home,
+            };
+            match rpc.call(methods::PROMOTE_CAPTAIN, &params) {
+                Ok(_) => panic!("the row gate accepted a fact it must refuse"),
+                Err(RpcError::BadParams(message)) => message,
+                Err(other) => panic!("unexpected error: {other}"),
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let params = json!({"chatId": "cap-a", "name": "Ada"});
+
+        let facts: [(&str, Option<ChatRow>); 3] = [
+            ("no such chat: cap-a", None),
+            (
+                "cap-a belongs to another device",
+                Some(ChatRow {
+                    device_id: "device-2".to_string(),
+                    ..ChatRow::default()
+                }),
+            ),
+            (
+                "cap-a has a turn in flight",
+                Some(ChatRow {
+                    device_id: DEVICE.to_string(),
+                    turn_in_flight: true,
+                    ..ChatRow::default()
+                }),
+            ),
+        ];
+        for (message, violated) in facts {
+            assert_eq!(
+                refused(&store, &Fixed(violated.clone()), &home, params.clone()),
+                message,
+                "the pre-check's words"
+            );
+            assert_eq!(
+                refused(
+                    &store,
+                    &Flips {
+                        after: violated,
+                        calls: AtomicUsize::new(0)
+                    },
+                    &home,
+                    params.clone()
+                ),
+                message,
+                "the commit re-read must refuse with the pre-check's words"
+            );
+        }
     }
 }
