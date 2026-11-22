@@ -49,7 +49,15 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.16.0
-      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+          # Its .zig-cache stays empty: zgx-ghostty-sys's build script runs
+          # `zig build` with ZIG_GLOBAL_CACHE_DIR and ZIG_LOCAL_CACHE_DIR of
+          # its own, both inside ~/Library/Caches/zgx-ghostty, so the restore
+          # always missed and the post-step could only find the directory
+          # absent. The zig work caches ride along in the Ghostty cache below
+          # (the Zig tarball cache is unaffected by this).
+          use-cache: false
+      - id: zgx-ghostty
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/Library/Caches/zgx-ghostty
           key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
@@ -108,6 +116,17 @@ jobs:
           exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
           echo 'first-red-step: apps/zgx unit tests'
           scripts/ci/test-zgx.sh rust
+      # Saved here, not by the action's post-step: that one is skipped when a
+      # later step fails — the same way this job rebuilt the zgx CLI every run
+      # until its save moved in front of the tests. On a run where the build
+      # script never ran (rust-cache's fingerprint still fresh) the directory
+      # is absent and the save only warns; nothing is written.
+      - name: Save the Ghostty build
+        if: ${{ !cancelled() && steps.zgx-ghostty.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/Library/Caches/zgx-ghostty
+          key: zgx-ghostty-${{ hashFiles('apps/zgx/Cargo.lock') }}
       # The Luau UI suite runs on Linux only: its layout is headless and
       # identical on both machines (measured 631 s vs 635 s; no font, DPI or
       # scrollbar difference in the path), and it was the step that kept this
