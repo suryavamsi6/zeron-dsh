@@ -39,6 +39,7 @@ jobs:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     if: inputs.ios
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -51,7 +52,10 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - name: Rust mobile core tests
-        run: cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
+        run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Rust mobile core tests'
+          cargo test --locked -p zeron-text -p zeron-markdown -p zeron-client -p zeron-mobile
       # Only for the simulator tests, which link these bindings (they run when the app,
       # the FFI crate or the client changes, see scripts/ci/plan.py).
       # The committed bindings: the Swift file the app compiles, and the C header and
@@ -61,6 +65,8 @@ jobs:
       - name: Generated bindings are current
         if: ${{ !contains(fromJSON(inputs.skip), 'ios-tests') }}
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Generated bindings are current'
           cargo build --locked -p zeron-mobile --lib
           cargo build --locked -p zeron-mobile --bin uniffi-bindgen --features bindgen
           target/debug/uniffi-bindgen generate --library target/debug/libzeron_mobile.so \
@@ -80,26 +86,36 @@ jobs:
   # (apps/ios/CoreFFI), and ios-core checks they are current.
   # Do not boot the simulator in the background: hundreds of launchd_sim daemons starve the 3-vCPU
   # VM and slow every other step down by minutes. xcodebuild boots it when needed.
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }
   ios-tests:
     permissions:
       contents: read
       actions: write
+      pull-requests: read  # first-red.sh compares the run's head with the PR's
     if: ${{ inputs.ios && !contains(fromJSON(inputs.skip), 'ios-tests') }}
     runs-on: macos-latest
     timeout-minutes: 30
@@ -135,6 +151,8 @@ jobs:
       # unit tests don't need the optimized core the app ships, and it builds in about half the time.
       - name: Build the Rust core for the simulator
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Build the Rust core for the simulator'
           IPHONEOS_DEPLOYMENT_TARGET=26.0 cargo build --locked -p zeron-mobile --lib --target aarch64-apple-ios-sim
           mkdir -p target/ios-core/iphonesimulator/include
           cp target/aarch64-apple-ios-sim/debug/libzeron_mobile.a target/ios-core/iphonesimulator/
@@ -146,6 +164,8 @@ jobs:
           # Reuse the core built above instead of rebuilding it in the Xcode build phase.
           ZERON_SKIP_CORE: 1
         run: |
+          exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
+          echo 'first-red-step: Run iOS unit tests'
           xcodebuild -project Zeron.xcodeproj -scheme Zeron \
             -destination "platform=iOS Simulator,id=$IOS_SIMULATOR_ID" \
             -resultBundlePath "$RUNNER_TEMP/ios-tests.xcresult" \
@@ -163,19 +183,28 @@ jobs:
         with:
           path: rust-toolchain.toml
           key: ${{ inputs.pass-key }}-ios-tests
-      # SUR-152/SUR-163: a red pull-request leg cancels the run, so the legs
-      # still running stop at once. The annotation names the failed step
-      # before the cancel takes this job down; `scripts/ci/first-red.sh`
-      # reads that step from the run's jobs. If the checkout itself is what
-      # failed, the fallback below keeps the job-only annotation. `|| true`
-      # keeps a failed cancel from masking this failure.
-      - name: Cancel the run's other legs (SUR-152)
+      # SUR-152/SUR-163/SUR-173: a red pull-request leg publishes the failed
+      # step's name and a log excerpt — the annotation and the job summary —
+      # then cancels the run only when the pull request's head has moved on:
+      # a live head keeps the run and its evidence, anything unknown fails
+      # safe. `scripts/ci/first-red.sh` reads the excerpt from
+      # $RUNNER_TEMP/first-red.log, which the steps above tee into. The
+      # fallback covers the script itself failing (a red checkout) with the
+      # same head check; `|| true` keeps a failed publish or cancel from
+      # masking this failure.
+      - name: First red excerpt; cancel a superseded run
         if: failure() && github.event_name == 'pull_request'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           bash scripts/ci/first-red.sh || {
-            echo "::error title=First red::${GITHUB_JOB} failed; cancelling the rest of the run"
-            gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
+            echo "::error title=First red::${GITHUB_JOB} failed"
+            pr="$(jq -r '.pull_request.number // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            sha="$(jq -r '.pull_request.head.sha // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)"
+            live=""
+            [ -n "$pr" ] && [ -n "$sha" ] &&
+              live="$(gh api "repos/${{ github.repository }}/pulls/${pr}" --jq .head.sha 2>/dev/null)"
+            [ -n "$live" ] && [ "$live" != "$sha" ] &&
+              gh api --method POST "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/cancel" || true
           }
