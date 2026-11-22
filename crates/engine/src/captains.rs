@@ -113,6 +113,7 @@ impl Registry {
     /// Captain, or crews for one, is refused. Promoting an archived Captain
     /// reactivates its record and keeps only the crew that can still serve it.
     pub fn promote(&mut self, chat_id: &str, name: &str) -> Result<(), String> {
+        valid_captain_name(name)?;
         if self.is_captain(chat_id) {
             return Err(format!("{chat_id} is already a captain"));
         }
@@ -236,8 +237,7 @@ impl Registry {
     }
 }
 
-/// `<deepseek_home>/captains` — the root every Captain Drive lives under,
-/// and the `driveRoot` the run stamp reports.
+/// `<deepseek_home>/captains` — the root every Captain Drive lives under.
 pub fn captains_root(deepseek_home: &Path) -> PathBuf {
     deepseek_home.join("captains")
 }
@@ -253,8 +253,9 @@ pub fn drive_dir(deepseek_home: &Path, captain_id: &str) -> PathBuf {
 
 /// The `ZERON_DEEPSEEK_CAPTAINS` payload a run is stamped with: the role
 /// `chat_id` plays in `registry`, or `None` for an ordinary chat. The plugin
-/// validates exactly these camelCase keys. `driveRoot` is the parent
-/// `<deepseek_home>/captains`; a Captain's own drive lives at [`drive_dir`].
+/// validates exactly these camelCase keys and reads `driveRoot` as the Drive
+/// itself, so it names `drive_dir(deepseek_home, captain_id)` — the directory
+/// `ensure_drive` creates — never its parent.
 pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) -> Option<String> {
     #[derive(Serialize)]
     #[serde(rename_all = "camelCase")]
@@ -266,7 +267,6 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
         drive_root: String,
     }
 
-    let drive_root = captains_root(deepseek_home).to_string_lossy().into_owned();
     let (role, captain_id, captain_name) = match registry.run_role(chat_id) {
         RunRole::None => return None,
         RunRole::Captain { name } => ("captain", chat_id.to_string(), name),
@@ -275,16 +275,63 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
             captain_name,
         } => ("crew", captain_id, captain_name),
     };
+    if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
+        return None;
+    }
     Some(
         serde_json::to_string(&Stamp {
             role,
             chat_id,
             captain_id: &captain_id,
             captain_name: &captain_name,
-            drive_root,
+            drive_root: drive_dir(deepseek_home, &captain_id)
+                .to_string_lossy()
+                .into_owned(),
         })
         .expect("a captains stamp serialises"),
     )
+}
+
+/// The plugin's row-id rule (`config.js`): `[A-Za-z0-9_-]{1,128}`. A drive path
+/// is only ever joined from an id that passes, so a row that arrived through
+/// `upsert_chat`/import cannot escape `<deepseek_home>/captains`.
+pub fn valid_captain_id(id: &str) -> Result<(), String> {
+    if !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid Captain id: {id:?} (allowed: 1-128 of A-Z, a-z, 0-9, '_' and '-')"
+        ))
+    }
+}
+
+/// The plugin's name rule (`config.js`): 1-80 characters, no line breaks.
+pub fn valid_captain_name(name: &str) -> Result<(), String> {
+    if !name.is_empty() && name.chars().count() <= 80 && !name.contains(['\r', '\n']) {
+        Ok(())
+    } else {
+        Err(format!(
+            "invalid Captain name: {name:?} (allowed: 1-80 characters, no line breaks)"
+        ))
+    }
+}
+
+/// Whether a row may be stamped at all: the plugin's `normalizeConfig`
+/// throws on any of these, so a row that fails must run ordinary rather
+/// than carry a stamp its consumer refuses.
+pub fn valid_captain_row(
+    chat_id: &str,
+    captain_id: &str,
+    captain_name: &str,
+) -> Result<(), String> {
+    valid_captain_id(chat_id)?;
+    valid_captain_id(captain_id)?;
+    valid_captain_name(captain_name)
 }
 
 /// The subdirectories every Captain Drive starts with.
@@ -311,7 +358,10 @@ pub fn ensure_drive(
             captain_name,
         } => (captain_id, captain_name),
     };
-    let drive = captains_root(deepseek_home).join(&captain_id);
+    if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
+        return Ok(None);
+    }
+    let drive = drive_dir(deepseek_home, &captain_id);
     for dir in DRIVE_DIRS {
         let sub = drive.join(dir);
         std::fs::create_dir_all(&sub)
@@ -682,6 +732,7 @@ impl CaptainsRpc<'_> {
                         Err(format!("{} is already a captain", params.chat_id))
                     };
                 }
+                valid_captain_name(&params.name)?;
                 registry
                     .promote(&params.chat_id, &params.name)
                     .map(|()| true)
@@ -1129,7 +1180,7 @@ mod tests {
         assert_eq!(stamp["captainName"], "ada");
         assert_eq!(
             stamp["driveRoot"],
-            home.join("captains").to_string_lossy().as_ref()
+            drive_dir(home, "chat-1").to_string_lossy().as_ref()
         );
     }
 
@@ -1148,7 +1199,7 @@ mod tests {
         assert_eq!(stamp["captainName"], "ada");
         assert_eq!(
             stamp["driveRoot"],
-            home.join("captains").to_string_lossy().as_ref()
+            drive_dir(home, "chat-1").to_string_lossy().as_ref()
         );
     }
 
@@ -1905,5 +1956,225 @@ mod tests {
             "no such chat",
         );
         assert!(crew(&rig.roster(), "cap-a").is_empty());
+    }
+
+    /// The plugin reads the row's `driveRoot` as the Drive itself
+    /// (`plugins/dsh-captains/src/tools.js`: `driveDir(cfg) = cfg.driveRoot`),
+    /// so the stamp must name the directory `ensure_drive` creates, never its
+    /// parent.
+    #[test]
+    fn the_stamp_names_the_drive_ensure_drive_creates() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry.add_crew("chat-1", "chat-2").unwrap();
+
+        for chat_id in ["chat-1", "chat-2"] {
+            let stamp: serde_json::Value =
+                serde_json::from_str(&captains_env(&registry, &home, chat_id).unwrap()).unwrap();
+            let drive = ensure_drive(&registry, &home, chat_id).unwrap().unwrap();
+            assert_eq!(
+                stamp["driveRoot"].as_str().unwrap(),
+                drive.to_string_lossy().as_ref(),
+                "{chat_id}: the stamp names the Drive the engine creates"
+            );
+            assert_ne!(
+                drive,
+                captains_root(&home),
+                "{chat_id}: the Drive is not the captains root"
+            );
+            assert!(drive.is_dir(), "{chat_id}: the Drive exists after ensure_drive");
+        }
+    }
+
+    #[test]
+    fn ensure_drive_refuses_an_id_the_plugin_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        for id in ["../../escape", "a/b", "", "with space", "dotted."] {
+            let mut registry = Registry::default();
+            registry.promote(id, "ada").unwrap();
+            assert_eq!(
+                ensure_drive(&registry, &home, id).unwrap(),
+                None,
+                "id {id:?} was not skipped"
+            );
+        }
+        assert!(
+            !captains_root(&home).exists(),
+            "an invalid id created no drive"
+        );
+    }
+
+    #[test]
+    fn two_simultaneous_first_turns_get_the_exact_layout() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        let registry = Arc::new(registry);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let registry = Arc::clone(&registry);
+            let home = home.clone();
+            let barrier = Arc::clone(&barrier);
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                ensure_drive(&registry, &home, "cap-a")
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap().unwrap().unwrap();
+        }
+
+        let drive = drive_dir(&home, "cap-a");
+        let mut names: Vec<String> = std::fs::read_dir(&drive)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            [
+                "AGENTS.md", "CREW.md", "DIGEST.md", "NOTES.md", "handoffs", "renders",
+                "reports", "skills", "state",
+            ],
+            "the exact nine-entry layout, once"
+        );
+        for file in ["AGENTS.md", "CREW.md", "NOTES.md", "DIGEST.md"] {
+            let text = std::fs::read_to_string(drive.join(file)).unwrap();
+            assert!(!text.trim().is_empty(), "{file} is empty");
+        }
+        for sub in ["skills", "reports", "renders", "handoffs", "state"] {
+            assert!(drive.join(sub).is_dir(), "{sub}/ is missing");
+        }
+    }
+
+    #[test]
+    fn a_half_initialized_drive_keeps_its_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+
+        let drive = drive_dir(&home, "cap-a");
+        std::fs::create_dir_all(&drive).unwrap();
+        let edited = "# my plan\n\nkeep me\n";
+        std::fs::write(drive.join("NOTES.md"), edited).unwrap();
+
+        ensure_drive(&registry, &home, "cap-a").unwrap().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(drive.join("NOTES.md")).unwrap(),
+            edited,
+            "a retry must not overwrite an edited NOTES.md"
+        );
+        for file in ["AGENTS.md", "CREW.md", "DIGEST.md"] {
+            assert!(drive.join(file).is_file(), "{file} was not completed");
+        }
+        for sub in ["skills", "reports", "renders", "handoffs", "state"] {
+            assert!(drive.join(sub).is_dir(), "{sub}/ was not completed");
+        }
+    }
+
+    /// A row the plugin would refuse at `normalizeConfig` must not be stamped:
+    /// the plugin throws before a single registration runs, so the run would
+    /// die on the very stamp the row exists to enable. The same predicate is
+    /// consulted by `ensure_drive`, so both call sites agree.
+    fn invalid_row_registry() -> Registry {
+        let at = "2026-11-01T00:00:00Z".parse().unwrap();
+        Registry {
+            captains: vec![
+                Captain {
+                    chat_id: "bad/id".to_string(),
+                    name: "Ada".to_string(),
+                    created_at: at,
+                    archived: false,
+                    crew: vec!["crew-x".to_string()],
+                },
+                Captain {
+                    chat_id: "cap-name".to_string(),
+                    name: "x".repeat(81),
+                    created_at: at,
+                    archived: false,
+                    crew: Vec::new(),
+                },
+                Captain {
+                    chat_id: "cap-ok".to_string(),
+                    name: "Grace".to_string(),
+                    created_at: at,
+                    archived: false,
+                    crew: Vec::new(),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn captains_env_skips_a_row_the_plugin_would_refuse() {
+        let home = Path::new("/deepseek-home");
+        let registry = invalid_row_registry();
+        assert!(
+            captains_env(&registry, home, "bad/id").is_none(),
+            "an invalid Captain id was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "crew-x").is_none(),
+            "a crew of an invalid Captain id was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "cap-name").is_none(),
+            "a Captain name the plugin refuses was stamped"
+        );
+        assert!(
+            captains_env(&registry, home, "cap-ok").is_some(),
+            "a valid row is still stamped"
+        );
+    }
+
+    #[test]
+    fn ensure_drive_skips_a_row_the_plugin_would_refuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let registry = invalid_row_registry();
+        for chat_id in ["bad/id", "crew-x", "cap-name"] {
+            assert_eq!(
+                ensure_drive(&registry, &home, chat_id).unwrap(),
+                None,
+                "{chat_id}: a refused row creates no drive and does not error"
+            );
+        }
+        assert!(
+            !captains_root(&home).exists(),
+            "a refused row created the captains root"
+        );
+        let created = ensure_drive(&registry, &home, "cap-ok").unwrap();
+        assert_eq!(created, Some(drive_dir(&home, "cap-ok")));
+    }
+
+    #[test]
+    fn a_captain_name_the_plugin_would_refuse_is_not_promoted() {
+        let mut registry = Registry::default();
+        for name in ["", "x".repeat(81).as_str(), "line\nbreak", "carriage\rreturn"] {
+            let refused = registry.promote("cap-a", name);
+            assert!(
+                refused.is_err(),
+                "the plugin refuses name {name:?}; promote accepted it"
+            );
+            assert!(
+                registry.captains().is_empty(),
+                "a refused promote must not create a record"
+            );
+        }
+        registry.promote("cap-a", "A & B").unwrap();
+        assert_eq!(registry.captains()[0].name, "A & B");
+        registry.promote("cap-b", &"y".repeat(80)).unwrap();
     }
 }

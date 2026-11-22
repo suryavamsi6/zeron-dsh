@@ -286,14 +286,22 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             self.0.config.deepseek_home.to_string_lossy().into_owned(),
         );
         // The Captain role this chat plays rides `env` (host-only, never the
-        // wire or the prompt). A missing or unreadable captains.json simply
-        // leaves the run unstamped — ordinary chats must still prepare.
+        // wire or the prompt), and the same single load provisions its Drive:
+        // a Captain or crew chat's first dispatch creates it (create-if-absent,
+        // so an edit survives a retry), and a failure refuses the run rather
+        // than letting it start half-provisioned. A missing or unreadable
+        // captains.json simply leaves the run unstamped and unprovisioned —
+        // ordinary chats must still prepare, and an ordinary chat creates
+        // nothing.
         if let Some(chat_id) = chat_id
             && let Ok(registry) = crate::captains::Registry::load(&self.0.config.data_dir)
-            && let Some(value) =
-                crate::captains::captains_env(&registry, &self.0.config.deepseek_home, chat_id)
         {
-            request.env.insert("ZERON_DEEPSEEK_CAPTAINS".into(), value);
+            if let Some(value) =
+                crate::captains::captains_env(&registry, &self.0.config.deepseek_home, chat_id)
+            {
+                request.env.insert("ZERON_DEEPSEEK_CAPTAINS".into(), value);
+            }
+            crate::captains::ensure_drive(&registry, &self.0.config.deepseek_home, chat_id)?;
         }
         // Zeron's own Harness home is the one credential store: the gateway
         // writes it and every run reads it, so a provider configured in the
@@ -306,14 +314,6 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             && let Some(key) = self.0.stored_key().map_err(|error| error.to_string())?
         {
             request.env.entry("DEEPSEEK_API_KEY".into()).or_insert(key);
-        }
-        // The Captain Drive is engine-owned: a Captain or crew chat's first
-        // dispatch provisions it (create-if-absent, so an edit survives a
-        // retry), and a failure refuses the run rather than letting it start
-        // half-provisioned. An ordinary chat creates nothing.
-        if let Some(chat_id) = chat_id {
-            let registry = crate::captains::Registry::load(&self.0.config.data_dir)?;
-            crate::captains::ensure_drive(&registry, &self.0.config.deepseek_home, chat_id)?;
         }
         Ok(())
     }
@@ -568,9 +568,7 @@ mod tests {
         assert_eq!(stamp["captainName"], "ada");
         assert_eq!(
             stamp["driveRoot"],
-            config
-                .deepseek_home
-                .join("captains")
+            crate::captains::drive_dir(&config.deepseek_home, "chat-1")
                 .to_string_lossy()
                 .as_ref()
         );
@@ -647,6 +645,97 @@ mod tests {
                 .count(),
             1,
             "an ordinary chat grew a second drive"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_registry_still_prepares_an_ordinary_chat() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        std::fs::write(config.data_dir.join("captains.json"), "{ not json").unwrap();
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+
+        env.prepare(HarnessId::DeepSeek, Some("chat-x"), &mut request)
+            .await
+            .expect("an unreadable roster must not refuse an ordinary chat");
+        assert!(!request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(
+            !config.deepseek_home.exists(),
+            "an ordinary chat creates nothing, not even the captains root"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_drive_provisioning_refuses_the_run() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+        store.promote("cap-a", "ada").unwrap();
+        std::fs::create_dir_all(&config.deepseek_home).unwrap();
+        // A file where the captains root must be makes every drive write fail.
+        std::fs::write(config.deepseek_home.join("captains"), "not a directory").unwrap();
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+            "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+        }))
+        .unwrap();
+
+        let refused = env
+            .prepare(HarnessId::DeepSeek, Some("cap-a"), &mut request)
+            .await;
+        let error = refused.expect_err("a Captain must not run half-provisioned");
+        assert!(error.contains("cannot create"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn a_registry_row_the_plugin_would_refuse_is_not_stamped() {
+        let root = tempfile::tempdir().unwrap();
+        let config = AgentAccountsConfig {
+            data_dir: root.path().join("data"),
+            deepseek_home: root.path().join("deepseek"),
+        };
+        std::fs::create_dir_all(&config.data_dir).unwrap();
+        // A hand-written row, not one this engine promoted: an invalid id and
+        // a name outside the plugin's 1-80/no-CR-LF rule.
+        let long_name = "x".repeat(81);
+        std::fs::write(
+            config.data_dir.join("captains.json"),
+            format!(
+                r#"{{"captains":[
+                    {{"chatId":"bad/id","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}},
+                    {{"chatId":"cap-long","name":{long_name:?},"createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}}
+                ]}}"#
+            ),
+        )
+        .unwrap();
+        let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
+        for chat_id in ["bad/id", "cap-long"] {
+            let mut request: zeron_proto::RunRequest = serde_json::from_value(serde_json::json!({
+                "prompt": "hello", "cwd": ".", "sandbox": "workspace-write"
+            }))
+            .unwrap();
+            env.prepare(HarnessId::DeepSeek, Some(chat_id), &mut request)
+                .await
+                .unwrap_or_else(|error| panic!("{chat_id} must run ordinary: {error}"));
+            assert!(
+                !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+                "{chat_id} was stamped although the plugin would refuse the row"
+            );
+        }
+        assert!(
+            !config.deepseek_home.exists(),
+            "a refused row created something on disk"
         );
     }
 }
