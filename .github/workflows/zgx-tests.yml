@@ -275,10 +275,9 @@ jobs:
           libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
           libx11-xcb-dev libfontconfig1-dev libfreetype-dev libasound2-dev libvulkan-dev
           pkg-config cmake libwebkit2gtk-4.1-dev libjson-glib-dev mold
-          mesa-vulkan-drivers
-      # (mesa-vulkan-drivers: lavapipe, a Vulkan device on the CPU, so agent
-      # visuals' shaders and scenes render here as on a machine with a GPU;
-      # src/visuals_tests.rs. The runner has none of its own.)
+      # (No mesa-vulkan-drivers — zgx-linux's, for src/visuals_tests.rs's
+      # paints on lavapipe. `zgx test ui` mounts the app headless: layout,
+      # state and a frame clock, never a GPU device.)
       - name: Rust toolchain
         run: rustup show active-toolchain || rustup toolchain install
       - id: zgx-rev
