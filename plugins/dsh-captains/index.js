@@ -8,7 +8,7 @@ import { normalizeConfig } from './src/config.js';
 export { normalizeConfig } from './src/config.js';
 
 export const name = 'zeron-captains';
-export const inject = ['systemPrompt', 'tools'];
+export const inject = ['systemPrompt', 'tools', 'agents'];
 
 // The dsh-tools peer is the loading runtime's to supply: a properly installed
 // bundle resolves it under its own layout, and a linked checkout (`dsh plugin
@@ -57,9 +57,11 @@ export function apply(ctx, config) {
   // reach every native child session too. Wait for `agent/created` instead and
   // register into each created agent's own scope, skipping subagents: the
   // Captain row belongs to the root agent alone.
-  ctx.on('agent/created', ({ agent }) => {
+  const registered = new WeakSet();
+  const register = agent => {
     const scope = rootScope(agent);
-    if (scope === undefined) return;
+    if (scope === undefined || registered.has(agent)) return;
+    registered.add(agent);
     scope.effect(() => scope.systemPrompt.section({
       name: 'zeron-captains:role',
       order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
@@ -67,5 +69,8 @@ export function apply(ctx, config) {
       interpolate: false,
     }));
     for (const spec of driveToolSpecs(cfg)) scope.tools.register(defineTool(spec));
-  });
+  };
+  ctx.on('agent/created', ({ agent }) => register(agent));
+  // A root created before this fiber settled never reached the listener above.
+  for (const agent of ctx.agents?.list?.() ?? []) register(agent);
 }

@@ -44,10 +44,6 @@ function resolveReal(target) {
   }
 }
 
-export function nearestRealAncestor(target) {
-  return resolveReal(target).realAncestor;
-}
-
 export function resolveInDrive(drive, rel) {
   if (typeof rel !== 'string') throw new Error(OUTSIDE);
   if (rel.includes('\0')) throw new Error(OUTSIDE);
@@ -81,7 +77,7 @@ export function driveToolSpecs(cfg) {
   return [
     {
       name: 'captain_drive_read',
-      description: 'Read a file or list a directory inside the Captain Drive',
+      description: 'Read a file or list a directory inside the Captain Drive; entries are one per line, folders end in / and symbolic links in @',
       parameters: {
         path: { type: 'string', required: true, description: 'Path inside the Drive; "" lists the root' },
       },
@@ -91,9 +87,9 @@ export function driveToolSpecs(cfg) {
         const stat = fs.statSync(realTarget);
         if (stat.isDirectory()) {
           return fs.readdirSync(realTarget, { withFileTypes: true })
-            .filter(entry => entry.isFile() || entry.isDirectory())
+            .filter(entry => entry.isFile() || entry.isDirectory() || entry.isSymbolicLink())
             .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-            .map(entry => entry.name + (entry.isDirectory() ? '/' : ''))
+            .map(entry => entry.name + (entry.isDirectory() ? '/' : entry.isSymbolicLink() ? '@' : ''))
             .join('\n');
         }
         if (stat.size > READ_CAP) {
@@ -121,11 +117,15 @@ export function driveToolSpecs(cfg) {
         if (process.env.DSH_PERMISSION_MODE === 'read-only') {
           throw new Error('the Captain Drive is read-only in this run');
         }
-        const { target, realTarget, realDrive } = resolveInDrive(drive, rel);
+        const { realTarget, realDrive } = resolveInDrive(drive, rel);
         const relative = path.relative(realDrive, realTarget);
         const [first] = relative.split(path.sep);
         if (isEngineOwned(first)) {
           throw new Error(`'${first}/' is engine-owned; the engine writes it, not the model`);
+        }
+        const isDirectory = realTarget === realDrive || (fs.existsSync(realTarget) && fs.statSync(realTarget).isDirectory());
+        if (isDirectory) {
+          throw new Error(`'${relative === '' ? '.' : relative}' is a directory; the Drive tools write files, not directories`);
         }
         const display = relative.split(path.sep).join('/');
         const bytes = Buffer.byteLength(content);
