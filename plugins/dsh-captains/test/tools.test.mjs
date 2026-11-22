@@ -5,8 +5,7 @@ import { realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { driveDir, driveToolSpecs, resolveInDrive } from '../src/tools.js';
-import { apply, normalizeConfig } from '../index.js';
-import { normalizeConfig as sourceNormalizeConfig } from '../src/config.js';
+import { apply } from '../index.js';
 
 const captain = root => ({ role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: root });
 
@@ -40,10 +39,13 @@ test('read lists the root with folders marked by a trailing slash', async t => {
   await mkdir(join(root, 'notes'));
   await writeFile(join(root, 'README.md'), 'hello drive');
   await writeFile(join(root, 'notes', 'one.md'), 'one');
+  await symlink(join(root, 'notes'), join(root, 'notes-alias'));
   const { read } = tools(root);
   const listing = await read.execute({ path: '' });
   const lines = listing.split('\n');
-  assert.deepEqual(lines, ['README.md', 'notes/']);
+  // Links are part of the listing: they are usable aliases the suite proves
+  // work, and hiding them made the Drive look emptier than it is.
+  assert.deepEqual(lines, ['README.md', 'notes/', 'notes-alias@']);
 });
 
 test('write then read round-trips a file under a nested path', async t => {
@@ -123,14 +125,25 @@ test('writes respect the byte limit and engine-owned folders', async t => {
 });
 
 test('a write leaves no temp file behind, even when it fails', async t => {
-  const root = await drive(t);
+  // The Drive sits inside a parent we can read, so a temp file built beside it
+  // is observable too: the root target used to land there before the EISDIR.
+  const parent = await mkdtemp(join(tmpdir(), 'captains-parent-'));
+  const root = join(parent, 'drive');
+  await mkdir(root);
+  t.after(() => rm(parent, { recursive: true, force: true }));
   const { write } = tools(root);
   await write.execute({ path: 'notes/ok.txt', content: 'ok' });
   // A non-empty directory at the target is what makes the rename fail *after*
   // the temp file exists, which is the cleanup path under test.
   await mkdir(join(root, 'blocked'), { recursive: true });
   await writeFile(join(root, 'blocked', 'occupied.txt'), 'occupied');
-  await assert.rejects(write.execute({ path: 'blocked', content: 'x' }));
+  // A target that resolves to the Drive root or an existing directory is
+  // refused before any I/O, with our own message rather than EISDIR from the
+  // rename: '' and '.' both resolve to the root.
+  for (const path of ['', '.', 'blocked']) {
+    await assert.rejects(write.execute({ path, content: 'x' }), /is a directory/, JSON.stringify(path));
+  }
+  assert.deepEqual(await readdir(parent), ['drive'], 'a temp file landed outside the Drive');
   const names = (await readdir(root, { recursive: true })).map(name => String(name));
   assert.deepEqual(names.filter(name => name.includes('.tmp')), []);
 });
@@ -187,4 +200,30 @@ test('the engine-owned predicate names the first segment, per platform', async (
   assert.equal(isEngineOwned('State', 'linux'), false);
   // Positive controls: a prefix is not the folder.
   for (const segment of ['notes', 'stateful', '', '.']) assert.equal(isEngineOwned(segment, 'darwin'), false, segment);
+});
+
+test('an already-created root agent is latched once, not twice', async t => {
+  const root = await drive(t);
+  const sections = [];
+  const tools = [];
+  const scope = {
+    systemPrompt: {
+      section(section) { sections.push(section); return () => {}; },
+      getSectionOrder: () => 10200,
+    },
+    tools: { register(definition) { tools.push(definition.name); return () => {}; } },
+    effect: fn => fn(),
+  };
+  const agent = { session: { header: { origin: 'root' } }, ctx: scope };
+  let created;
+  apply({
+    agents: { list: () => [agent] },
+    on(event, handler) { if (event === 'agent/created') created = handler; },
+  }, captain(root));
+  assert.equal(sections.length, 1, 'a root created before the listener settled was not latched');
+  assert.deepEqual([...tools].sort(), ['captain_drive_read', 'captain_drive_write']);
+  // The event arrives for the same agent afterwards: the latch must not double-register.
+  created({ agent });
+  assert.equal(sections.length, 1, 'the latch and the event double-registered the section');
+  assert.equal(tools.length, 2, 'the latch and the event doubled the Drive tools');
 });

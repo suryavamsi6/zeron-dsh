@@ -20,6 +20,7 @@ function record(config, origin = 'root') {
       getSectionOrder(name) { orders.push(name); return 10200; },
     },
     tools: { register(definition) { tools.push(definition.name); return () => {}; } },
+    agents: { list: () => [] },
     effect(fn) { return fn(); },
   };
   // The plugin registers on the root agent, not at load: hand it the same scope
@@ -82,7 +83,7 @@ test('only a captain registers one role section, under the persona suffix', () =
   assert.equal(typeof section.text, 'function');
   assert.equal(section.text(), captainPrompt(helm, helm.driveRoot));
   assert.deepEqual(orders, ['DEPLOYMENT_PERSONA_SUFFIX']);
-  assert.deepEqual(inject, ['systemPrompt', 'tools']);
+  assert.deepEqual(inject, ['systemPrompt', 'tools', 'agents']);
 });
 
 test('crew and the inert role register nothing', () => {

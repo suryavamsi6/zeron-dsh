@@ -264,7 +264,8 @@ const outside = /path is outside the Captain Drive/;
 const wrote = await write.execute({ path: 'notes/deep/a.txt', content: 'hello' });
 assert.ok(wrote.startsWith('wrote notes/deep/a.txt (') && wrote.endsWith(' bytes)'), wrote);
 assert.equal(await read.execute({ path: 'notes/deep/a.txt' }), 'hello');
-assert.equal(await read.execute({ path: '' }), 'notes/');
+// Links are listed with a trailing @, so an alias is visible in the Drive.
+assert.equal(await read.execute({ path: '' }), 'link@\\nnotes/');
 
 // Traversal, absolute paths and a symlink that leaves the Drive are rejected.
 await assert.rejects(read.execute({ path: 'link/secret.txt' }), outside);
@@ -280,11 +281,16 @@ await assert.rejects(write.execute({ path: 'reports/turn-1.md', content: '# repo
 for (const target of ['.//state/needs-you.json', './/reports/turn-1.md', '././/state/needs-you.json']) {
   await assert.rejects(write.execute({ path: target, content: 'x' }), /engine-owned/, target + ' slipped past the engine-owned guard');
 }
-// A symlink alias inside the Drive still names the engine's folder.
+// A symlink alias inside the Drive still names the engine's folder — for both
+// engine-owned folders, so a guard that special-cased one could not pass.
 await mkdir(join(drive, 'state'), { recursive: true });
+await mkdir(join(drive, 'reports'), { recursive: true });
 await symlink(join(drive, 'state'), join(drive, 'alias'));
-await assert.rejects(write.execute({ path: 'alias/needs-you.json', content: '{}' }), /engine-owned/,
-  'a symlink alias reached the engine-owned folder');
+await symlink(join(drive, 'reports'), join(drive, 'reports-alias'));
+for (const target of ['alias/needs-you.json', 'reports-alias/turn-2.md']) {
+  await assert.rejects(write.execute({ path: target, content: 'x' }), /engine-owned/,
+    target + ' reached an engine-owned folder through a symlink alias');
+}
 // Positive controls: a prefix is not the folder.
 for (const target of ['notes/x.md', 'stateful/x.md']) {
   await write.execute({ path: target, content: 'ok' });
