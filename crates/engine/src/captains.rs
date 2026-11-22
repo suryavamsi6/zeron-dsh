@@ -288,6 +288,11 @@ impl CaptainsStore {
         &self,
         change: impl FnOnce(&mut Registry) -> Result<(), String>,
     ) -> Result<(), String> {
+        // Falsifiability anchor: the racing case substitutes this read for the
+        // load under the lock (`let mut fresh = _observed;`) and must then see
+        // two `Ok` callers. Test-only, so the release path takes no pre-lock read.
+        #[cfg(test)]
+        let _observed = self.snapshot();
         #[cfg(test)]
         test_seam::arrive();
         let _guard = MUTATION.lock().unwrap_or_else(PoisonError::into_inner);
