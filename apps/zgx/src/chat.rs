@@ -6812,6 +6812,7 @@ fn session_value(chats: &Chats, open: &Open, offline: bool) -> Value {
         ("fast", Value::Bool(fast)),
         ("options", options),
         ("access", Value::from(access)),
+        ("readOnly", Value::from(!chat["imported"].is_null())),
         ("plan", Value::Bool(config["plan"].as_bool() == Some(true))),
         ("running", Value::Bool(live)),
         // Its agent takes a word mid-turn (a queued row's action is Steer,

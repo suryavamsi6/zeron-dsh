@@ -159,6 +159,11 @@ pub mod methods {
     pub const DEMOTE_CAPTAIN: &str = "DemoteCaptain";
     pub const ADD_CREW: &str = "AddCrew";
     pub const REMOVE_CREW: &str = "RemoveCrew";
+    /// Import conversations from a DeepSeek v3 chat export (.zip) that lives on
+    /// this device. Device-local only ([`local_only`]): the path is this
+    /// machine's, and the import writes this device's own chats.
+    /// `{path}` → `{imported, alreadyPresent, chats}`.
+    pub const IMPORT_DEEPSEEK_CHATS: &str = "ImportDeepSeekChats";
     /// DSH's token meter, read where it lives: the sessions it records ({} ->
     /// `{items: [{sessionId, updatedAt, projections}]}`, the per-session summary
     /// that carries `tokenUsage`) and one session's exact projections
@@ -900,6 +905,8 @@ pub fn local_only(method: &str) -> bool {
             | methods::SCHEDULE_SAVE
             | methods::SCHEDULE_DELETE
             | methods::SCHEDULE_RUN_NOW
+            // A device-local .zip path read into this device's own chats.
+            | methods::IMPORT_DEEPSEEK_CHATS
             // The person's own MCP servers: one file on this device, read
             // and replaced whole by this device's own window alone.
             | methods::MCP_SERVERS

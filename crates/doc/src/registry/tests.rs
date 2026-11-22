@@ -281,6 +281,7 @@ fn chat(id: &str, device_id: &str) -> Chat {
         last_seen_at: None,
         room_gen: None,
         sleep: None,
+        imported: None,
     }
 }
 
@@ -453,6 +454,32 @@ fn rows_round_trip_and_upsert_refreshes() {
     assert_eq!(chats.len(), 1);
     assert_eq!(chats[0].title, None);
     assert_eq!(chats[0].last_message_preview.as_deref(), Some("hello"));
+}
+
+#[test]
+fn imported_marker_survives_the_registry_round_trip() {
+    let mut doc = RegistryDoc::new("dev-a");
+    let mut row = chat("chat-1", "dev-a");
+    row.imported = Some(zeron_proto::ImportedChat {
+        source: "deepseek-v3".into(),
+        source_id: "conv-1".into(),
+        imported_at: ts(4_000),
+    });
+    doc.upsert_chat(&row).unwrap();
+    let read = doc.chat("chat-1").unwrap().unwrap();
+    let marker = read.imported.as_ref().expect("the marker persisted");
+    assert_eq!(marker.source, "deepseek-v3");
+    assert_eq!(marker.source_id, "conv-1");
+
+    // A later full-row upsert (the read-modify-write `set_chat_archived`
+    // callers do) keeps the marker its caller carried back.
+    let mut again = read;
+    again.archived = true;
+    doc.upsert_chat(&again).unwrap();
+    assert_eq!(
+        doc.chat("chat-1").unwrap().unwrap().imported,
+        again.imported,
+    );
 }
 
 #[test]

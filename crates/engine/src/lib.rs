@@ -49,6 +49,7 @@ pub mod commands;
 pub mod commit_credit;
 pub mod credentials;
 pub mod deferred;
+pub mod deepseek_import;
 pub mod desktop_notify;
 pub mod device_stats;
 pub mod diff_sync;

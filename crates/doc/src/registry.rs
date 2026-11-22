@@ -1554,6 +1554,14 @@ impl RegistryDoc {
                     .transpose()?
                     .unwrap_or(Value::Null),
             ),
+            (
+                "imported",
+                chat.imported
+                    .as_ref()
+                    .map(serde_json::to_value)
+                    .transpose()?
+                    .unwrap_or(Value::Null),
+            ),
             ("config", config),
             (
                 "lastMessagePreview",

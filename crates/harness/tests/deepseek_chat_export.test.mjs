@@ -102,6 +102,21 @@ test('drops a content-filtered turn', () => {
   assert.deepEqual(readExport(zip)[0].turns, [{ role: 'user', text: 'question' }]);
 });
 
+test("the driver's ceiling is honoured", () => {
+  const base = Date.parse('2026-11-01T00:00:00Z');
+  const index = [], sessions = [];
+  for (let i = 1001; i >= 1; i--) {
+    const id = `s${String(i).padStart(4, '0')}`;
+    index.push({ id, inserted_at: '2026-11-01T00:00:00Z', updated_at: new Date(base + i * 1000).toISOString() });
+    sessions.push({ name: `chat_sessions/${id}.json`, data: session(id, null, 1, [
+      msg(1, null, 'USER', [{ type: 'REQUEST', content: 'q' }]),
+    ]) });
+  }
+  const zip = exportZip(3, index, sessions);
+  assert.equal(readExport(zip).length, 1000);
+  assert.equal(readExport(zip, { maxSessions: 10_000 }).length, 1001);
+});
+
 test('rejects other format versions', () => {
   const zip = exportZip(4, [], []);
   assert.throws(() => readExport(zip), error =>
