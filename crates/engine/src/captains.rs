@@ -6,6 +6,7 @@
 // Nothing calls in yet: this commit lands the API and its tests only.
 #![allow(dead_code)]
 
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -109,7 +110,8 @@ impl Registry {
     }
 
     /// Promote `chat_id` to Captain under `name`. A chat that is already a
-    /// Captain, or crews for one, is refused.
+    /// Captain, or crews for one, is refused. Promoting an archived Captain
+    /// reactivates its record and keeps only the crew that can still serve it.
     pub fn promote(&mut self, chat_id: &str, name: &str) -> Result<(), String> {
         if self.is_captain(chat_id) {
             return Err(format!("{chat_id} is already a captain"));
@@ -120,13 +122,29 @@ impl Registry {
                 owner.chat_id
             ));
         }
+        // Reactivating an archived record makes its kept crew live again, so it
+        // is reconciled first: a member that has since become a live Captain,
+        // or joined another live crew, can no longer crew for this one and is
+        // dropped. Refusing the reactivation instead would be unreachable
+        // through the public API (remove_crew only touches live Captains), so
+        // the caller could never clear the stale member first.
+        let unavailable: HashSet<String> = self
+            .captains
+            .iter()
+            .filter(|captain| !captain.archived)
+            .flat_map(|captain| {
+                std::iter::once(captain.chat_id.clone()).chain(captain.crew.iter().cloned())
+            })
+            .collect();
         match self
             .captains
             .iter_mut()
             .find(|captain| captain.chat_id == chat_id)
         {
-            // An archived record is reactivated in place, crew list intact.
+            // An archived record is reactivated in place, with whatever of its
+            // crew is still free.
             Some(captain) => {
+                captain.crew.retain(|member| !unavailable.contains(member));
                 captain.name = name.to_string();
                 captain.created_at = Utc::now();
                 captain.archived = false;
@@ -219,7 +237,10 @@ impl Registry {
 }
 
 /// `<deepseek_home>/captains/<captain_id>` — where a Captain's Drive
-/// directory belongs. Pure: computes the path; the plugin creates it.
+/// directory belongs. Pure: computes the path; the plugin creates it. The id
+/// is used as given: validating a request id against the live registry
+/// belongs at the RPC boundary (SUR-82) — this module's ids are engine-issued
+/// chat ids.
 pub fn drive_dir(deepseek_home: &Path, captain_id: &str) -> PathBuf {
     deepseek_home.join("captains").join(captain_id)
 }
@@ -251,7 +272,8 @@ impl CaptainsStore {
         })
     }
 
-    /// A clone of the last committed registry.
+    /// A clone of this store's last committed registry (each store keeps its
+    /// own; only the write lock is process-wide).
     pub fn snapshot(&self) -> Registry {
         self.snapshot
             .lock()
@@ -259,17 +281,13 @@ impl CaptainsStore {
             .clone()
     }
 
-    /// One read/modify/write round: observe the published snapshot, take the
-    /// process-wide lock, re-read the file fresh under it, apply the rules,
-    /// save atomically, and only then publish.
+    /// One read/modify/write round: take the process-wide lock, re-read the
+    /// file fresh under it, apply the rules, save atomically, and only then
+    /// publish.
     fn mutate(
         &self,
         change: impl FnOnce(&mut Registry) -> Result<(), String>,
     ) -> Result<(), String> {
-        // Read the published snapshot before the lock, but treat it as
-        // information only: the rules below are applied to the fresh read under
-        // the lock, so the second writer sees the first one's assignment.
-        let _observed = self.snapshot();
         #[cfg(test)]
         test_seam::arrive();
         let _guard = MUTATION.lock().unwrap_or_else(PoisonError::into_inner);
@@ -473,6 +491,136 @@ mod tests {
         assert!(captain.archived, "a demoted Captain stays on record");
         assert_eq!(registry.run_role("cap"), RunRole::None);
         assert_eq!(registry.run_role("crew-1"), RunRole::None);
+    }
+
+    /// The rules that hold for every live registry: no live Captain is in a
+    /// live crew, and no chat crews for two live Captains.
+    fn assert_live_rules_hold(registry: &Registry) {
+        let live: Vec<&Captain> = registry
+            .captains()
+            .iter()
+            .filter(|captain| !captain.archived)
+            .collect();
+        let captains: Vec<&str> = live.iter().map(|captain| captain.chat_id.as_str()).collect();
+        let mut crewed: Vec<&str> = Vec::new();
+        for captain in &live {
+            for member in &captain.crew {
+                assert!(
+                    !captains.contains(&member.as_str()),
+                    "a live Captain is crew: {member} crews for {}",
+                    captain.chat_id
+                );
+                assert!(
+                    !crewed.contains(&member.as_str()),
+                    "a chat is in two live crews: {member}"
+                );
+                crewed.push(member);
+            }
+        }
+    }
+
+    #[test]
+    fn promoting_an_archived_captain_drops_a_member_that_became_a_captain() {
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        registry.add_crew("cap-a", "chat-x").unwrap();
+        registry.demote("cap-a").unwrap();
+        // A demoted Captain keeps its crew on record, and a chat whose captain
+        // is archived is free: chat-x can become a Captain itself.
+        registry.promote("chat-x", "xavier").unwrap();
+        registry.promote("cap-a", "ada again").unwrap();
+
+        let reactivated = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == "cap-a")
+            .unwrap();
+        assert!(!reactivated.archived);
+        assert!(
+            reactivated.crew.is_empty(),
+            "a live Captain cannot crew: {:?}",
+            reactivated.crew
+        );
+        assert_live_rules_hold(&registry);
+    }
+
+    #[test]
+    fn promoting_an_archived_captain_drops_a_member_of_another_crew() {
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        registry.add_crew("cap-a", "chat-x").unwrap();
+        registry.demote("cap-a").unwrap();
+        // With cap-a archived, chat-x is in nobody's live crew, so another
+        // Captain can take it.
+        registry.promote("cap-b", "grace").unwrap();
+        registry.add_crew("cap-b", "chat-x").unwrap();
+        registry.promote("cap-a", "ada again").unwrap();
+
+        let reactivated = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == "cap-a")
+            .unwrap();
+        assert!(
+            reactivated.crew.is_empty(),
+            "chat-x crews for cap-b: {:?}",
+            reactivated.crew
+        );
+        assert_live_rules_hold(&registry);
+    }
+
+    #[test]
+    fn promoting_an_archived_captain_keeps_a_crew_that_is_still_free() {
+        let mut registry = Registry::default();
+        registry.promote("cap-a", "ada").unwrap();
+        registry.add_crew("cap-a", "chat-x").unwrap();
+        registry.demote("cap-a").unwrap();
+        registry.promote("cap-a", "ada again").unwrap();
+
+        let reactivated = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == "cap-a")
+            .unwrap();
+        assert_eq!(reactivated.crew, vec!["chat-x".to_string()]);
+        assert_eq!(reactivated.name, "ada again");
+        assert_live_rules_hold(&registry);
+    }
+
+    #[test]
+    fn remove_crew_drops_a_member_and_refuses_a_stranger() {
+        let mut registry = Registry::default();
+        registry.promote("cap", "ada").unwrap();
+        registry.add_crew("cap", "chat-x").unwrap();
+        registry.add_crew("cap", "chat-y").unwrap();
+
+        registry.remove_crew("cap", "chat-x").unwrap();
+        assert_eq!(
+            registry
+                .captains()
+                .iter()
+                .find(|captain| captain.chat_id == "cap")
+                .unwrap()
+                .crew,
+            vec!["chat-y".to_string()]
+        );
+
+        let err = registry.remove_crew("cap", "chat-x").unwrap_err();
+        assert!(err.contains("is not in that crew"), "{err}");
+        let err = registry.remove_crew("nobody", "chat-y").unwrap_err();
+        assert!(err.contains("no such captain"), "{err}");
+    }
+
+    #[test]
+    fn a_store_over_a_missing_file_starts_empty_and_promotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        assert!(store.snapshot().captains().is_empty());
+
+        store.promote("chat-1", "ada").unwrap();
+        let reopened = Registry::load(dir.path()).unwrap();
+        assert!(reopened.is_captain("chat-1"));
+        assert_eq!(store.snapshot(), reopened);
     }
 
     #[test]
