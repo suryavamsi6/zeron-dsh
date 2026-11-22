@@ -7,6 +7,7 @@
 //! list survives, with the outcome saying so.
 
 use chrono::{DateTime, Utc};
+use std::io::Write;
 use std::path::Path;
 use zeron_proto::DoneStatus;
 
@@ -43,8 +44,41 @@ pub struct Recorded {
 /// The `## Needs you` bullets of `markdown`: `-`, `*` and `N.` list items,
 /// trimmed, empties dropped, capped. Harmless on a file with no such section.
 pub fn parse_needs_you(markdown: &str) -> Vec<String> {
-    let _ = markdown;
-    Vec::new()
+    let mut items = Vec::new();
+    let mut in_section = false;
+    for line in markdown.lines() {
+        let trimmed = line.trim();
+        if !in_section {
+            in_section = trimmed.eq_ignore_ascii_case("## needs you");
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            break;
+        }
+        let item = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+            .or_else(|| numbered_item(trimmed))
+            .map(str::trim)
+            .filter(|item| !item.is_empty());
+        if let Some(item) = item {
+            items.push(item.to_string());
+            if items.len() == CAP {
+                break;
+            }
+        }
+    }
+    items
+}
+
+/// The rest of a `N. ` list marker (`"1. ask"` → `" ask"`), or `None` when
+/// `line` is not one. The digits must run to the dot and a space must follow.
+fn numbered_item(line: &str) -> Option<&str> {
+    let (digits, rest) = line.split_once('.')?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    rest.strip_prefix(' ')
 }
 
 /// Snapshot `drive`'s `DIGEST.md` into `<drive>/state/needs-you.json`.
@@ -52,11 +86,66 @@ pub fn parse_needs_you(markdown: &str) -> Vec<String> {
 /// A missing `DIGEST.md` is an empty list, not an error. Identical items rewrite
 /// nothing and keep the previous `updatedAt`; a changed list lands atomically.
 pub fn record_needs_you(drive: &Path, now: DateTime<Utc>) -> Result<Recorded, String> {
-    let _ = (drive, now);
+    let digest_path = drive.join("DIGEST.md");
+    let digest = match std::fs::read_to_string(&digest_path) {
+        Ok(digest) => digest,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("cannot read {}: {error}", digest_path.display())),
+    };
+    let items = parse_needs_you(&digest);
+
+    let state = drive.join("state");
+    let path = state.join(FILE);
+    // A stored list identical to the parsed one keeps its file — `updatedAt`
+    // and mtime both stay the last write's. A corrupt file is not a stored
+    // list at all: it is rewritten below.
+    if let Ok(Some(stored)) = stored_items(&path)
+        && stored == items
+    {
+        return Ok(Recorded {
+            outcome: Outcome::Unchanged,
+            items: items.len(),
+        });
+    }
+
+    std::fs::create_dir_all(&state)
+        .map_err(|error| format!("cannot create {}: {error}", state.display()))?;
+    let mut temp = tempfile::NamedTempFile::new_in(&state)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let body = format!(
+        "{{\"version\":{VERSION},\"updatedAt\":\"{}\",\"items\":{}}}",
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        serde_json::to_string(&items).expect("a string list serialises"),
+    );
+    temp.write_all(body.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    temp.persist(&path)
+        .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
     Ok(Recorded {
-        outcome: Outcome::Unchanged,
-        items: 0,
+        outcome: Outcome::Wrote,
+        items: items.len(),
     })
+}
+
+/// The items `path` stores: `Ok(None)` when the file is absent, `Err` on a
+/// read or parse failure.
+fn stored_items(path: &Path) -> Result<Option<Vec<String>>, String> {
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        items: Vec<String>,
+    }
+
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    serde_json::from_str::<Stored>(&raw)
+        .map(|stored| Some(stored.items))
+        .map_err(|error| format!("cannot parse {}: {error}", path.display()))
 }
 
 /// The turn-end rule: a completed turn snapshots the digest; an errored or
@@ -66,9 +155,16 @@ pub fn record_turn_end(
     status: DoneStatus,
     now: DateTime<Utc>,
 ) -> Result<Recorded, String> {
-    // RED SCAFFOLD: the failed-turn branch is the implementation step.
-    let _ = status;
-    record_needs_you(drive, now)
+    match status {
+        DoneStatus::Completed => record_needs_you(drive, now),
+        // The digest mid-turn is not a good list: nothing is written and the
+        // file already there — the last good list — is reported, not touched.
+        DoneStatus::Errored | DoneStatus::Interrupted => Ok(Recorded {
+            outcome: Outcome::KeptLastGood,
+            items: stored_items(&drive.join("state").join(FILE))?
+                .map_or(0, |items| items.len()),
+        }),
+    }
 }
 
 #[cfg(test)]
