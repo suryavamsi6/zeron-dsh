@@ -20,13 +20,14 @@
 //! the warm path (no new `RunRequest`) — reuse itself is correct; reuse across
 //! a role change is the defect.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
 use futures::stream::BoxStream;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
@@ -37,14 +38,65 @@ use zeron_proto::{
 };
 
 const CHAT: &str = "chat-captain-role";
+const CHAT_PROMOTE: &str = "chat-sur201-promote";
+const CHAT_DEMOTE: &str = "chat-sur201-demote";
+const CHAT_SIDEBAR: &str = "chat-sur201-sidebar";
 const DEVICE: &str = "dev-captains";
 const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
+
+/// A one-turn hold between an answer's `TextDelta` and its `Done`, so a test
+/// can move the roster while the turn is still in flight. `watch`, not
+/// `Notify`: a `release` that lands before `pass` awaits must still be
+/// observed — a watch receiver reads the current value, not only a wake-up.
+struct Gate {
+    /// `true` while the next `pass` should wait; `pass` takes the arming.
+    armed: AtomicBool,
+    /// `false` holds the armed turn, `true` lets it finish. Starts released.
+    released: watch::Sender<bool>,
+}
+
+impl Gate {
+    /// Disarmed and released: `pass` is a no-op until `hold`.
+    fn new() -> Arc<Self> {
+        let (released, _) = watch::channel(true);
+        Arc::new(Self {
+            armed: AtomicBool::new(false),
+            released,
+        })
+    }
+
+    /// Arm for the next dispatched turn: that `pass` waits, later ones don't.
+    /// `send_replace`, not `send`: `send` discards the value when no receiver
+    /// is currently subscribed, which is exactly the case `pass` creates.
+    fn hold(&self) {
+        self.armed.store(true, Ordering::SeqCst);
+        self.released.send_replace(false);
+    }
+
+    /// Let a held turn finish. Idempotent.
+    fn release(&self) {
+        self.released.send_replace(true);
+    }
+
+    /// `Agent::run` calls this after the answer `TextDelta`, before `Done`.
+    /// Disarmed returns at once — the stream stays byte-identical to an
+    /// ungated run; armed consumes the arming and parks until `release`,
+    /// including a `release` that already landed.
+    async fn pass(&self) {
+        if !self.armed.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let mut rx = self.released.subscribe();
+        let _ = rx.wait_for(|released| *released).await;
+    }
+}
 
 /// One persistent agent process per `run()`: answers the launch prompt, then
 /// parks warm and answers every steer the mailbox delivers. Reports DeepSeek
 /// so `PinRunEnvironment` stamps the run with the chat's Captain role.
 struct Agent {
     runs: Arc<Mutex<Vec<RunRequest>>>,
+    gate: Arc<Gate>,
 }
 
 fn done(status: DoneStatus) -> AgentEvent {
@@ -100,6 +152,7 @@ impl Harness for Agent {
         mut controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.runs.lock().unwrap().push(request.clone());
+        let gate = self.gate.clone();
         let (tx, rx) = mpsc::channel::<Result<AgentEvent, HarnessError>>(64);
         tokio::spawn(async move {
             let send = |event: AgentEvent| {
@@ -119,8 +172,11 @@ impl Harness for Agent {
                 text: format!("answered: {}", request.prompt),
             })
             .await
-                || !send(done(DoneStatus::Completed)).await
             {
+                return;
+            }
+            gate.pass().await;
+            if !send(done(DoneStatus::Completed)).await {
                 return;
             }
             // Parked between turns: each mailbox steer is a new turn.
@@ -162,6 +218,7 @@ struct Rig {
     _tmp: tempfile::TempDir,
     dir: std::path::PathBuf,
     runs: Arc<Mutex<Vec<RunRequest>>>,
+    gate: Arc<Gate>,
 }
 
 impl Rig {
@@ -177,6 +234,7 @@ impl Rig {
             _tmp: tmp,
             dir,
             runs: Arc::default(),
+            gate: Gate::new(),
         }
     }
 
@@ -185,6 +243,7 @@ impl Rig {
         let registry = HarnessRegistry::new();
         registry.register(Arc::new(Agent {
             runs: self.runs.clone(),
+            gate: self.gate.clone(),
         }));
         let core = EngineCore::assemble(&self.dir, Arc::new(registry), HarnessId::DeepSeek, None)
             .expect("engine core assembles");
@@ -197,21 +256,25 @@ impl Rig {
     }
 }
 
-async fn create_chat(core: &EngineCore) {
+async fn create_chat_with(core: &EngineCore, chat: &str) {
     let client = zeron_rpc::memory_client(core.rpc_service());
     let _ = client
         .call(
             zeron_rpc::methods::MUTATE,
-            serde_json::json!({ "op": "createChat", "chatId": CHAT, "deviceId": core.device_id }),
+            serde_json::json!({ "op": "createChat", "chatId": chat, "deviceId": core.device_id }),
         )
         .await;
-    let _ = core.workspace.rename_chat(CHAT, "Pre-titled");
+    let _ = core.workspace.rename_chat(chat, "Pre-titled");
 }
 
-fn send(core: &EngineCore, id: &str, prompt: &str) {
+async fn create_chat(core: &EngineCore) {
+    create_chat_with(core, CHAT).await;
+}
+
+fn send_to(core: &EngineCore, chat: &str, id: &str, prompt: &str) {
     core.doc_host
         .queue_command(
-            CHAT,
+            chat,
             SessionCommandPayload::Run {
                 request: RunRequest {
                     mcp: None,
@@ -237,11 +300,15 @@ fn send(core: &EngineCore, id: &str, prompt: &str) {
         .expect("queue run command");
 }
 
+fn send(core: &EngineCore, id: &str, prompt: &str) {
+    send_to(core, CHAT, id, prompt);
+}
+
 /// The reply for `prompt` folded complete into the doc.
-fn answered(core: &EngineCore, prompt: &str) -> bool {
+fn answered_in(core: &EngineCore, chat: &str, prompt: &str) -> bool {
     let text = format!("answered: {prompt}");
     core.doc_host
-        .open(CHAT)
+        .open(chat)
         .ok()
         .and_then(|h| h.doc().read_entries().ok())
         .unwrap_or_default()
@@ -255,11 +322,19 @@ fn answered(core: &EngineCore, prompt: &str) -> bool {
         })
 }
 
+fn answered(core: &EngineCore, prompt: &str) -> bool {
+    answered_in(core, CHAT, prompt)
+}
+
 /// The turn is over and the runtime sits warm, mailbox open — not in flight.
-fn parked(core: &EngineCore) -> bool {
+fn parked_in(core: &EngineCore, chat: &str) -> bool {
     core.sessions
-        .session_status(CHAT)
+        .session_status(chat)
         .is_some_and(|s| s.status == SessionStatus::Idle)
+}
+
+fn parked(core: &EngineCore) -> bool {
+    parked_in(core, CHAT)
 }
 
 async fn wait_for(mut what: impl FnMut() -> bool, label: &str) {
@@ -292,6 +367,73 @@ async fn wait_roster(
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
+}
+
+/// Where a chat's turn-end write lands, mirroring
+/// `AgentAccountsConfig::detect` (`deepseek_home`) + `captains::drive_dir` +
+/// `needs_you::FILE` exactly: `<deepseek_home>/captains/<chat>/state/needs-you.json`.
+fn needs_you_path(data_dir: &std::path::Path, chat: &str) -> std::path::PathBuf {
+    let home = std::env::var_os("ZERON_DEEPSEEK_HOME")
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("deepseek"));
+    home.join("captains").join(chat).join("state").join("needs-you.json")
+}
+
+/// `needs-you.json` is written off the event loop (`spawn_blocking` in
+/// `captain_turn_ended`), so `parked` alone cannot order against it. Poll for
+/// the file up to `within` and report what was seen — the caller's assertion,
+/// not this poll, carries the verdict.
+async fn file_lands(path: &std::path::Path, within: Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while !path.exists() && std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(15)).await;
+    }
+    path.exists()
+}
+
+/// One `captains.json` row, serialized exactly as `captains::Captain`
+/// (`rename_all = "camelCase"`): the shape `Registry::load` parses.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RosterRow {
+    chat_id: String,
+    name: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    archived: bool,
+    crew: Vec<String>,
+}
+
+/// Read `dir/captains.json` the way `Registry::load` does: parse it back into
+/// the same row shape, so a file the engine's loader would refuse fails the
+/// test at the read, not inside the turn-end writer.
+fn read_roster(dir: &std::path::Path) -> Vec<RosterRow> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RegistryFile {
+        captains: Vec<RosterRow>,
+    }
+    let raw = std::fs::read_to_string(dir.join("captains.json")).expect("captains.json reads");
+    serde_json::from_str::<RegistryFile>(&raw)
+        .expect("captains.json parses as a Captains registry")
+        .captains
+}
+
+/// Replace `dir/captains.json` with `rows` — a mid-turn roster move. The
+/// roster RPCs (`CaptainsRpc::row`) refuse any chat with a turn in flight, so
+/// the only way a turn can straddle a roster change is for the file itself to
+/// change under it: exactly what `captain_turn_ended` loads at `Done`.
+fn write_roster(dir: &std::path::Path, captains: Vec<RosterRow>) {
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct RegistryFile {
+        captains: Vec<RosterRow>,
+    }
+    std::fs::write(
+        dir.join("captains.json"),
+        serde_json::to_string_pretty(&RegistryFile { captains }).unwrap(),
+    )
+    .expect("captains.json writes");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -446,6 +588,211 @@ async fn a_captain_role_change_reaches_a_parked_runtime() {
             runs[2].env.keys().collect::<Vec<_>>()
         );
     }
+
+    core.shutdown().await;
+}
+
+/// SUR-201: the Needs You file must describe the role the turn was DISPATCHED
+/// with. Promoting the chat while its ordinary turn is in flight must not
+/// turn that turn into a Captain's — on current code `captain_turn_ended`
+/// re-reads the roster at `Done` and writes the file anyway.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_promote_during_an_ordinary_turn_writes_no_needs_you() {
+    let rig = Rig::new();
+    let core = rig.boot();
+    create_chat_with(&core, CHAT_PROMOTE).await;
+
+    // The gate parks the turn between its answer and its `Done`; the promote
+    // lands while the turn is still in flight.
+    rig.gate.hold();
+    send_to(&core, CHAT_PROMOTE, "m1", "held");
+    wait_for(
+        || rig.recorded().len() == 1,
+        "the held run to be dispatched",
+    )
+    .await;
+
+    // The roster RPCs refuse a chat with a turn in flight
+    // (`CaptainsRpc::row`), so the mid-turn promote lands on `captains.json`
+    // itself — the file `captain_turn_ended` loads when the `Done` is
+    // published. `read_roster` parses it back as the engine's loader would.
+    write_roster(
+        &rig.dir,
+        vec![RosterRow {
+            chat_id: CHAT_PROMOTE.into(),
+            name: "Helm".into(),
+            created_at: chrono::Utc::now(),
+            archived: false,
+            crew: Vec::new(),
+        }],
+    );
+    assert!(
+        read_roster(&rig.dir)
+            .iter()
+            .any(|row| row.chat_id == CHAT_PROMOTE && row.name == "Helm" && !row.archived),
+        "the mid-turn promote must read back as a live Captain"
+    );
+
+    rig.gate.release();
+    wait_for(
+        || answered_in(&core, CHAT_PROMOTE, "held") && parked_in(&core, CHAT_PROMOTE),
+        "the held turn",
+    )
+    .await;
+
+    // A turn-end write, if there is one, lands off the event loop: give a
+    // stray write a short window before asserting absence.
+    let path = needs_you_path(&rig.dir, CHAT_PROMOTE);
+    file_lands(&path, Duration::from_secs(3)).await;
+    assert!(
+        !path.exists(),
+        "a turn dispatched as an ordinary chat must not write a Needs You file when the \
+         roster promotes the chat mid-turn: the file at {path:?} was written from the \
+         turn-end roster instead of the role the turn was dispatched with"
+    );
+
+    core.shutdown().await;
+}
+
+/// The mirror image: a turn dispatched AS a Captain keeps its file even when
+/// the demote lands mid-turn. On current code the turn-end roster read finds
+/// the archived row and writes nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_demote_during_a_captain_turn_still_writes_the_file() {
+    let rig = Rig::new();
+    let core = rig.boot();
+    create_chat_with(&core, CHAT_DEMOTE).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    client
+        .call(
+            zeron_rpc::methods::PROMOTE_CAPTAIN,
+            serde_json::json!({ "chatId": CHAT_DEMOTE, "name": "Helm" }),
+        )
+        .await
+        .expect("PromoteCaptain");
+    wait_roster(&client, "the promote readback", |roster| {
+        roster["captains"].as_array().is_some_and(|captains| {
+            captains.iter().any(|c| {
+                c["chatId"] == CHAT_DEMOTE && c["name"] == "Helm" && c["archived"] == false
+            })
+        })
+    })
+    .await;
+
+    rig.gate.hold();
+    send_to(&core, CHAT_DEMOTE, "m2", "held");
+    wait_for(
+        || rig.recorded().len() == 1,
+        "the held run to be dispatched",
+    )
+    .await;
+
+    // The same in-flight gate bars the demote RPC too: a real demote keeps
+    // the record and crew and flips `archived`, so land that on
+    // `captains.json` — the file `captain_turn_ended` loads at `Done`.
+    let mut roster = read_roster(&rig.dir);
+    roster
+        .iter_mut()
+        .find(|row| row.chat_id == CHAT_DEMOTE)
+        .expect("the promoted row is on disk")
+        .archived = true;
+    write_roster(&rig.dir, roster);
+    assert!(
+        read_roster(&rig.dir)
+            .iter()
+            .any(|row| row.chat_id == CHAT_DEMOTE && row.archived),
+        "the mid-turn demote must read back as an archived Captain"
+    );
+
+    rig.gate.release();
+    wait_for(
+        || answered_in(&core, CHAT_DEMOTE, "held") && parked_in(&core, CHAT_DEMOTE),
+        "the held turn",
+    )
+    .await;
+
+    let path = needs_you_path(&rig.dir, CHAT_DEMOTE);
+    file_lands(&path, Duration::from_secs(15)).await;
+    assert!(
+        path.exists(),
+        "a turn dispatched as a Captain must still write its Needs You file when the \
+         roster demotes the chat mid-turn; nothing was written at {path:?} — the writer \
+         keyed off the turn-end roster instead of the dispatch-time role"
+    );
+
+    core.shutdown().await;
+}
+
+/// Guard: a sidebar archive (`setChatArchived`) is a view concern — it moves
+/// the workspace row, not the roster — so a live Captain's turn still writes
+/// its file. The archive must land mid-turn: `queue_command` unarchives the
+/// row for any message-bearing send (`unarchive_on_send`), so archiving first
+/// would silently test an unarchived chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_sidebar_archived_captain_turn_still_writes_the_file() {
+    let rig = Rig::new();
+    let core = rig.boot();
+    create_chat_with(&core, CHAT_SIDEBAR).await;
+    let client = zeron_rpc::memory_client(core.rpc_service());
+
+    client
+        .call(
+            zeron_rpc::methods::PROMOTE_CAPTAIN,
+            serde_json::json!({ "chatId": CHAT_SIDEBAR, "name": "Helm" }),
+        )
+        .await
+        .expect("PromoteCaptain");
+    wait_roster(&client, "the promote readback", |roster| {
+        roster["captains"].as_array().is_some_and(|captains| {
+            captains.iter().any(|c| {
+                c["chatId"] == CHAT_SIDEBAR && c["name"] == "Helm" && c["archived"] == false
+            })
+        })
+    })
+    .await;
+
+    rig.gate.hold();
+    send_to(&core, CHAT_SIDEBAR, "m3", "still here");
+    wait_for(
+        || rig.recorded().len() == 1,
+        "the held run to be dispatched",
+    )
+    .await;
+
+    // While the turn is held, sidebar-archive the chat on the workspace row.
+    client.call(zeron_rpc::methods::MUTATE, serde_json::json!({
+        "op": "setChatArchived", "chatId": CHAT_SIDEBAR, "archived": true
+    })).await.expect("setChatArchived");
+
+    // A sidebar archive is a view concern: the roster row must not move.
+    let roster = client
+        .call(zeron_rpc::methods::CAPTAINS, serde_json::json!({}))
+        .await
+        .expect("the Captains roster reads");
+    assert!(
+        roster["captains"].as_array().is_some_and(|captains| {
+            captains
+                .iter()
+                .any(|c| c["chatId"] == CHAT_SIDEBAR && c["archived"] == false)
+        }),
+        "a sidebar archive must not change the roster; the Captain row read back archived"
+    );
+
+    rig.gate.release();
+    wait_for(
+        || answered_in(&core, CHAT_SIDEBAR, "still here") && parked_in(&core, CHAT_SIDEBAR),
+        "the held turn",
+    )
+    .await;
+
+    let path = needs_you_path(&rig.dir, CHAT_SIDEBAR);
+    file_lands(&path, Duration::from_secs(15)).await;
+    assert!(
+        path.exists(),
+        "a sidebar archive is a view concern: the Captain's turn must still write its \
+         Needs You file, and nothing was written at {path:?}"
+    );
 
     core.shutdown().await;
 }

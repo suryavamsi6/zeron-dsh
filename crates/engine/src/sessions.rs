@@ -453,6 +453,13 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// The env key a DeepSeek run's Captain role stamp rides under
+/// ([`crate::captains::captains_env`]). `stamp_captain_role` writes it at
+/// dispatch and `dispatch_captain_stamp` reads it back at turn end — one
+/// literal for both, so the turn-end decision is the role the turn was
+/// dispatched with, never the roster as it then stands.
+const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
+
 #[derive(Clone)]
 pub struct SessionsEngine {
     inner: Arc<Inner>,
@@ -525,11 +532,13 @@ impl SessionsEngine {
         let _ = self.inner.captains_home.set(path);
     }
 
-    /// The per-run turn end: a live Captain's completed turn snapshots its
-    /// Digest; a failed or interrupted turn keeps the last good list. Ordinary
-    /// chats, crew chats and archived Captains write nothing.
-    fn captain_turn_ended(&self, chat_id: &str, status: DoneStatus) -> bool {
-        self.inner.captain_turn_ended(chat_id, status)
+    /// The per-run turn end: a turn dispatched as a Captain snapshots its
+    /// Digest on completion; a failed or interrupted turn keeps the last good
+    /// list. Ordinary and crew dispatches write nothing. `stamp` is the
+    /// dispatch-time [`CAPTAINS_ENV`] value — the decision is that stamp, so
+    /// the roster is never consulted at turn end.
+    fn captain_turn_ended(&self, chat_id: &str, stamp: Option<&str>, status: DoneStatus) -> bool {
+        self.inner.captain_turn_ended(chat_id, stamp, status)
     }
 
     /// Record the loopback IPC port this engine serves. Runs started after
@@ -1214,7 +1223,6 @@ impl SessionsEngine {
     /// unstamped, and a re-dispatch still holding a stale stamp drops it
     /// rather than keeping the old role.
     fn stamp_captain_role(&self, chat_id: &str, harness_id: HarnessId, request: &mut RunRequest) {
-        const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
         if harness_id != HarnessId::DeepSeek {
             return;
         }
@@ -2868,31 +2876,47 @@ impl Inner {
             .collect()
     }
 
-    /// The per-run turn end the needs-you snapshot hangs off: a live Captain's
-    /// completed turn snapshots its Digest, a failed or interrupted turn keeps
-    /// the last good list ([`crate::needs_you::record_turn_end`]). `false` —
-    /// nothing scheduled — for ordinary chats, crew chats and archived
-    /// Captains, and for an engine with no data dir or captains home yet. The
-    /// write itself runs off the event loop; its outcome is traced, never
-    /// propagated.
-    fn captain_turn_ended(&self, chat_id: &str, status: DoneStatus) -> bool {
-        let (Some(data_dir), Some(home)) = (self.data_dir.get(), self.captains_home.get()) else {
+    /// The raw [`CAPTAINS_ENV`] stamp `run_id` was DISPATCHED with, read back
+    /// from the run's handle — `None` for an unstamped turn and once the
+    /// handle for this run is gone. No parsing here, and no roster read: the
+    /// turn-end decision is the dispatch-time stamp or nothing.
+    fn dispatch_captain_stamp(&self, chat_id: &str, run_id: &str) -> Option<String> {
+        lock(&self.runs)
+            .get(chat_id)
+            .filter(|handle| handle.run_id == run_id)
+            .and_then(|handle| handle.runtime_config.request.env.get(CAPTAINS_ENV).cloned())
+    }
+
+    /// The per-run turn end the needs-you snapshot hangs off: a turn whose
+    /// dispatch-time `stamp` says Captain snapshots its Digest on completion,
+    /// a failed or interrupted turn keeps the last good list
+    /// ([`crate::needs_you::record_turn_end`]). `false` — nothing scheduled —
+    /// for an unstamped turn, a stamp that does not say `captain`, a stamp
+    /// with an empty `driveRoot`, and a stamp that fails to parse; the role
+    /// is the dispatch-time stamp and the roster is never consulted at turn
+    /// end. The write itself runs off the event loop; its outcome is traced,
+    /// never propagated.
+    fn captain_turn_ended(&self, chat_id: &str, stamp: Option<&str>, status: DoneStatus) -> bool {
+        let Some(stamp) = stamp else {
             return false;
         };
-        let live_captain = match crate::captains::Registry::load(data_dir) {
-            Ok(registry) => matches!(
-                registry.run_role(chat_id),
-                crate::captains::RunRole::Captain { .. }
-            ),
+        let stamp: serde_json::Value = match serde_json::from_str(stamp) {
+            Ok(stamp) => stamp,
             Err(error) => {
-                tracing::warn!(chat = %chat_id, error = %error, "captains registry load failed");
+                tracing::warn!(chat = %chat_id, error = %error, "captains stamp parse failed");
                 return false;
             }
         };
-        if !live_captain {
+        if stamp["role"].as_str() != Some("captain") {
             return false;
         }
-        let drive = crate::captains::drive_dir(home, chat_id);
+        let Some(drive) = stamp["driveRoot"]
+            .as_str()
+            .filter(|drive| !drive.is_empty())
+            .map(std::path::PathBuf::from)
+        else {
+            return false;
+        };
         let chat_id = chat_id.to_string();
         tokio::task::spawn_blocking(move || {
             match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
@@ -6407,7 +6431,8 @@ async fn drive_run(
         }
 
         if let AgentEvent::Done { status, .. } = &event {
-            inner.captain_turn_ended(&chat_id, *status);
+            let stamp = inner.dispatch_captain_stamp(&chat_id, &run_id);
+            inner.captain_turn_ended(&chat_id, stamp.as_deref(), *status);
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -8416,6 +8441,19 @@ mod tests {
         drive
     }
 
+    /// The stamp SUR-200's dispatch would have produced for a Captain whose drive
+    /// root is `drive` — the same JSON `crate::captains::captains_env` writes.
+    fn captain_stamp(drive: &std::path::Path) -> String {
+        serde_json::json!({
+            "role": "captain",
+            "chatId": "cap-a",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string()
+    }
+
     async fn wait_for(path: &std::path::Path) -> bool {
         for _ in 0..60 {
             if path.exists() {
@@ -8432,7 +8470,11 @@ mod tests {
         let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
         let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
         assert!(
-            sessions.captain_turn_ended("cap-a", DoneStatus::Completed),
+            sessions.captain_turn_ended(
+                "cap-a",
+                Some(&captain_stamp(&drive)),
+                DoneStatus::Completed
+            ),
             "a live Captain's completed turn schedules the snapshot"
         );
         let path = drive.join("state").join(crate::needs_you::FILE);
@@ -8447,7 +8489,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
         seed_digest(&home, "## Needs you\n- not mine\n");
-        assert!(!sessions.captain_turn_ended("plain", DoneStatus::Completed));
+        assert!(!sessions.captain_turn_ended("plain", None, DoneStatus::Completed));
         tokio::time::sleep(Duration::from_millis(200)).await;
         let mut files = 0;
         for captain_dir in std::fs::read_dir(home.join("captains")).into_iter().flatten() {
@@ -8465,7 +8507,14 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), registry);
         let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
-        assert!(!sessions.captain_turn_ended("crew-b", DoneStatus::Completed));
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        assert!(!sessions.captain_turn_ended("crew-b", Some(&crew_stamp), DoneStatus::Completed));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             !drive.join("state").join(crate::needs_you::FILE).exists(),
@@ -8473,13 +8522,15 @@ mod tests {
         );
     }
 
+    /// An archived roster row is dispatched unstamped, so the turn-end
+    /// decision never consults the roster.
     #[tokio::test]
-    async fn an_archived_captain_writes_no_state() {
+    async fn a_roster_archived_captain_writes_no_state() {
         let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), registry);
         let drive = seed_digest(&home, "## Needs you\n- paused\n");
-        assert!(!sessions.captain_turn_ended("cap-a", DoneStatus::Completed));
+        assert!(!sessions.captain_turn_ended("cap-a", None, DoneStatus::Completed));
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!drive.join("state").join(crate::needs_you::FILE).exists());
     }
@@ -8519,7 +8570,7 @@ mod tests {
         std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- half-written\n").expect("digest");
 
         assert!(
-            sessions.captain_turn_ended("cap-a", DoneStatus::Errored),
+            sessions.captain_turn_ended("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Errored),
             "a live Captain's failed turn is still a turn end worth tracing"
         );
         tokio::time::sleep(Duration::from_millis(250)).await;
