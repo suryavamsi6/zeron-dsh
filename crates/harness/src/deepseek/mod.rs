@@ -359,6 +359,28 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             }
         },
     };
+    // The chat's Captain role is stamped by the host on the same channel as
+    // the provider route (`RunRequest::env` never rides the wire, so a sender
+    // cannot forge one), and the blob rides verbatim: the shim turns it into
+    // the row override and the plugin owns the rest of the schema.
+    let captains = request
+        .env
+        .get("ZERON_DEEPSEEK_CAPTAINS")
+        .map(|raw| -> Result<Value, HarnessError> {
+            let invalid = || HarnessError::Protocol("Invalid Captains configuration".into());
+            let blob: Value = serde_json::from_str(raw).map_err(|_| invalid())?;
+            (blob.is_object()
+                && matches!(blob["role"].as_str(), Some("captain" | "crew"))
+                && ["chatId", "captainId", "captainName"]
+                    .into_iter()
+                    .all(|key| blob[key].is_string())
+                && blob["driveRoot"]
+                    .as_str()
+                    .is_some_and(|root| Path::new(root).is_absolute()))
+            .then_some(blob)
+            .ok_or_else(invalid)
+        })
+        .transpose()?;
     let cwd = std::path::absolute(&request.cwd)?;
     let mut config = json!({
         "type": "start", "sessionId": session, "resume": request.resume.is_some(),
@@ -374,6 +396,9 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
         config["maxTokens"] = max_tokens.into();
     }
     config["webSearch"] = web_search.into();
+    if let Some(captains) = captains {
+        config["captains"] = captains;
+    }
     Ok(config)
 }
 
@@ -396,6 +421,7 @@ fn title_configuration(
     config["resume"] = false.into();
     config.as_object_mut().unwrap().remove("reasoningEffort");
     config.as_object_mut().unwrap().remove("plan");
+    config.as_object_mut().unwrap().remove("captains");
     Ok(config)
 }
 

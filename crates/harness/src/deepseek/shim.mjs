@@ -98,6 +98,20 @@ async function start(config) {
     const metadata = JSON.parse(await readFile(manifest, 'utf8'));
     if (metadata.version !== VERSION) throw new Error(`Expected @deepseek-ai/${name}@${VERSION}`);
   }
+  const title = config.title === true;
+  // The captains row appended below is an invocation-layer override of a plugin
+  // row only an installed bundle inserts; cordis drops an override whose id
+  // nothing owns with only a warning, so a stamped role in a profile without
+  // the bundle would run captainless while the sidecar still reported ready.
+  // Refuse before the run boots anything. An ordinary chat never stamps the
+  // row, so it never pays for this manifest read.
+  if (typeof config.captains === 'object' && config.captains !== null) {
+    let bundles;
+    try {
+      bundles = JSON.parse(await readFile(join(config.dshHome, 'profiles', title ? 'sdk-minimal' : 'sdk', 'package.json'), 'utf8')).dsh?.profile?.bundles;
+    } catch { /* a missing or unreadable manifest installs nothing */ }
+    if (bundles?.includes?.('zeron-dsh-captains') !== true) throw new Error('the captains bundle is not installed in the sdk profile (zeron-dsh-captains)');
+  }
   const { DeepSeekHarness } = await import(pathToFileURL(require.resolve('@deepseek-ai/dsh-sdk-client')).href);
   await mkdir(config.dshHome, { recursive: true, mode: 0o700 });
   runtimeDirectory = await mkdtemp(join(config.dshHome, '.zeron-runtime-'));
@@ -111,7 +125,6 @@ async function start(config) {
   // profile's zeron-policy, credentials, plugin, web, or MCP rows exist there
   // to patch, so its per-run patch only switches off the agent tools the
   // profile does have, and the title instructions ride in as the persona.
-  const title = config.title === true;
   if (title) {
     if (typeof config.systemPrompt !== 'string' || !config.systemPrompt.trim()) throw new Error('A title run needs a system prompt');
     environment.DSH_SYSTEM_PROMPT = config.systemPrompt;
@@ -167,6 +180,13 @@ async function start(config) {
     });
     for (const value of Object.values(mcp.env ?? {})) if (value) secrets.add(value);
     yaml += `- insert:\n    - id: zeron-mcp-${index}\n      name: '@deepseek-ai/dsh-mcp-client'\n      config: !!js JSON.parse(process.env.${variable})\n`;
+  }
+  // The host-stamped Captain role is the invocation layer's override row: it
+  // lands after the bundle's own `role: none` row and wins. The start already
+  // refused a profile that never installed the bundle, so this id is always
+  // one cordis knows.
+  if (typeof config.captains === 'object' && config.captains !== null) {
+    yaml += `- ${JSON.stringify({ id: 'zeron-captains', config: config.captains })}\n`;
   }
   // The gateway's route registrations (the Providers page's writes) land in
   // the `web` profile; this run's is `sdk`, so a route configured there has
