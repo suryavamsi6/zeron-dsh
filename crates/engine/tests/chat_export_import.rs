@@ -266,6 +266,18 @@ async fn reopening_the_profile_keeps_the_imports_read_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let core = assemble(dir.path());
     import(&core, &fixture()).await.expect("import");
+    // The doc, not only the row, is born chat2 — and it is checked at the seam
+    // that writes it, before any reopen: a plain `save_snapshot` writes epoch 0
+    // and an edge-less rig would still reopen green, which is exactly the
+    // vacuous pass this assertion exists to prevent.
+    assert_eq!(
+        core.doc_host
+            .store()
+            .snapshot_epoch("deepseek-s1")
+            .expect("read the stored epoch"),
+        zeron_engine::chat2_host::CHAT2_DOC_EPOCH,
+        "the import writes the doc in the born-chat2 shape"
+    );
     let chat_id = core
         .workspace
         .chat("deepseek-s1")
