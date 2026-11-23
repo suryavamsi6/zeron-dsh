@@ -235,3 +235,105 @@ return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "captain d
         "the Drive's files, newest report first, and a refusal for a chat that is not a Captain"
     );
 }
+
+/// The Drive tab reads through the two host actions, not through
+/// `drive_files`/`drive_read`: what the action answers is the contract. A
+/// listing row is `{ name (Drive-relative), kind, size?, mtime? }` with an
+/// RFC 3339 `mtime` as text; `CaptainDriveRead` answers `{ text, size }`, the
+/// object the page's viewer reads as `file.text`, not a bare string — and a
+/// path out of the Drive reaches the page as its error instead of a read.
+#[test]
+fn the_drive_actions_answer_the_page_with_the_listing_and_read_shapes() {
+    let dir = tempfile::tempdir().unwrap();
+    let drive = dir.path().join("drive");
+    std::fs::create_dir_all(drive.join("reports")).unwrap();
+    std::fs::create_dir_all(drive.join("state")).unwrap();
+    std::fs::write(drive.join("CREW.md"), "the crew").unwrap();
+    std::fs::write(drive.join("reports/2026-11-23-a.md"), "a report").unwrap();
+    std::fs::write(drive.join("state/needs-you.json"), "{}").unwrap();
+    std::fs::write(dir.path().join("outside.md"), "not the Captain's").unwrap();
+
+    let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+    let done = Rc::new(Cell::new(false));
+    let roster = json!({ "captains": [
+        { "chatId": "cap-a", "name": "Billing", "drivePath": drive.to_string_lossy() },
+    ] });
+    let call = move |method: &'static str, _params: Json| -> crate::providers::McpCall {
+        let roster = roster.clone();
+        Box::pin(async move {
+            match method {
+                "Captains" => Ok(roster),
+                other => Err(format!("unexpected method {other}")),
+            }
+        })
+    };
+
+    let page = r#"
+local function rows(files): string
+	local out = {}
+	for _, entry in files do
+		table.insert(
+			out,
+			string.format("%s=%s/%s/%s", entry.name, entry.kind, type(entry.mtime), type(entry.size))
+		)
+	end
+	return table.concat(out, ",")
+end
+
+ui.call("CaptainDrive", { chatId = "cap-a" }):after(function(answer: any)
+	ui.invoke("test.record", "files:" .. rows(answer.files))
+	ui.call("CaptainDriveRead", { chatId = "cap-a", path = "CREW.md" }):after(function(file: any)
+		ui.invoke("test.record", string.format("read:%s/%s", tostring(file.text), type(file.size)))
+		ui.call("CaptainDriveRead", { chatId = "cap-a", path = "../outside.md" }):after(function(_: any)
+			ui.invoke("test.record", "escape=read")
+			ui.invoke("test.done", nil)
+		end, function(_err: any)
+			ui.invoke("test.record", "escape=err")
+			ui.invoke("test.done", nil)
+		end)
+	end, function(err: any)
+		ui.invoke("test.record", "read-err:" .. tostring(err.message))
+		ui.invoke("test.done", nil)
+	end)
+end, function(err: any)
+	ui.invoke("test.record", "listing-err:" .. tostring(err.message))
+	ui.invoke("test.done", nil)
+end)
+
+return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "drive shapes" }) })
+"#;
+
+    let app = {
+        let lines = Rc::clone(&lines);
+        let done = Rc::clone(&done);
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "captain_drive_shapes", page);
+            crate::captains::install_over(&host, call);
+            host.action("test.record", move |line| {
+                lines.borrow_mut().push(crate::auth::text(&line));
+            });
+            host.action("test.done", move |_| done.set(true));
+            host
+        })
+    };
+    let mut app = app;
+    for _ in 0..2000 {
+        app.frames(1);
+        if done.get() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(done.get(), "the page never finished its calls; what came back: {:?}", lines.borrow());
+
+    assert_eq!(
+        *lines.borrow(),
+        vec![
+            "files:CREW.md=file/string/number,reports=directory/nil/nil,reports/2026-11-23-a.md=file/string/number"
+                .to_owned(),
+            "read:the crew/number".to_owned(),
+            "escape=err".to_owned(),
+        ],
+        "the action's own answer: a relative name, \"directory\", RFC 3339 mtime text, {{ text, size }}"
+    );
+}

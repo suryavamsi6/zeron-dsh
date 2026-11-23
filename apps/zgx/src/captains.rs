@@ -123,7 +123,8 @@ where
         }
     });
     // One file of a Captain's Drive, by its Drive-relative path:
-    // `{ chatId, path }` -> one string. A path leaving the Drive is an error.
+    // `{ chatId, path }` -> `{ text, size }`. A path leaving the Drive is an
+    // error.
     host.async_action("CaptainDriveRead", {
         let call = call.clone();
         move |args| {
@@ -228,9 +229,9 @@ fn reports(drive: &std::path::Path) -> Vec<Json> {
 /// engine's own) plus the files directly under `reports/` — not the
 /// directories there, not `handoffs/`'s contents — each `name` the
 /// Drive-relative path `CaptainDriveRead` accepts. A file carries `size`
-/// and `mtime` (epoch seconds), a directory neither, and a link is never
-/// listed. Sorted by `name` in byte order; a missing or unreadable Drive
-/// is an empty list.
+/// and `mtime` (RFC 3339 text, seconds, UTC, `Z`), a directory neither,
+/// and a link is never listed. Sorted by `name` in byte order; a missing
+/// or unreadable Drive is an empty list.
 fn drive_files(drive: &std::path::Path) -> Vec<Json> {
     let mut listed: Vec<Json> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(drive) {
@@ -261,9 +262,9 @@ fn drive_files(drive: &std::path::Path) -> Vec<Json> {
 }
 
 /// One listing row for `entry` under `name`: `{ name, kind }`, a file
-/// carrying `size` (bytes) and `mtime` (epoch seconds), a directory
-/// carrying neither. A link — `file_type()` is the entry's own type — and
-/// anything neither file nor directory is nil.
+/// carrying `size` (bytes) and `mtime` (RFC 3339 text, seconds, UTC, `Z`),
+/// a directory carrying neither. A link — `file_type()` is the entry's own
+/// type — and anything neither file nor directory is nil.
 fn drive_entry(entry: &std::fs::DirEntry, name: String) -> Option<Json> {
     let kind = entry.file_type().ok()?;
     if kind.is_symlink() {
@@ -276,12 +277,10 @@ fn drive_entry(entry: &std::fs::DirEntry, name: String) -> Option<Json> {
         return None;
     }
     let meta = entry.metadata().ok()?;
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|age| age.as_secs())
-        .unwrap_or(0);
+    let mtime = chrono::DateTime::<chrono::Utc>::from(
+        meta.modified().unwrap_or(std::time::UNIX_EPOCH),
+    )
+    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     Some(json!({ "name": name, "kind": "file", "size": meta.len(), "mtime": mtime }))
 }
 
@@ -378,7 +377,18 @@ mod tests {
             let entry = &files[index];
             assert_eq!(entry["kind"], "file", "{}", entry["name"]);
             assert!(entry["size"].is_number(), "a file's size, in bytes: {}", entry["name"]);
-            assert!(entry["mtime"].is_number(), "a file's mtime, seconds since the epoch: {}", entry["name"]);
+            let mtime = entry["mtime"].as_str().unwrap_or_else(|| {
+                panic!(
+                    "a file's mtime is RFC 3339 text, not {}: {}",
+                    entry["mtime"], entry["name"]
+                )
+            });
+            assert!(
+                mtime.ends_with('Z') && chrono::DateTime::parse_from_rfc3339(mtime).is_ok(),
+                "a file's mtime is RFC 3339 in UTC with a Z, as the engine writes it: {} ({})",
+                entry["name"],
+                mtime
+            );
         }
     }
 
