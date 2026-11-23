@@ -802,6 +802,10 @@ impl WorkspaceHost {
         let result = f(&mut lock(&self.inner.reg));
         self.inner.local_unsaved.store(true, Ordering::Release);
         self.inner.bump_changed();
+        // Publish now, not only when workspace_task later sees changed_tx:
+        // a caller can mutate (add a device) and immediately read the
+        // projection (SUR-196). The background task still coalesces saves.
+        self.inner.publish();
         if let Some(room) = lock(&self.inner.room).as_ref() {
             room.nudge();
         }

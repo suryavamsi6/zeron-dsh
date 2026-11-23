@@ -91,7 +91,6 @@ Captains (SUR-97, plugin-first).
 
 - `chat_persistence::a_kill_mid_save_loses_and_doubles_nothing` (linux)
 - engine `plugins::service_tests::a_window_calls_its_service_here` (macOS)
-- `device_stats_of_an_offline_device_say_so_within_the_deadline` (seen once on main)
 - In the full local zgx UI suite, a few tests flake on timing: locale, session-tab,
   route-history, "a settings link (About's rows)", and files_fixture mount-time. They aren't
   listed in `zgx-known-failures.txt` and passed in CI.
