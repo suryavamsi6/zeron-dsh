@@ -161,12 +161,15 @@ test('a changed CREW.md rebases the series on the next admitted first step', asy
   assert.ok(section, 'the crew-rules section was not registered');
   const enter = { kind: 'enter', messages: [{}] };
 
-  // The first assembly is the baseline: nothing older exists to rebase away.
+  // A process with no recorded baseline must rebase: the resumed series may
+  // already hold CREW.md bytes this process never saw, so its first admitted
+  // step cannot pass through clean.
   const s1 = new AbortController().signal;
   section.text({ signal: s1 });
   const first = await h.preStep({ agent: h.agent, turn: 1, step: 1, signal: s1 }, enter);
   assert.equal(first.nextCalls, 1, 'the hook did not call next()');
-  assert.deepEqual(first.result, enter, 'an unchanged assembly was rewritten');
+  assert.deepEqual(first.result, { ...enter, startsRequestSeries: true },
+    'an unknown baseline was trusted instead of rebased');
 
   // An edited file serves different bytes; the next admitted step-1 decision
   // must rebase the series so the stale copy cannot linger in it.
@@ -197,4 +200,42 @@ test('a changed CREW.md rebases the series on the next admitted first step', asy
   section.text({ signal: s5 });
   const midTurn = await h.preStep({ agent: h.agent, turn: 5, step: 2, signal: s5 }, enter);
   assert.deepEqual(midTurn.result, enter, 'a non-first step rebased');
+});
+
+// SUR-85 r2: the engine stops a parked runtime after idle and resumes the
+// session on the next message, so the first turn of a NEW process is the
+// normal path. That process has no in-memory baseline — it cannot know which
+// bytes the resumed series was built from — so it must rebase to CREW.md as it
+// is now rather than pass the decision through and leave the retired rules.
+test('a restarted process rebases the first turn to the current CREW.md', async t => {
+  const root = await drive(t);
+  const file = join(root, 'CREW.md');
+  await writeFile(file, 'rules v1 — before the restart');
+  const enter = { kind: 'enter', messages: [{}] };
+
+  const before = harness(crew(root));
+  const beforeSection = before.crewRules();
+  assert.ok(beforeSection, 'the crew-rules section was not registered');
+  const s1 = new AbortController().signal;
+  assert.ok(beforeSection.text({ signal: s1 }).includes('before the restart'));
+  const baseline = await before.preStep({ agent: before.agent, turn: 1, step: 1, signal: s1 }, enter);
+  assert.deepEqual(baseline.result, { ...enter, startsRequestSeries: true },
+    'the pre-restart admission did not rebase its unknown baseline');
+
+  // The runtime was stopped while the chat was parked; the file changed while
+  // it was down, and the next process resumes the same session with a fresh
+  // listener table and a fresh in-memory baseline.
+  await writeFile(file, 'rules v2 — changed while the runtime was down');
+  const after = harness(crew(root));
+  const afterSection = after.crewRules();
+  assert.ok(afterSection, 'the restarted crew row registered no section');
+  const s2 = new AbortController().signal;
+  const served = afterSection.text({ signal: s2 });
+  assert.ok(served.includes('changed while the runtime was down'), 'the restarted section did not serve the new file');
+  assert.ok(!served.includes('before the restart'), 'the restarted section served the old file');
+
+  const restarted = await after.preStep({ agent: after.agent, turn: 1, step: 1, signal: s2 }, enter);
+  assert.equal(restarted.nextCalls, 1, 'the hook did not call next()');
+  assert.deepEqual(restarted.result, { ...enter, startsRequestSeries: true },
+    'the first turn after a restart left the retired rules in the resumed series');
 });

@@ -74,7 +74,7 @@ jobs:
           set -euo pipefail
           exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
           echo 'first-red-step: The Captains plugin unit suite'
-          for file in prompts.test.mjs tools.test.mjs; do
+          for file in prompts.test.mjs tools.test.mjs crew.test.mjs; do
             if ! test -f "plugins/dsh-captains/test/$file"; then
               echo "missing plugin test file: $file" >&2
               exit 1
@@ -82,10 +82,10 @@ jobs:
           done
           out=$(node --test plugins/dsh-captains/test/*.test.mjs 2>&1) || { printf '%s\n' "$out"; exit 1; }
           printf '%s\n' "$out"
-          # 17 is the reviewed passing count when SUR-185 landed; lowering it is a deliberate change, and it counts `pass` rather than `tests` because a suite where every case is skipped still reports `tests 17` and exits 0.
+          # 34 is the reviewed passing count once crew.test.mjs covers the crew cases; lowering it is a deliberate change, and it counts `pass` rather than `tests` because a suite where every case is skipped still reports `tests 34` and exits 0.
           n=$(printf '%s\n' "$out" | sed -n 's/^[^ ]* pass \([0-9][0-9]*\)$/\1/p' | awk '{s+=$1} END {print s+0}')
           echo "plugin unit tests passing: $n"
-          test "$n" -ge 17
+          test "$n" -ge 34
       - name: Record the pass
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830

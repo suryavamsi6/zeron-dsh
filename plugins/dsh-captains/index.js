@@ -118,8 +118,9 @@ function applyRevoked(ctx) {
 function applyCrew(ctx, cfg) {
   const registered = new WeakSet();
   const bytesBySignal = new WeakMap();
-  // In memory, keyed by session id: a first turn after a process restart
-  // rebasing once is accepted behaviour.
+  // In memory, keyed by session id. A missing entry means this process never
+  // saw the bytes the resumed series was built from, so that first admitted
+  // step must rebase; only a known equal baseline passes through untouched.
   const lastBytes = new Map();
   const register = agent => {
     const scope = rootScope(agent);
@@ -146,7 +147,7 @@ function applyCrew(ctx, cfg) {
       const key = agent.session?.id ?? '';
       const previous = lastBytes.get(key);
       lastBytes.set(key, current);
-      if (previous === undefined || previous.equals(current)) return decision;
+      if (previous !== undefined && previous.equals(current)) return decision;
       return { ...decision, startsRequestSeries: true };
     });
   };
