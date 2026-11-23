@@ -235,3 +235,140 @@ return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "captain d
         "the Drive's files, newest report first, and a refusal for a chat that is not a Captain"
     );
 }
+
+/// One `CaptainDrive` read against a roster holding a single Captain whose
+/// `drivePath` is `drive`; what the page recorded comes back in order.
+fn drive_listing(drive: &std::path::Path) -> Vec<String> {
+    const PAGE: &str = r#"
+local function encode(a: any): string
+	local out = {}
+	for _, entry in a.files or {} do
+		table.insert(out, entry.name .. "|" .. entry.kind .. "|" .. entry.path)
+	end
+	return table.concat(out, ";")
+end
+
+ui.call("CaptainDrive", { chatId = "cap-a" }):after(function(answer: any)
+	ui.invoke("test.record", encode(answer))
+	ui.invoke("test.done", nil)
+end, function(err: any)
+	ui.invoke("test.record", "err:" .. tostring(err.message))
+	ui.invoke("test.done", nil)
+end)
+
+return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "drive files" }) })
+"#;
+
+    let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+    let done = Rc::new(Cell::new(false));
+    let roster = json!({ "captains": [
+        { "chatId": "cap-a", "name": "Billing", "drivePath": drive.to_string_lossy() },
+    ] });
+    let call = move |method: &'static str, _params: Json| -> crate::providers::McpCall {
+        let roster = roster.clone();
+        Box::pin(async move {
+            match method {
+                "Captains" => Ok(roster),
+                other => Err(format!("unexpected method {other}")),
+            }
+        })
+    };
+
+    let app = {
+        let lines = Rc::clone(&lines);
+        let done = Rc::clone(&done);
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "captain_files", PAGE);
+            crate::captains::install_over(&host, call);
+            host.action("test.record", move |line| {
+                lines.borrow_mut().push(crate::auth::text(&line));
+            });
+            host.action("test.done", move |_| done.set(true));
+            host
+        })
+    };
+    let mut app = app;
+    for _ in 0..2000 {
+        app.frames(1);
+        if done.get() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(done.get(), "the page never finished its read; what came back: {:?}", lines.borrow());
+    let recorded = lines.borrow().clone();
+    recorded
+}
+
+/// SUR-92: the Drive tab lists the Captain's files by a path relative to the
+/// Drive — the roster's `drivePath` is the only root, and a link planted in
+/// the Drive is not a way to show the page a file outside it.
+#[test]
+fn the_drive_listing_is_relative_and_never_lists_a_way_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let drive = dir.path().join("drive");
+    std::fs::create_dir_all(drive.join("reports/sub")).unwrap();
+    std::fs::create_dir_all(drive.join("handoffs")).unwrap();
+    std::fs::create_dir_all(drive.join("state")).unwrap();
+    std::fs::write(drive.join("DIGEST.md"), "digest").unwrap();
+    std::fs::write(drive.join("reports/a.md"), "a").unwrap();
+    std::fs::write(drive.join("reports/sub/b.md"), "b").unwrap();
+    std::fs::write(drive.join("handoffs/h.md"), "h").unwrap();
+    std::fs::write(drive.join("state/needs-you.json"), "{}").unwrap();
+    // A link planted in the Drive that points out of it: it is not the
+    // Captain's, so the page must not be offered it.
+    #[cfg(unix)]
+    {
+        let outside_file = dir.path().join("outside.md");
+        std::fs::write(&outside_file, "not the Captain's").unwrap();
+        std::os::unix::fs::symlink(&outside_file, drive.join("escape.md")).unwrap();
+        let outside_dir = dir.path().join("outside-dir");
+        std::fs::create_dir_all(&outside_dir).unwrap();
+        std::os::unix::fs::symlink(&outside_dir, drive.join("escape-dir")).unwrap();
+    }
+
+    let recorded = drive_listing(&drive);
+    assert_eq!(recorded.len(), 1, "one read, one answer: {recorded:?}");
+    let answer = &recorded[0];
+    assert!(!answer.starts_with("err:"), "the read was refused: {answer}");
+    assert_eq!(
+        answer,
+        "DIGEST.md|file|DIGEST.md;handoffs|dir|handoffs;h.md|file|handoffs/h.md;\
+reports|dir|reports;a.md|file|reports/a.md;sub|dir|reports/sub;b.md|file|reports/sub/b.md",
+        "the Drive's files, relative and sorted"
+    );
+    for entry in answer.split(';') {
+        let mut fields = entry.split('|');
+        let name = fields.next().unwrap();
+        let kind = fields.next().unwrap();
+        let path = fields.next().unwrap();
+        assert!(kind == "file" || kind == "dir", "unknown kind in {entry}");
+        assert!(!name.contains('/'), "a name carried a path: {entry}");
+        assert!(!path.starts_with('/') && !path.starts_with('\\'), "an absolute path was listed: {entry}");
+        assert!(!path.split('/').any(|part| part == ".."), "a parent path was listed: {entry}");
+        assert!(
+            !path.starts_with(drive.to_string_lossy().as_ref()),
+            "the listing carried the Drive's own path: {entry}"
+        );
+    }
+}
+
+/// SUR-92: `state/` is machine-only — the engine's Needs-you snapshot lives
+/// there — so the page never sees it, while the rest of the Drive is listed.
+#[test]
+fn the_drive_listing_hides_the_machine_only_state_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let drive = dir.path().join("drive");
+    std::fs::create_dir_all(drive.join("state")).unwrap();
+    std::fs::create_dir_all(drive.join("reports")).unwrap();
+    std::fs::write(drive.join("DIGEST.md"), "digest").unwrap();
+    std::fs::write(drive.join("state/needs-you.json"), "{}").unwrap();
+    std::fs::write(drive.join("reports/a.md"), "a").unwrap();
+
+    let recorded = drive_listing(&drive);
+    assert_eq!(recorded.len(), 1, "one read, one answer: {recorded:?}");
+    let answer = &recorded[0];
+    assert!(answer.contains("DIGEST.md|file|DIGEST.md"), "the listing did not reach the Drive: {answer}");
+    assert!(answer.contains("a.md|file|reports/a.md"), "the reports folder was not listed: {answer}");
+    assert!(!answer.contains("state"), "the machine-only state folder reached the page: {answer}");
+}

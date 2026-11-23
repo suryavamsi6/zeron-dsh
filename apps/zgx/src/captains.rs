@@ -1,5 +1,6 @@
 //! The Captains pages' host actions: the device-local roster, the four calls
-//! that change it, and one read of a Captain's Drive for the Digest tab.
+//! that change it, and one read of a Captain's Drive for the Digest and
+//! Drive tabs.
 //!
 //! `ui.call` is a host action, not an engine RPC — asking it for `Captains`
 //! answers "no host action named 'Captains'" — so each of these is one action
@@ -93,11 +94,12 @@ where
             }
         }
     });
-    // A Captain's Drive, for the Digest tab: `{ chatId }` ->
+    // A Captain's Drive, for the Digest and Drive tabs: `{ chatId }` ->
     //   { digest = <DIGEST.md's text>?, needsYou = { version, updatedAt,
-    //     items }?, reports = { { name, text } } }
+    //     items }?, reports = { { name, text } },
+    //     files = { { name, kind, path } } }
     // The roster decides whose Drive it is: a chat that is not a Captain on
-    // this device is refused, and none of the three is a path the page gave.
+    // this device is refused, and none of the four is a path the page gave.
     host.async_action("CaptainDrive", {
         let call = call.clone();
         move |args| {
@@ -109,7 +111,8 @@ where
                 let digest = read_inside(&drive, &drive.join(DIGEST_FILE));
                 let needs_you = needs_you(&drive);
                 let reports = reports(&drive);
-                let answer = json!({ "digest": digest, "needsYou": needs_you, "reports": reports });
+                let files = files(&drive);
+                let answer = json!({ "digest": digest, "needsYou": needs_you, "reports": reports, "files": files });
                 Value::from_json(&serde_json::to_string(&answer).map_err(|error| error.to_string())?)
                     .ok_or_else(|| "the Drive's answer didn't parse".to_string())
             }
@@ -200,6 +203,50 @@ fn reports(drive: &std::path::Path) -> Vec<Json> {
         .collect()
 }
 
+/// Every file and folder under `drive`, for the Drive tab: each entry
+/// `{ name, kind, path }` where `path` is relative to the Drive (`/`-joined,
+/// never the Drive's own), sorted by that path, [`FILE_COUNT`] at most. A
+/// link is skipped whole — `file_type` is the entry's own type, so a link
+/// planted inside the Drive is never followed or listed as a way out — and
+/// a `state` folder is machine-only (the Needs-you snapshot lives there),
+/// not one of the Captain's files. A missing or unreadable Drive is an
+/// empty list, not an error.
+fn files(drive: &std::path::Path) -> Vec<Json> {
+    let mut found: Vec<(String, Json)> = Vec::new();
+    let mut pending = vec![(drive.to_path_buf(), String::new())];
+    while let Some((dir, prefix)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_symlink() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if kind.is_dir() && name == STATE_DIR {
+                continue;
+            }
+            if !kind.is_dir() && !kind.is_file() {
+                continue;
+            }
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            if kind.is_dir() {
+                pending.push((entry.path(), path.clone()));
+            }
+            found.push((
+                path.clone(),
+                json!({ "name": name, "kind": if kind.is_dir() { "dir" } else { "file" }, "path": path }),
+            ));
+        }
+    }
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found.truncate(FILE_COUNT);
+    found.into_iter().map(|(_, entry)| entry).collect()
+}
+
 /// The Captain's Drive as the Digest tab reads it: `DIGEST.md`, the engine's
 /// Needs-you snapshot (`state/needs-you.json`, SUR-100) and the crew reports
 /// (`reports/*.md`, SUR-101), newest first.
@@ -216,6 +263,12 @@ const REPORT_COUNT: usize = 5;
 /// A file the tab shows at most: the Drive's files are the Captain's, and a
 /// long one is cut rather than carried whole through the script bridge.
 const FILE_CAP: u64 = 256 * 1024;
+/// A Drive folder the page never lists: `state/` is machine-only — the
+/// engine's Needs-you snapshot lives there — not one of the Captain's files.
+const STATE_DIR: &str = "state";
+/// The Drive tab's listing at most: a page of entries, not a whole Drive
+/// poured through the script bridge.
+const FILE_COUNT: usize = 200;
 
 /// The engine's answer as a script value, or its refusal as the host error.
 /// A copy of `providers`' own, kept here because this module's slice of the
