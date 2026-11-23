@@ -1,0 +1,43 @@
+name: Release plugin lookup
+
+# SUR-231 / SUR-108: the packaged-bundle lookup property is release-only — the
+# debug build's repo-checkout fallback is a different property, so the case is
+# ignored under debug_assertions and the dev-profile suites never run it. This
+# job runs just its test binary against the release profile the packages ship.
+#
+# A pull request only pays the `-p zeron --release` build when the property's
+# inputs change; every push to main runs it. The job restores but never saves
+# a Rust cache, so it cannot evict the main-seeded caches pull requests
+# depend on.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - apps/zeron/tests/release_plugin_lookup.rs
+      - apps/zeron/Cargo.toml
+      - crates/engine/src/captains.rs # plugin_dir() and PLUGIN_DIR_ENV
+      - plugins/dsh-captains/**
+      - .github/workflows/release-plugin-lookup.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-plugin-lookup-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  release-plugin-lookup:
+    name: release_plugin_lookup (release profile)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: ./.github/actions/linux-ci
+        with:
+          rust-cache: release-plugin-lookup
+      - name: Packaged plugin lookup, byte for byte
+        run: cargo nextest run --locked --release -p zeron --test release_plugin_lookup
