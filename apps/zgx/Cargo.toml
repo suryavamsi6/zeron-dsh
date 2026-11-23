@@ -227,6 +227,10 @@ tempfile = "3"
 zeron-engine = { path = "../../crates/engine" }
 zeron-rpc = { path = "../../crates/rpc" }
 zeron-harness = { path = "../../crates/harness" }
+# src/helm_live.rs (SUR-230): the scripted Harness's `#[async_trait]` impl.
+async-trait = "0.1"
+# src/helm_live.rs (SUR-230): the scripted Harness's event stream (`stream::unfold`).
+futures = "0.3"
 
 # src/terminal.rs's test: the bridge line split as Windows itself splits a
 # command line (CommandLineToArgvW).
