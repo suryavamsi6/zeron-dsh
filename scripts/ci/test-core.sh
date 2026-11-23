@@ -7,7 +7,7 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
   [[ -f "$f" ]] || continue
   tests+=(--test "$(basename "$f" .rs)")
 done
-for t in misc geometry session_publication restart_resume side_chats message_queue device_routing device_room plugin_services restart_hook; do
+for t in misc geometry session_publication restart_resume side_chats message_queue device_routing device_room plugin_services restart_hook captain_role_runtime; do
   tests+=(--test "$t")
 done
 
