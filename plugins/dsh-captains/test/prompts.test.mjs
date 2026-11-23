@@ -8,7 +8,6 @@ import { apply, inject } from '../index.js';
 const driveRoot = join(tmpdir(), 'drive', 'helm');
 
 const helm = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot };
-const crew = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot };
 
 function record(config, origin = 'root') {
   const sections = [];
@@ -86,11 +85,7 @@ test('only a captain registers one role section, under the persona suffix', () =
   assert.deepEqual(inject, ['systemPrompt', 'tools', 'agents']);
 });
 
-test('crew and the inert role register nothing', () => {
-  const c = record(crew);
-  assert.deepEqual(c.sections, []);
-  assert.deepEqual(c.orders, []);
-
+test('the inert role registers nothing', () => {
   const n = record({ role: 'none' });
   assert.deepEqual(n.sections, []);
   assert.deepEqual(n.orders, []);

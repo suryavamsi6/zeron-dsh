@@ -2,6 +2,7 @@ import { createRequire } from 'node:module';
 import { realpathSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { captainPrompt } from './src/prompts.js';
+import { crewRules } from './src/crew.js';
 import { driveToolSpecs } from './src/tools.js';
 import { normalizeConfig } from './src/config.js';
 
@@ -109,9 +110,55 @@ function applyRevoked(ctx) {
   });
 }
 
+// SUR-85: a crew chat serves the Captain's CREW.md as a prompt section that
+// re-reads the file at every assembly. The bytes served to each assembly's
+// signal are remembered; when the next admitted first step of a turn sees the
+// file has changed since the session's last admission, it declares a
+// request-series rebase so the stale copy is rewritten rather than linger.
+function applyCrew(ctx, cfg) {
+  const registered = new WeakSet();
+  const bytesBySignal = new WeakMap();
+  // In memory, keyed by session id: a first turn after a process restart
+  // rebasing once is accepted behaviour.
+  const lastBytes = new Map();
+  const register = agent => {
+    const scope = rootScope(agent);
+    if (scope === undefined || registered.has(agent)) return;
+    registered.add(agent);
+    scope.effect(() => scope.systemPrompt.section({
+      name: 'zeron-captains:crew-rules',
+      order: 900,
+      text(arg) {
+        const served = crewRules(cfg);
+        // Older callers assemble without a signal; there is nothing to key on.
+        if (arg?.signal != null) bytesBySignal.set(arg.signal, Buffer.from(served, 'utf8'));
+        return served;
+      },
+      interpolate: false,
+    }));
+    if (typeof scope.on !== 'function') return;
+    scope.on('agent/pre-step', async (event, next) => {
+      const decision = await next();
+      // only an admitted first step of a turn carries a rebase
+      if (event.step !== 1 || decision.kind !== 'enter' || decision.messages.length === 0) return decision;
+      const current = bytesBySignal.get(event.signal);
+      if (current === undefined) return decision;
+      const key = agent.session?.id ?? '';
+      const previous = lastBytes.get(key);
+      lastBytes.set(key, current);
+      if (previous === undefined || previous.equals(current)) return decision;
+      return { ...decision, startsRequestSeries: true };
+    });
+  };
+  ctx.on('agent/created', ({ agent }) => register(agent));
+  // A root created before this fiber settled never reached the listener above.
+  for (const agent of ctx.agents?.list?.() ?? []) register(agent);
+}
+
 export function apply(ctx, config) {
   const cfg = normalizeConfig(config);
   if (cfg.role === 'none') return applyRevoked(ctx);
+  if (cfg.role === 'crew') return applyCrew(ctx, cfg);
   if (cfg.role !== 'captain') return;
   // The plugin context is process-wide, so a section registered at load would
   // reach every native child session too. Wait for `agent/created` instead and
