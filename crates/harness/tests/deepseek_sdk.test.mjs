@@ -497,3 +497,17 @@ test('credential filtering retains only DeepSeek auth and explicit Git tools ove
     GIT_CONFIG_KEY_0: 'core.hooksPath', GIT_CONFIG_VALUE_0: '/trusted/hooks' });
   assert.throws(() => runtimeEnvironment({ GIT_CONFIG_COUNT: '1' }), /Incomplete/);
 });
+
+// SUR-105: the Captain Drive tools only reach the Captain's own Drive (the
+// plugin path-guards every call), so the policy treats them as the built-in
+// read/edit pair — the read silently allowed, the write an edit.
+test('a Captain Drive tool follows the access policy', () => {
+  assert.equal(requiresApproval('supervised', 'captain_drive_read'), false);
+  assert.equal(requiresApproval('supervised', 'captain_drive_write'), true);
+  assert.equal(requiresApproval('auto-accept-edits', 'captain_drive_read'), false);
+  assert.equal(requiresApproval('auto-accept-edits', 'captain_drive_write'), false);
+  assert.equal(requiresApproval('full-access', 'captain_drive_read'), false);
+  assert.equal(requiresApproval('full-access', 'captain_drive_write'), false);
+  // Only the named pair joins the sets: an unlisted tool still asks.
+  assert.equal(requiresApproval('supervised', 'captain_drive_delete'), true);
+});
