@@ -32,7 +32,22 @@ impl EngineRpc {
             return RpcReply::value(&device_stats::current(self.places()).await);
         };
         let devices = self.workspace.watch_devices().borrow().clone();
-        let Some(device) = devices.iter().find(|d| d.id == target) else {
+        // The devices watch is published from a background task after
+        // mutate/upsert bumps changed_tx, so it can lag the registry.
+        // A user can add a device and immediately ask for its stats
+        // (SUR-196): if the projection misses, read the registry itself.
+        // A stranger is in neither list and still refuses immediately.
+        let Some(device) = devices
+            .iter()
+            .find(|d| d.id == target)
+            .cloned()
+            .or_else(|| {
+                self.workspace
+                    .read_devices()
+                    .ok()
+                    .and_then(|rows| rows.into_iter().find(|d| d.id == target))
+            })
+        else {
             return Err(RpcError::BadParams(format!(
                 "{target} isn't one of this account's devices"
             )));
@@ -54,7 +69,7 @@ impl EngineRpc {
                 "{} answered DeviceStats with a stream",
                 device.name
             ))),
-            Ok(Err(error)) => Err(remote_error(device, error, Utc::now())),
+            Ok(Err(error)) => Err(remote_error(&device, error, Utc::now())),
             Err(_) => {
                 // A link that doesn't answer may be a zombie: redial next time.
                 if let Some(links) = &self.links {
@@ -64,7 +79,7 @@ impl EngineRpc {
                     "{} didn't answer within {} s ({}): it may be asleep or offline",
                     device.name,
                     REMOTE_DEADLINE.as_secs(),
-                    last_seen(device, Utc::now()),
+                    last_seen(&device, Utc::now()),
                 )))
             }
         }
