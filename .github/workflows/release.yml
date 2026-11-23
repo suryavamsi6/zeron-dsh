@@ -219,6 +219,20 @@ jobs:
             test -f "dist/zeron-$ver-$platform" \
               || { echo "missing artifact for tag v$ver: $platform — check builds and Cargo.toml version"; exit 1; }
           done
+          # The Captains dsh bundle ships in every package, in dsh-plugins/
+          # beside plugins-builtin/ — never inside the app's built-in scan set.
+          tar -tzf "dist/zeron-$ver-linux-x86_64.tar.gz" > linux.list
+          tar -tzf "dist/zeron-$ver-macos-arm64-app.tar.gz" > macos.list
+          unzip -l "dist/zeron-$ver-windows-x86_64.zip" > windows.list
+          grep -q "zeron-$ver-linux-x86_64/dsh-plugins/dsh-captains/index.js" linux.list \
+            || { echo "the linux tarball has no dsh-plugins/dsh-captains"; exit 1; }
+          grep -q "Zeron.app/Contents/Resources/dsh-plugins/dsh-captains/index.js" macos.list \
+            || { echo "the macOS app tarball has no dsh-plugins/dsh-captains"; exit 1; }
+          grep -q "beta/$ver/dsh-plugins/dsh-captains/index.js" windows.list \
+            || { echo "the windows zip has no dsh-plugins/dsh-captains"; exit 1; }
+          grep -q 'plugins-builtin/dsh-captains' linux.list macos.list windows.list \
+            && { echo "the dsh bundle is in plugins-builtin"; exit 1; }
+          rm -f linux.list macos.list windows.list
           echo "VERSION=$ver" >> "$GITHUB_ENV"
       - name: updater manifest
         run: |

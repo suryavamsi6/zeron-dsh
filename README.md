@@ -16,6 +16,8 @@ Download the latest release for your platform from [GitHub Releases](https://git
 
 No account or network connection is needed; sessions stay on your device. The app updates itself.
 
+A fresh install has no working provider until you sign in: open **Settings → Providers → Mistral Vibe** before the first chat.
+
 ## Headless (CLI)
 
 For servers and other machines without a display, such as a VPS that keeps agents running after you close your laptop. Linux only:

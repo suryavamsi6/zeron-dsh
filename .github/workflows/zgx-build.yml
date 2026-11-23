@@ -123,6 +123,9 @@ jobs:
           test "$("$app/Contents/MacOS/zeron" --version)" = "zeron $ZGX_VERSION"
           test -x "$app/Contents/MacOS/Zeron Engine"
           test -f "$app/Contents/Resources/ui/app.luau"
+          test -f "$app/Contents/Resources/README.md"
+          test -f "$app/Contents/Resources/dsh-plugins/dsh-captains/index.js"
+          test ! -e "$app/Contents/Resources/plugins-builtin/dsh-captains"
           codesign --verify --deep --strict --verbose=2 "$app"
           codesign -d --entitlements - "$app"
           if [ -n "${NOTARY_KEY_PATH:-}" ]; then
@@ -189,6 +192,9 @@ jobs:
           test "$("$dir/zeron-engine" --version)" = "zeron-engine $ZGX_VERSION"
           test -f "$dir/ui/app.luau"
           test -d "$dir/plugins-builtin"
+          test -f "$dir/README.md"
+          test -f "$dir/dsh-plugins/dsh-captains/index.js"
+          test ! -e "$dir/plugins-builtin/dsh-captains"
           test ! -e "$dir/ui/tests"
           # A headless server or Cloud machine runs this `zeron` too (`zeron
           # headless`): it may need no library the old app didn't.
@@ -267,10 +273,11 @@ jobs:
           $files = "$dir/beta/$env:ZGX_VERSION"
           $engine = (& "$files/engine/zeron.exe" --version | Out-String).Trim()
           if ($engine -ne "zeron $env:ZGX_VERSION") { throw "the engine says '$engine'" }
-          foreach ($path in @("$files/ui/app.luau", "$files/plugins-builtin", "$dir/zeron-update.json")) {
+          foreach ($path in @("$files/ui/app.luau", "$files/plugins-builtin", "$files/dsh-plugins/dsh-captains/index.js", "$dir/zeron-update.json", "$dir/README.md")) {
             if (-not (Test-Path -LiteralPath $path)) { throw "no $path in the package" }
           }
           if (Test-Path -LiteralPath "$files/ui/tests") { throw 'the tests are in the package' }
+          if (Test-Path -LiteralPath "$files/plugins-builtin/dsh-captains") { throw 'the dsh bundle is in plugins-builtin' }
           $feed = (Get-Content -Raw "$dir/zeron-update.json" | ConvertFrom-Json).releases_url
           if ($feed -ne $env:FEED) { throw "the feed is $feed" }
           # A stable release's standalone .exe (all the old app's updater

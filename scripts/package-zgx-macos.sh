@@ -11,7 +11,8 @@
 #                                    line (crates/cli; the engine's commands
 #                                    run in the helper beside it)
 #     Contents/MacOS/Zeron Engine    the engine, signed here
-#     Contents/Resources/ui, plugins-builtin, zeron.icns, licenses
+#     Contents/Resources/ui, plugins-builtin, dsh-plugins, README.md,
+#     zeron.icns, licenses
 #   target/package-zgx/zeron-<version>-macos-<arch>.dmg
 #   target/package-zgx/zeron-<version>-macos-<arch>-app.tar.gz  (the updater's)
 #
@@ -149,6 +150,7 @@ rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_
 mkdir -p "$APP/Contents/Resources/licenses/fonts"
 cp "$ROOT/assets/fonts/licenses/"* "$ROOT/apps/zgx/fonts/"*-OFL.txt "$APP/Contents/Resources/licenses/fonts/"
 cp "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/LICENSE" "$APP/Contents/Resources/licenses/"
+cp "$ROOT/README.md" "$APP/Contents/Resources/"
 cp "$ROOT/crates/voice/NOTICE.md" "$APP/Contents/Resources/licenses/parakeet-v3.txt"
 
 # Zeron's icon.
