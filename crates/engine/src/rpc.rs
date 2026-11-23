@@ -2312,6 +2312,7 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                self.enrol_delegated_child(&chat_id);
                 Ok(())
             }
             MutateParams::CreateSpace {
@@ -2567,6 +2568,43 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
+        }
+    }
+
+    /// Enrol a chat a live Captain just delegated to, before its first prompt
+    /// can run: the `CreateChat` paths call this as soon as the row exists.
+    /// Only a delegated child (`ChildKind::Subagent`) of a live Captain on
+    /// this device joins; a side chat, an ordinary parent, a claimed identity
+    /// with no parent and a replay of the same create record nothing. A roster
+    /// write that fails is logged, never a reason to fail a chat that exists.
+    fn enrol_delegated_child(&self, chat_id: &str) {
+        let Some(captains) = self.captains.as_ref() else {
+            return;
+        };
+        let Ok(Some(row)) = self.workspace.chat(chat_id) else {
+            return;
+        };
+        if row.child_kind != Some(zeron_proto::ChildKind::Subagent)
+            || row.device_id != self.doc_host.device_id()
+        {
+            return;
+        }
+        let Some(parent) = row.parent_chat_id.as_deref() else {
+            return;
+        };
+        let registry = captains.snapshot();
+        if !registry.is_captain(parent) {
+            return;
+        }
+        if registry
+            .captain_of_crew(chat_id)
+            .is_some_and(|owner| owner.chat_id == parent)
+        {
+            return; // a replay of the same create: already a member
+        }
+        if let Err(error) = captains.add_crew(parent, chat_id) {
+            tracing::warn!(target: "captains", chat = %chat_id, captain = %parent, %error,
+                "a delegated child did not join its Captain's crew");
         }
     }
 }
@@ -5104,6 +5142,7 @@ impl RpcService for EngineRpc {
                             .set_chat_branch(chat_id, branch)
                             .map_err(failed)?;
                     }
+                    self.enrol_delegated_child(chat_id);
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "deviceId": host.device_id, "cwd": cwd,
                     }));
@@ -7045,6 +7084,99 @@ mod tests {
             let row = core.workspace.chat(chat).unwrap().unwrap();
             assert_eq!(row.child_kind, expected, "{chat}");
         }
+        core.sessions.shutdown().await;
+    }
+
+    /// A Captain's delegated child joins its crew when its row is created —
+    /// before a first prompt could run — and a replay adds nothing. An
+    /// explicit side chat, a parent that is not a live Captain, and a claimed
+    /// agent identity with no parent all record no membership.
+    #[tokio::test]
+    async fn a_captains_delegated_child_joins_its_crew_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let create = |chat: &str, parent: Option<&str>, kind: Option<&str>| {
+            let mut params = serde_json::json!({"op":"createChat", "chatId":chat,
+                "deviceId":core.device_id,
+                "config":{"harness":"deepseek","sandbox":"workspace-write"}});
+            if let Some(parent) = parent {
+                params["parentChatId"] = parent.into();
+            }
+            if let Some(kind) = kind {
+                params["childKind"] = kind.into();
+            }
+            params
+        };
+        rpc.handle(methods::MUTATE, create("captain", None, None))
+            .await
+            .unwrap();
+        core.captains.promote("captain", "Helm").unwrap();
+
+        rpc.handle(
+            methods::MUTATE,
+            create("delegated", Some("captain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // The run's own stamp reads the roster: the role is there with the row.
+        let stamp = crate::captains::captains_env(
+            &core.captains.snapshot(),
+            temp.path(),
+            "delegated",
+        )
+        .expect("a delegated child of a Captain is crew");
+        let stamp: serde_json::Value = serde_json::from_str(&stamp).unwrap();
+        assert_eq!(stamp["role"], "crew");
+        assert_eq!(stamp["captainId"], "captain");
+
+        // A replay creates no second membership.
+        rpc.handle(
+            methods::MUTATE,
+            create("delegated", Some("captain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // An explicit side chat of a Captain stays out of its crew.
+        rpc.handle(
+            methods::MUTATE,
+            create("side", Some("captain"), Some("side")),
+        )
+        .await
+        .unwrap();
+        // A parent that is not a live Captain is nobody's crew.
+        rpc.handle(
+            methods::MUTATE,
+            create("ordinary-child", Some("plain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // A claimed identity with no parent is not a delegation.
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent {
+                chat: Some("captain".to_owned()),
+            },
+            rpc.handle(
+                methods::MUTATE,
+                create("claimed", None, Some("subagent")),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let registry = core.captains.snapshot();
+        let captain = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == "captain")
+            .expect("the Captain is on the roster");
+        assert_eq!(captain.crew, vec!["delegated".to_owned()]);
         core.sessions.shutdown().await;
     }
 
