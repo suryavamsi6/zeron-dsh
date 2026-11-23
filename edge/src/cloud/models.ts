@@ -67,6 +67,8 @@ export const isCloudAgent = (value: unknown): value is CloudAgent =>
 export const isStaticCloudAgent = (agent: CloudAgent): agent is CloudHarness => agent in CLOUD_MODELS;
 
 /** A published model, as `crates/proto` `Model` serializes it. */
+// The publish routes stay for the `discover-models` producer to come; the
+// read half is live picker surface today (`cloudModels(published.latest)`).
 export interface PublishedModel {
   readonly id: string;
   readonly label: string;
