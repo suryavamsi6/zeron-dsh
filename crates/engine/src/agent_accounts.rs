@@ -303,6 +303,39 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             }
             crate::captains::ensure_drive(&registry, &self.0.config.deepseek_home, chat_id)?;
         }
+        // The `sdk` profile a chat run boots is provisioned here — the one
+        // step every DeepSeek run passes — so a packaged app never needs a
+        // promote-time install or pnpm, and a wake or a promotion never
+        // depends on a user having run a plugin command. Only the shipped
+        // bundle counts: a dev run's checkout resolves for the loader, not
+        // for writing into a profile.
+        if let Some(bundle) = crate::captains::packaged_plugin_dir() {
+            use crate::captains::ProvisionOutcome;
+            match crate::captains::provision_profile(&self.0.config.deepseek_home, &bundle) {
+                ProvisionOutcome::Created | ProvisionOutcome::Added => {
+                    tracing::info!(
+                        home = %self.0.config.deepseek_home.display(),
+                        bundle = %bundle.display(),
+                        "provisioned the Captains bundle into the dsh sdk profile"
+                    );
+                }
+                ProvisionOutcome::Present => {}
+                ProvisionOutcome::Refused(reason) => {
+                    tracing::warn!(error = %reason, "dsh profile bundle not provisioned");
+                    // A chat run boots the sdk profile: without the bundle
+                    // it would start a turn that silently loses the Captain
+                    // section and its Drive tools, so refuse it visibly. A
+                    // chatless run — a title generation — boots sdk-minimal
+                    // and still prepares.
+                    if chat_id.is_some() {
+                        return Err(format!(
+                            "the dsh profile at {} could not take the Captains bundle: {reason}",
+                            self.0.config.deepseek_home.display()
+                        ));
+                    }
+                }
+            }
+        }
         // Zeron's own Harness home is the one credential store: the gateway
         // writes it and every run reads it, so a provider configured in the
         // app is the provider the next run uses. A run that must not see the
