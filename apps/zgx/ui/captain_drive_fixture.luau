@@ -29,7 +29,7 @@ local texts: { [string]: string } = {
 
 -- The Drive as the host lists it (SUR-249): one flat array, each `name` the
 -- Drive-relative path `CaptainDriveRead` takes, sorted by name, `size` and
--- `mtime` on files only. `state/needs-you.json` is listed here on purpose:
+-- `mtime` on files only — `mtime` as RFC 3339 text, the host's own shape. `state/needs-you.json` is listed here on purpose:
 -- the host must not send it, and the tab hides it even if one does.
 local order = {
 	"AGENTS.md",
@@ -42,14 +42,14 @@ local order = {
 	"state/needs-you.json",
 }
 
-local function listing(): { { name: string, kind: string, size: number?, mtime: number? } }
+local function listing(): { { name: string, kind: string, size: number?, mtime: string? } }
 	local out = {}
 	for _, name in order do
 		local text = texts[name]
 		if text then
-			table.insert(out, { name = name, kind = "file", size = #text, mtime = 1763900000 })
+			table.insert(out, { name = name, kind = "file", size = #text, mtime = "2026-11-23T15:10:41Z" })
 		elseif name == "state/needs-you.json" then
-			table.insert(out, { name = name, kind = "file", size = 40, mtime = 1763900000 })
+			table.insert(out, { name = name, kind = "file", size = 40, mtime = "2026-11-23T15:10:41Z" })
 		else
 			table.insert(out, { name = name, kind = "directory" })
 		end

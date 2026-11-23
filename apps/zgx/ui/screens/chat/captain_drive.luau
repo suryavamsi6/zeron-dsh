@@ -302,7 +302,7 @@ M.Tab = ui.component(function(props: TabProps): Node
 		return ListRow {
 			label = entry.name,
 			on_click = function()
-				opening(entry.name)
+				opening(row.path)
 			end,
 			line,
 		}
