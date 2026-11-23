@@ -224,18 +224,85 @@ fn reports(drive: &std::path::Path) -> Vec<Json> {
         .collect()
 }
 
-/// The Drive's files, flat: every top-level entry plus the files directly
-/// under `reports/`, each `name` the Drive-relative path `CaptainDriveRead`
-/// accepts. `state/` is the engine's, not the page's. STUB: the next brief
-/// implements this.
-fn drive_files(_drive: &std::path::Path) -> Vec<Json> {
-    Vec::new()
+/// The Drive's files, flat: every top-level entry but `state/` (the
+/// engine's own) plus the files directly under `reports/` — not the
+/// directories there, not `handoffs/`'s contents — each `name` the
+/// Drive-relative path `CaptainDriveRead` accepts. A file carries `size`
+/// and `mtime` (epoch seconds), a directory neither, and a link is never
+/// listed. Sorted by `name` in byte order; a missing or unreadable Drive
+/// is an empty list.
+fn drive_files(drive: &std::path::Path) -> Vec<Json> {
+    let mut listed: Vec<Json> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(drive) {
+        for entry in entries.flatten() {
+            if entry.file_name() == "state" {
+                continue;
+            }
+            if let Some(one) = drive_entry(&entry, entry.file_name().to_string_lossy().into_owned())
+            {
+                listed.push(one);
+            }
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(drive.join(REPORTS_DIR)) {
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else { continue };
+            if !kind.is_file() {
+                continue;
+            }
+            let name = format!("{}/{}", REPORTS_DIR, entry.file_name().to_string_lossy());
+            if let Some(one) = drive_entry(&entry, name) {
+                listed.push(one);
+            }
+        }
+    }
+    listed.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    listed
 }
 
-/// One file's text by its Drive-relative path, through [`read_inside`]; a path
-/// that escapes the Drive is an error the page shows. STUB.
-fn drive_read(_drive: &std::path::Path, _path: &str) -> Result<String, String> {
-    Ok(String::new())
+/// One listing row for `entry` under `name`: `{ name, kind }`, a file
+/// carrying `size` (bytes) and `mtime` (epoch seconds), a directory
+/// carrying neither. A link — `file_type()` is the entry's own type — and
+/// anything neither file nor directory is nil.
+fn drive_entry(entry: &std::fs::DirEntry, name: String) -> Option<Json> {
+    let kind = entry.file_type().ok()?;
+    if kind.is_symlink() {
+        return None;
+    }
+    if kind.is_dir() {
+        return Some(json!({ "name": name, "kind": "directory" }));
+    }
+    if !kind.is_file() {
+        return None;
+    }
+    let meta = entry.metadata().ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|when| when.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|age| age.as_secs())
+        .unwrap_or(0);
+    Some(json!({ "name": name, "kind": "file", "size": meta.len(), "mtime": mtime }))
+}
+
+/// One file's text by its Drive-relative path, through [`read_inside`]. An
+/// empty path, an absolute one, or any `..` component — and, followed to
+/// where it really is, anything outside the Drive or not a regular file —
+/// is the host's error, not a read.
+fn drive_read(drive: &std::path::Path, path: &str) -> Result<Json, String> {
+    let relative = std::path::Path::new(path);
+    if path.is_empty()
+        || relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+    {
+        return Err("The path leaves the Captain's Drive".to_string());
+    }
+    let text = read_inside(drive, &drive.join(relative))
+        .ok_or_else(|| "The file isn't in the Captain's Drive".to_string())?;
+    let size = text.len();
+    Ok(json!({ "text": text, "size": size }))
 }
 
 /// The Captain's Drive as the Digest tab reads it: `DIGEST.md`, the engine's
@@ -311,7 +378,7 @@ mod tests {
             let entry = &files[index];
             assert_eq!(entry["kind"], "file", "{}", entry["name"]);
             assert!(entry["size"].is_number(), "a file's size, in bytes: {}", entry["name"]);
-            assert!(entry["mtime"].is_string(), "a file's mtime, RFC 3339: {}", entry["name"]);
+            assert!(entry["mtime"].is_number(), "a file's mtime, seconds since the epoch: {}", entry["name"]);
         }
     }
 
@@ -325,11 +392,13 @@ mod tests {
         let body = "# Crew\n\nThe manifest ends with a newline.\n";
         std::fs::write(drive.join("CREW.md"), body).unwrap();
 
+        let read = drive_read(&drive, "CREW.md").expect("CREW.md is in the Drive");
         assert_eq!(
-            drive_read(&drive, "CREW.md").as_deref(),
-            Ok(body),
+            read["text"].as_str(),
+            Some(body),
             "the Drive-relative path reads the file byte for byte"
         );
+        assert_eq!(read["size"].as_u64(), Some(body.len() as u64), "the size is the bytes read");
     }
 
     /// Every way out of the Drive is refused as an error — `../`, an absolute
@@ -360,11 +429,13 @@ mod tests {
             std::os::unix::fs::symlink(&outside, drive.join("escape.md")).unwrap();
             let refused = drive_read(&drive, "escape.md");
             assert!(refused.is_err(), "a link pointing out of the Drive is refused");
-            assert_ne!(
-                refused.ok().as_deref(),
-                Some("not the Captain's"),
-                "and the outside file's text never comes back"
-            );
+            if let Ok(answer) = refused {
+                assert_ne!(
+                    answer["text"].as_str(),
+                    Some("not the Captain's"),
+                    "and the outside file's text never comes back"
+                );
+            }
         }
     }
 }
