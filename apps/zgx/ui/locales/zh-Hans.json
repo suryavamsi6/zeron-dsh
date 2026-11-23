@@ -2724,7 +2724,14 @@
         "demote_body": "它的船员会回到你的对话列表。",
         "demote_confirm": "降级为普通对话",
         "demote_failed": "无法降级 {name}",
-        "settings_link": "设置 → DeepSeek 插件"
+        "settings_link": "设置 → DeepSeek 插件",
+        "move_to": "移到队长",
+        "move_none": "此项目中没有队长",
+        "move_already": "这个对话已经是队长",
+        "move_child": "子对话不能加入船员",
+        "remove_crew": "移出船员",
+        "move_failed": "无法将 {name} 加入 {captain} 的船员",
+        "remove_failed": "无法将 {name} 移出船员"
       },
       "project": {
         "rename_title": "重命名项目",

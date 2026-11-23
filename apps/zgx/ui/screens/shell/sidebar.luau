@@ -904,6 +904,14 @@ local M = {}
 -- chat offers Promote.
 local captains = ui.state("shell_captains", {} :: { [string]: boolean })
 local captain_names = ui.state("shell_captains_names", {} :: { [string]: string })
+-- The crew (SUR-91): which Captain each member chat is in the crew of, and
+-- the roster's rows in its own order. A member's menu offers Remove from
+-- crew; any other top-level chat's offers Move to Captain, narrowed to the
+-- Captains in its project (the engine's own rule, said before it is
+-- broken). Stale by a menu's animation at worst: the roster is read as each
+-- menu opens, and the engine's refusal is what decides.
+local crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
+local captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
 local captains_reading = false
 local function read_captains()
 	if captains_reading then
@@ -921,15 +929,29 @@ local function read_captains()
 		captains_reading = false
 		local found: { [string]: boolean } = {}
 		local names: { [string]: string } = {}
+		local crews: { [string]: string } = {}
+		local rows: { { chatId: string, name: string } } = {}
 		for _, c in (answer and answer.captains) or {} do
-			if type(c) == "table" and type(c.chatId) == "string" then
+			-- (The roster keeps a demoted Captain as an archived record
+			-- (`captains.rs`'s roster: the live and archived rows alike), so
+			-- it is not one to offer, not a crew to join, and not a chat to
+			-- demote again: skipped here, the read is the live roster.)
+			if type(c) == "table" and type(c.chatId) == "string" and c.archived ~= true then
 				found[c.chatId] = true
 				names[c.chatId] = if type(c.name) == "string" then c.name else ""
+				table.insert(rows, { chatId = c.chatId, name = names[c.chatId] })
+				for _, member in c.crew or {} do
+					if type(member) == "string" then
+						crews[member] = c.chatId
+					end
+				end
 			end
 		end
 		ui.batch(function()
 			captains:set(found)
 			captain_names:set(names)
+			crew_of:set(crews)
+			captain_rows:set(rows)
 		end)
 	end, function()
 		captains_reading = false
@@ -937,9 +959,9 @@ local function read_captains()
 end
 M.read_captains = read_captains
 
--- The three host actions (SUR-83), each a promise, under the names the menu
--- and its dialogs call: kept on `M` so a test stands them in
--- (ui/captains_promote_fixture.luau).
+-- The host actions (SUR-83, SUR-91), each a promise, under the names the
+-- menu and its dialogs call: kept on `M` so a test stands them in
+-- (ui/captains_promote_fixture.luau, ui/captains_crew_fixture.luau).
 function M.roster(): any
 	return ui.call("Captains", {})
 end
@@ -950,6 +972,14 @@ end
 
 function M.demote_call(chat_id: string): any
 	return ui.call("DemoteCaptain", { chatId = chat_id })
+end
+
+function M.add_crew_call(captain_id: string, chat_id: string): any
+	return ui.call("AddCrew", { captainId = captain_id, chatId = chat_id })
+end
+
+function M.remove_crew_call(captain_id: string, chat_id: string): any
+	return ui.call("RemoveCrew", { captainId = captain_id, chatId = chat_id })
 end
 
 -- You and settings at a sidebar's foot (this one's, and the settings
@@ -1243,6 +1273,35 @@ local function menu(id: string): { any }?
 	-- (Read as the menu opens, so a role changed elsewhere is right by the
 	-- next one; the words here are this open's.)
 	read_captains()
+	-- Move to Captain offers the roster's Captains that share this chat's
+	-- project — never this chat itself. The engine's rule is that a crew
+	-- member is in the Captain's project; the menu narrows to it, and where
+	-- the rule already says no (this chat is a Captain, or a child) the row
+	-- stays and says why, rather than disappearing.
+	local crew_into: { any } = {}
+	local crew_reason: string? = nil
+	if captains:peek()[id] then
+		crew_reason = locale.s("shell.sidebar.captains.move_already")
+	elseif side then
+		crew_reason = locale.s("shell.sidebar.captains.move_child")
+	else
+		for _, cap in captain_rows:peek() do
+			local other = chat(cap.chatId)
+			if cap.chatId ~= id and other and c.project and other.project == c.project then
+				table.insert(crew_into, {
+					label = if cap.name ~= "" then cap.name else other.title,
+					icon = "user-rounded",
+					on_select = function()
+						M.move_crew(cap.chatId, id)
+					end,
+				})
+			end
+		end
+		if #crew_into == 0 then
+			crew_reason = locale.s("shell.sidebar.captains.move_none")
+		end
+	end
+	local in_crew = crew_of:peek()[id]
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1268,6 +1327,25 @@ local function menu(id: string): { any }?
 				on_select = function()
 					M.promote(id)
 				end,
+			},
+		-- (The crew (SUR-91). A member's menu releases it; every other
+		-- chat's names the Captain it could join. The words differ on
+		-- purpose — Move to Captain against Remove from crew — and nothing
+		-- but the existing row and menu item is added: no button, no
+		-- badge.)
+		if in_crew
+			then {
+				label = locale.s("shell.sidebar.captains.remove_crew"),
+				icon = "minus",
+				on_select = function()
+					M.release(id)
+				end,
+			}
+			else {
+				label = locale.s("shell.sidebar.captains.move_to"),
+				icon = "user-rounded",
+				submenu = if #crew_into > 0 and crew_reason == nil then crew_into else nil,
+				disabled = crew_reason,
 			},
 		if side
 			then false
@@ -1678,6 +1756,57 @@ function M.demote(id: string)
 	end
 	demoting:set(id)
 	demote_open:set(true)
+end
+
+-- The engine's rule refusal (a crew member is in the Captain's project, a
+-- chat is in at most one crew, a child of an ordinary chat can't crew): its
+-- own sentence in a toast, no dialog, no link — nothing changed, and the
+-- row stays where it is, so the next menu tries again.
+local function crew_toast(title: string, body: string?)
+	ds.toast.show {
+		title = title,
+		body = body,
+		tone = "danger",
+		duration = 9000,
+	}
+end
+
+-- Move to Captain: add this chat to `captain_id`'s crew (SUR-83's
+-- `AddCrew`). The membership is the engine's: a success reads the roster
+-- back, so the same menu offers Remove from crew, and the chat is not
+-- moved, renamed or opened by it — the selected chat keeps its place and
+-- focus.
+function M.move_crew(captain_id: string, chat_id: string)
+	local ok, promise = pcall(function(): any
+		return M.add_crew_call(captain_id, chat_id)
+	end)
+	if not ok then
+		return
+	end
+	promise:after(function()
+		read_captains()
+	end, function(err: any)
+		crew_toast(locale.s("shell.sidebar.captains.move_failed", { name = captain_name_of(chat_id), captain = captain_name_of(captain_id) }), why_of(err))
+	end)
+end
+
+-- Remove from crew: release this chat from the crew the roster puts it in.
+function M.release(chat_id: string)
+	local captain = crew_of:peek()[chat_id]
+	if not captain then
+		return
+	end
+	local ok, promise = pcall(function(): any
+		return M.remove_crew_call(captain, chat_id)
+	end)
+	if not ok then
+		return
+	end
+	promise:after(function()
+		read_captains()
+	end, function(err: any)
+		crew_toast(locale.s("shell.sidebar.captains.remove_failed", { name = captain_name_of(chat_id) }), why_of(err))
+	end)
 end
 
 local function promote_dialog(): Node

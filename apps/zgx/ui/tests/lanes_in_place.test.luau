@@ -420,7 +420,10 @@ test("a side chat's tab has the sidebar's menu for its chat: rename, copy, archi
 		expect(labels).to_contain(item)
 	end
 	expect(labels).never.to_contain("Pin")
-	expect(labels).never.to_contain("Move to")
+	-- (The sections' "Move to", which a side chat has no place for: the
+	-- crew's "Move to Captain" (SUR-91) is another item, and it is offered
+	-- saying why it cannot be used.)
+	expect(string.find(`{labels},`, ",Move to,", 1, true)).to_be(nil)
 	app:set_state("test_menu_pick", "Archive")
 	app:command("tab_menu_pick")
 	app:frames(20)

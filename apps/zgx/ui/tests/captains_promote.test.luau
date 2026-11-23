@@ -59,6 +59,9 @@ test("captains_promote: the chat's menu promotes it, Demote replaces Promote, an
 	expect(app:tree("role:dialog")).to_contain("Its crew goes back to your chat list.")
 	app:click('role:button "Demote to chat"')
 	pause(app)
+	-- (The fixture answers a demote as the engine does: the chat stays on the
+	-- roster as an archived record. Read as a Captain it would offer Demote
+	-- again; the archived row is not one, so its menu is a chat's.)
 	menu(app)
 	expect(app:has('role:menuitem "Promote to Captain…"')).to_be(true)
 	expect(app:has('role:menuitem "Demote to chat"')).to_be(false)

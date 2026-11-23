@@ -2724,7 +2724,14 @@
         "demote_body": "Its crew goes back to your chat list.",
         "demote_confirm": "Demote to chat",
         "demote_failed": "Couldn't demote {name}",
-        "settings_link": "Settings → DeepSeek plugins"
+        "settings_link": "Settings → DeepSeek plugins",
+        "move_to": "Move to Captain",
+        "move_none": "No Captains in this project",
+        "move_already": "This chat is already a Captain",
+        "move_child": "A child chat can't join a crew",
+        "remove_crew": "Remove from crew",
+        "move_failed": "Couldn't add {name} to {captain}'s crew",
+        "remove_failed": "Couldn't remove {name} from the crew"
       },
       "project": {
         "rename_title": "Rename project",
