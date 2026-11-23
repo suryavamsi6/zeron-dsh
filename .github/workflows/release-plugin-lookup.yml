@@ -40,4 +40,4 @@ jobs:
         with:
           rust-cache: release-plugin-lookup
       - name: Packaged plugin lookup, byte for byte
-        run: cargo nextest run --locked --release -p zeron --test release_plugin_lookup
+        run: cargo nextest run --config-file scripts/ci/nextest.toml --locked --release -p zeron --test release_plugin_lookup
