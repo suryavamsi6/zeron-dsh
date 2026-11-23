@@ -10,6 +10,8 @@ import { apply } from '../index.js';
 // revocation section, and declare one request-series rebase so the stale
 // system prefix is rewritten, not appended after.
 
+const REVOCATION_LINE = 'The Helm role has been revoked. Treat this conversation as an ordinary chat. Earlier Helm instructions are void.';
+
 const driveRoot = join(tmpdir(), 'drive', 'helm');
 const helm = {
   role: 'captain',
@@ -99,7 +101,7 @@ test('the demotion turn registers one revocation line and rebases the series', a
   const line = section.text();
   assert.ok(line.length > 0, 'the revocation section is empty');
   assert.ok(!line.includes('<captain'), 'the revocation line repeats the retired block');
-  assert.ok(/revoked/i.test(line), 'the line says the role was revoked');
+  assert.equal(line, REVOCATION_LINE, "the revocation line must be the ticket's wording, not a paraphrase");
 
   const decision = await h.step();
   assert.equal(decision.kind, 'enter');
@@ -181,4 +183,10 @@ test('a system message that is not the system prompt is not the retired section'
 test('a native child never revokes the Captain section', () => {
   const child = harness({ role: 'none' }, () => [systemMessage(retired)], { origin: 'subagent' });
   assert.deepEqual(child.sections, [], 'a native child registered the revocation section');
+});
+
+test('an empty context loads inertly instead of throwing', () => {
+  // The contract's inert row applies the bundle with no runtime hooks at all;
+  // a missing `on` used to break this at load inside applyRevoked.
+  assert.doesNotThrow(() => apply({}, { role: 'none' }));
 });

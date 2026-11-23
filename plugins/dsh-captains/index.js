@@ -75,6 +75,11 @@ function carriesRetiredBlock(agent) {
 // request-series rebase, so the stale system prefix is rewritten in place
 // rather than appended after.
 function applyRevoked(ctx) {
+  // A context without the runtime hooks (the rc.3 contract's inert default
+  // row, or a bundle loaded with no dsh-tools peer) never gets an agent, so
+  // there is nothing to revoke there: skip the registration instead of
+  // throwing at load and taking the whole bundle down with it.
+  if (typeof ctx?.on !== 'function') return;
   const revoked = new WeakSet();
   const rebaseOwed = new WeakSet();
   const revoke = agent => {
@@ -85,7 +90,7 @@ function applyRevoked(ctx) {
     scope.effect(() => scope.systemPrompt.section({
       name: 'zeron-captains:revoked',
       order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
-      text: () => 'The Captain role for this chat has been revoked; earlier Captain instructions no longer apply.',
+      text: () => 'The Helm role has been revoked. Treat this conversation as an ordinary chat. Earlier Helm instructions are void.',
       interpolate: false,
     }));
   };
