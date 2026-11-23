@@ -2711,6 +2711,21 @@
         "remove": "Remove…",
         "edit_project": "Edit project…"
       },
+      "captains": {
+        "promote": "Promote to Captain…",
+        "demote": "Demote to chat",
+        "promote_title": "Promote to Captain",
+        "name": "Name",
+        "name_placeholder": "Captain's name",
+        "promote_confirm": "Promote to Captain",
+        "promoted_warning": "Promoted {name}, but the plugin didn't install",
+        "promote_failed": "Couldn't promote {name}",
+        "demote_title": "Demote {name}?",
+        "demote_body": "Its crew goes back to your chat list.",
+        "demote_confirm": "Demote to chat",
+        "demote_failed": "Couldn't demote {name}",
+        "settings_link": "Settings → DeepSeek plugins"
+      },
       "project": {
         "rename_title": "Rename project",
         "name": "Project name",

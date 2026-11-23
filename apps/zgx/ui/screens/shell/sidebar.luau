@@ -896,6 +896,62 @@ end
 -- What else asks for these (the shell's keys, the palette).
 local M = {}
 
+-- Which chats are Captains on this device (SUR-83's `Captains`), by id, with
+-- the name each was promoted under: the chat's menu offers Promote to
+-- Captain… or, on one of these, Demote to chat. Read as the sidebar is made,
+-- when a menu opens and again after a promotion or a demotion. A page
+-- without the host's actions (a fixture, an older build) has none, and every
+-- chat offers Promote.
+local captains = ui.state("shell_captains", {} :: { [string]: boolean })
+local captain_names = ui.state("shell_captains_names", {} :: { [string]: string })
+local captains_reading = false
+local function read_captains()
+	if captains_reading then
+		return
+	end
+	captains_reading = true
+	local ok, promise = pcall(function(): any
+		return M.roster()
+	end)
+	if not ok then
+		captains_reading = false
+		return
+	end
+	promise:after(function(answer: any)
+		captains_reading = false
+		local found: { [string]: boolean } = {}
+		local names: { [string]: string } = {}
+		for _, c in (answer and answer.captains) or {} do
+			if type(c) == "table" and type(c.chatId) == "string" then
+				found[c.chatId] = true
+				names[c.chatId] = if type(c.name) == "string" then c.name else ""
+			end
+		end
+		ui.batch(function()
+			captains:set(found)
+			captain_names:set(names)
+		end)
+	end, function()
+		captains_reading = false
+	end)
+end
+M.read_captains = read_captains
+
+-- The three host actions (SUR-83), each a promise, under the names the menu
+-- and its dialogs call: kept on `M` so a test stands them in
+-- (ui/captains_promote_fixture.luau).
+function M.roster(): any
+	return ui.call("Captains", {})
+end
+
+function M.promote_call(chat_id: string, name: string): any
+	return ui.call("PromoteCaptain", { chatId = chat_id, name = name })
+end
+
+function M.demote_call(chat_id: string): any
+	return ui.call("DemoteCaptain", { chatId = chat_id })
+end
+
 -- You and settings at a sidebar's foot (this one's, and the settings
 -- window's: screens/shell/settings): you open your profile, chosen while
 -- it's open; settings' own button is a toggle, on while a page of theirs
@@ -1184,6 +1240,9 @@ local function menu(id: string): { any }?
 			end
 		end
 	end
+	-- (Read as the menu opens, so a role changed elsewhere is right by the
+	-- next one; the words here are this open's.)
+	read_captains()
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1192,6 +1251,24 @@ local function menu(id: string): { any }?
 				M.rename(id)
 			end,
 		},
+		-- (A Captain, or a chat that can become one: only on a top-level
+		-- chat's own menu — never a child's, never a side chat's.)
+		if side
+			then false
+			elseif captains:peek()[id] then {
+				label = locale.s("shell.sidebar.captains.demote"),
+				icon = "arrow-down",
+				on_select = function()
+					M.demote(id)
+				end,
+			}
+			else {
+				label = locale.s("shell.sidebar.captains.promote"),
+				icon = "arrow-up",
+				on_select = function()
+					M.promote(id)
+				end,
+			},
 		if side
 			then false
 			else {
@@ -1538,6 +1615,136 @@ local function sleep_dialog(): Node
 	}
 end
 
+-- Promote to Captain… and Demote to chat, from the chat's own menu.
+local promoting = ui.state("shell_promoting", nil :: string?)
+local promote_open = ui.state("shell_promote_open", false)
+local promote_name = ui.state("shell_promote_name", "")
+local demoting = ui.state("shell_demoting", nil :: string?)
+local demote_open = ui.state("shell_demote_open", false)
+
+-- The engine's refusal as the page says it: its own words where it has them.
+local function why_of(err: any): string?
+	if type(err) == "table" and type(err.message) == "string" and err.message ~= "" then
+		return err.message
+	end
+	return if type(err) == "string" and err ~= "" then err else nil
+end
+
+-- A promotion's failure, or what the engine warns of after the role was
+-- saved, as a toast: its words and the way to Settings → DeepSeek plugins.
+-- Never a dialog: the chat's row stays as it was, and the same menu tries
+-- again.
+local function captains_toast(title: string, body: string?)
+	ds.toast.show {
+		title = title,
+		body = body,
+		tone = "danger",
+		duration = 9000,
+		action = {
+			label = locale.s("shell.sidebar.captains.settings_link"),
+			run = function()
+				route.settings("dsh-plugins")
+			end,
+		},
+	}
+end
+
+-- The name the roster has for `id`; else the chat's own title.
+local function captain_name_of(id: string?): string
+	if not id then
+		return ""
+	end
+	local known = captain_names:peek()[id]
+	local c = chat(id)
+	return if known and known ~= "" then known else (if c then c.title else "")
+end
+
+-- Promote to Captain…: the dialog, its Name field beginning as the chat's
+-- title.
+function M.promote(id: string)
+	local c = chat(id)
+	if not c then
+		return
+	end
+	promoting:set(id)
+	promote_name:set(c.title)
+	promote_open:set(true)
+end
+
+-- Demote to chat: the alert first, saying where the crew goes.
+function M.demote(id: string)
+	if not chat(id) then
+		return
+	end
+	demoting:set(id)
+	demote_open:set(true)
+end
+
+local function promote_dialog(): Node
+	local function done()
+		local id = promoting:peek()
+		local name = string.match(promote_name:peek(), "^%s*(.-)%s*$") or ""
+		promoting:set(nil)
+		promote_open:set(false)
+		if not id or name == "" then
+			return
+		end
+		M.promote_call(id, string.sub(name, 1, 200)):after(function(answer: any)
+			-- (The role is the engine's: read the roster back first, so the
+			-- menu offers Demote, then say what the bundle could not, if the
+			-- engine names it.)
+			read_captains()
+			local warning = if type(answer) == "table" then answer.pluginError else nil
+			if type(warning) == "string" and warning ~= "" then
+				captains_toast(locale.s("shell.sidebar.captains.promoted_warning", { name = name }), warning)
+			end
+		end, function(err: any)
+			-- (Nothing changed: the chat is a chat still, and its menu offers
+			-- Promote again.)
+			captains_toast(locale.s("shell.sidebar.captains.promote_failed", { name = name }), why_of(err))
+		end)
+	end
+	return ds.Dialog {
+		open = promote_open,
+		title = ui.t("shell.sidebar.captains.promote_title") :: any,
+		size = "sm",
+		confirm = { label = ui.t("shell.sidebar.captains.promote_confirm") :: any, on_click = done },
+		ds.TextField {
+			value = promote_name,
+			label = ui.t("shell.sidebar.captains.name") :: any,
+			placeholder = function(): string
+				return locale.s("shell.sidebar.captains.name_placeholder")
+			end,
+			select_on_focus = true,
+			w_full = true,
+		},
+	}
+end
+
+local function demote_dialog(): Node
+	local function done()
+		local id = demoting:peek()
+		demoting:set(nil)
+		demote_open:set(false)
+		if not id then
+			return
+		end
+		M.demote_call(id):after(function()
+			read_captains()
+		end, function(err: any)
+			captains_toast(locale.s("shell.sidebar.captains.demote_failed", { name = captain_name_of(id) }), why_of(err))
+		end)
+	end
+	return ds.Dialog {
+		open = demote_open,
+		title = ui.t("shell.sidebar.captains.demote_title", { name = captain_name_of(demoting:get()) }) :: any,
+		body = ui.t("shell.sidebar.captains.demote_body") :: any,
+		tone = "danger",
+		size = "sm",
+		confirm = { label = ui.t("shell.sidebar.captains.demote_confirm") :: any, on_click = done },
+	}
+end
+
 local function rename_dialog(): Node
 	local function done()
 		local id = renaming:peek()
@@ -1564,6 +1771,11 @@ M.Sidebar = ui.component(function(props: Props): Node
 	if not props.island then
 		M.card:set(nil)
 	end
+	-- (Which chats are Captains, once: the menu's Promote or Demote. A page
+	-- without the host's actions never finds one.)
+	ui.effect(function()
+		read_captains()
+	end)
 	local bar = ds.Sidebar {
 		compact = shared.compact,
 		organize = shared.organize :: any,
@@ -1670,6 +1882,8 @@ M.Sidebar = ui.component(function(props: Props): Node
 		ui.div { absolute = true, left = 0, top = 0, w = ui.raw(5, "the window's gap"), h = ui.raw(42, "the top bar"), window_drag = true },
 		bar,
 		rename_dialog(),
+		promote_dialog(),
+		demote_dialog(),
 		delete_dialog(),
 		sleep_dialog(),
 		project_dialogs(),

@@ -2711,6 +2711,21 @@
         "remove": "移除…",
         "edit_project": "编辑项目…"
       },
+      "captains": {
+        "promote": "提升为队长…",
+        "demote": "降级为普通对话",
+        "promote_title": "提升为队长",
+        "name": "名称",
+        "name_placeholder": "队长的名称",
+        "promote_confirm": "提升为队长",
+        "promoted_warning": "已提升 {name}，但插件未能安装",
+        "promote_failed": "无法提升 {name}",
+        "demote_title": "将 {name} 降级？",
+        "demote_body": "它的船员会回到你的对话列表。",
+        "demote_confirm": "降级为普通对话",
+        "demote_failed": "无法降级 {name}",
+        "settings_link": "设置 → DeepSeek 插件"
+      },
       "project": {
         "rename_title": "重命名项目",
         "name": "项目名称",
