@@ -9,6 +9,7 @@
 use std::time::Duration;
 
 use serde_json::json;
+use zgx_script::testing::TestApp;
 
 /// The fixture's two chats, both in project Atlas: a1 "Fix the build" (the
 /// chat promoted to Captain) and a2 "Write the docs" (its crew).
@@ -27,6 +28,30 @@ fn wait(what: &str, mut done: impl FnMut() -> bool) {
     panic!("timed out waiting for {what}");
 }
 
+/// Open `row`'s context menu. A row that already holds the keyboard (a closed
+/// dialog restores focus to it) cannot take it again — `keys_on_row` asserts
+/// the click moved focus — so there the menu is asked for directly.
+fn menu(app: &mut TestApp, row: &str) {
+    // A dialog or menu still leaving holds its focus scope until its exit
+    // animation lands (the pop runs on the frames it takes): wait that out
+    // first — mid-exit `focused()` still names the panel, not where the keys
+    // are going.
+    app.wait_until(|app| app.ui.input.focus_scope().is_none());
+    let target = app.target(row).unwrap_or_else(|error| panic!("{row}: {error:?}"));
+    if app.ui.input.focused() != Some(target) {
+        crate::focus_tests::keys_on_row(app, row);
+    } else {
+        app.frames(2);
+    }
+    app.keys("shift+F10");
+    assert!(
+        app.wait_until(|app| app.find("role:menuitem \"Rename\"").is_some()),
+        "the menu never opened on {row}; page:\n{}",
+        app.tree()
+    );
+    app.frames(4);
+}
+
 #[test]
 fn helm_live_promote_add_report_and_needs_you() {
     let rig = crate::helm_live::Rig::new();
@@ -38,8 +63,7 @@ fn helm_live_promote_add_report_and_needs_you() {
     shell.ui.scene.borrow_mut().resize(1200., 800.);
     shell.frames(60);
     let row = "#shell-sidebar >> role:button \"Fix the build\"";
-    crate::focus_tests::keys_on_row(&mut shell, row);
-    shell.keys("shift+F10");
+    menu(&mut shell, row);
     assert!(
         shell.wait_until(|app| app.find("role:menuitem \"Promote to Captain…\"").is_some()),
         "the chat's menu never offered Promote; page:\n{}",
@@ -57,8 +81,7 @@ fn helm_live_promote_add_report_and_needs_you() {
         rig.captains().iter().any(|c| c["chatId"] == CAP && c["name"] == "Billing")
     });
     // The widget read the roster back: the same menu now offers the way back.
-    crate::focus_tests::keys_on_row(&mut shell, row);
-    shell.keys("shift+F10");
+    menu(&mut shell, row);
     assert!(
         shell.wait_until(|app| app.find("role:menuitem \"Demote to chat\"").is_some()),
         "the menu still offered Promote after the engine took it; page:\n{}",
@@ -67,14 +90,28 @@ fn helm_live_promote_add_report_and_needs_you() {
     shell.key(zgx::input::Key::Escape);
     shell.frames(10);
 
-    // 2. Manual crew assignment. Until SUR-91 adds the sidebar's Move to Helm
-    // menu, this is the same host action that menu will send, through the app's
-    // bridge (captains::install_over -> AddCrew on the engine).
-    rig.call("AddCrew", json!({ "captainId": CAP, "chatId": CREW }))
-        .expect("the engine takes the crew assignment");
-    wait("the crew row in the engine's roster", || {
-        rig.captains().iter().any(|c| c["chatId"] == CAP && c["crew"] == json!([CREW]))
-    });
+    // 2. The crew chat joins through its own menu (SUR-91): Move to Captain →
+    // the Captain just promoted. Same host bridge, same engine — a real widget.
+    let crew_row = "#shell-sidebar >> role:button \"Write the docs\"";
+    menu(&mut shell, crew_row);
+    shell.click("role:menuitem \"Move to Captain\"");
+    assert!(
+        shell.wait_until(|app| app.find("role:menuitem \"Billing\"").is_some()),
+        "Move to Captain offered no Captains; page:\n{}", shell.tree()
+    );
+    shell.frames(4);
+    shell.click("role:menuitem \"Billing\"");
+    // The AddCrew the menu sends rides the page's own executor (ui.call ->
+    // install_over -> the rig's memory client): `wait` only sleeps and would
+    // starve it, so the roster is watched on the app — its settles and frames
+    // are what carry the call to the engine.
+    assert!(
+        shell.wait_until(|_| rig
+            .captains()
+            .iter()
+            .any(|c| c["chatId"] == CAP && c["crew"] == json!([CREW]))),
+        "the crew row never reached the engine's roster"
+    );
 
     // 3. One crew report: the app's own send path (QueueCommand -> run), the
     // scripted harness answers, and the engine files the report in the Captain's
@@ -108,11 +145,12 @@ fn helm_live_promote_add_report_and_needs_you() {
     });
 
     // 5. The Needs-you ask on screen: the real Strip and Digest tab over the live
-    // engine's own Drive.
+    // engine's own Drive. The strip mounts hidden (a "· 0" placeholder) before
+    // CaptainDrive answers, so it is its count that is waited for, not the node.
     let mut digest = rig.digest();
     digest.ui.scene.borrow_mut().resize(900., 900.);
     assert!(
-        digest.wait_until(|app| app.find("#captain-needs-you").is_some()),
+        digest.wait_until(|app| app.tree().contains("Needs you · 1")),
         "the Needs-you strip never showed; page:\n{}",
         digest.tree()
     );

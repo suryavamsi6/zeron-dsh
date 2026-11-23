@@ -41,6 +41,7 @@ const DIGEST: &str = "# Billing\n\n## Needs you\n\n- Approve the invoice\n\n## N
 pub struct Rig {
     tmp: tempfile::TempDir,
     data_dir: PathBuf,
+    deepseek_home: PathBuf,
     core: EngineCore,
     rt: tokio::runtime::Runtime,
     runs: Arc<Mutex<Vec<RunRequest>>>,
@@ -63,7 +64,7 @@ fn done(status: DoneStatus) -> AgentEvent {
 struct Scripted {
     runs: Arc<Mutex<Vec<RunRequest>>>,
     captain: String,
-    data_dir: PathBuf,
+    deepseek_home: PathBuf,
 }
 
 #[async_trait]
@@ -111,7 +112,7 @@ impl Harness for Scripted {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         self.runs.lock().unwrap().push(request.clone());
         let digest = self
-            .data_dir
+            .deepseek_home
             .join("captains")
             .join(&self.captain)
             .join("DIGEST.md");
@@ -192,13 +193,10 @@ impl Rig {
         // The roster the engine's CaptainsStore opens at assembly — empty;
         // only the roster RPCs write rows after this.
         std::fs::write(data_dir.join("captains.json"), r#"{"captains":[]}"#).unwrap();
-        // Captain Drives live under the DeepSeek home
-        // (`AgentAccountsConfig::detect`): point it at this data dir so a
-        // Drive is `<data>/captains/<id>`. The engine reads it at assembly
-        // and again on every Captains RPC, so it stays set for the rig.
-        // SAFETY: a test-process variable, set before the engine exists;
-        // nextest runs this case in a process of its own.
-        unsafe { std::env::set_var("ZERON_DEEPSEEK_HOME", &data_dir) };
+        // Captain Drives live under the DeepSeek home, which the engine
+        // defaults to `<data>/deepseek` (`AgentAccountsConfig::detect`) — a
+        // Drive is `<deepseek_home>/captains/<id>`.
+        let deepseek_home = data_dir.join("deepseek");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -209,7 +207,7 @@ impl Rig {
         registry.register(Arc::new(Scripted {
             runs: runs.clone(),
             captain: CAP.to_owned(),
-            data_dir: data_dir.clone(),
+            deepseek_home: deepseek_home.clone(),
         }));
         // `assemble` boots the workspace host, which spawns
         // (`spawn_blocking`) and needs a Tokio context of its own — as
@@ -220,13 +218,10 @@ impl Rig {
                 .expect("engine core assembles")
         };
         core.sessions.set_no_ipc_port();
-        // Anchor the ort/glibc link shims below: the onnxruntime archive's
-        // references to them only resolve if the shim objects stay in the
-        // image, so keep their addresses live here.
-        std::hint::black_box(link_shims::symbols());
         Rig {
             tmp,
             data_dir,
+            deepseek_home,
             core,
             rt,
             runs,
@@ -324,10 +319,6 @@ impl Rig {
                 move |method: &'static str, params: Json| -> crate::providers::McpCall {
                     let client = Rc::clone(&client);
                     Box::pin(async move {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/hostcalls.log") {
-                            writeln!(f, "{:.3} {method} {params}", std::time::Instant::now().elapsed().as_secs_f64()).ok();
-                        }
                         client.call(method, params).await.map_err(|error| error.to_string())
                     })
                 },
@@ -349,14 +340,16 @@ impl Rig {
         self.runs.lock().unwrap().clone()
     }
 
-    /// `<data>/captains/<captain>/reports` — the Captain Drive's crew
-    /// reports folder.
+    /// `<deepseek_home>/captains/<captain>/reports` — the Captain Drive's
+    /// crew reports folder.
     pub fn reports_dir(&self, captain: &str) -> PathBuf {
-        self.data_dir.join("captains").join(captain).join("reports")
+        self.deepseek_home.join("captains").join(captain).join("reports")
     }
 
+    /// The Captain Drives' root — the engine's `deepseek_home`
+    /// (`<data>/deepseek`), so `data_dir().join("captains")` names a Drive.
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+        &self.deepseek_home
     }
 
     pub fn close(self) {
@@ -366,178 +359,4 @@ impl Rig {
         rt.block_on(async { core.shutdown().await });
         drop(tmp);
     }
-}
-
-/// The cached `ort-sys` archive (`zeron-voice`'s onnxruntime) was built on a
-/// newer toolchain than this box provides: it references glibc 2.38's C23
-/// `__isoc23_strto*` names, GCC 13's `std::ios_base_library_init`, and
-/// libstdc++ GLIBCXX_3.4.31's `basic_string::_M_replace_cold`, none of which
-/// glibc 2.36 / libstdc++ 6.0.30 export. Since this module only exists in
-/// the test binary, supplying the nine symbols here is the worktree-local
-/// fix: each forwards to the older ABI-identical entry or mirrors
-/// libstdc++'s own implementation.
-mod link_shims {
-    use std::ffi::{c_char, c_int, c_long, c_longlong, c_ulong, c_ulonglong, c_void};
-    use std::ptr;
-    use std::sync::Once;
-    use std::sync::atomic::AtomicUsize;
-
-    unsafe extern "C" {
-        fn strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_long;
-        fn strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulong;
-        fn strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_longlong;
-        fn strtoull(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulonglong;
-        fn strtoll_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int, loc: *mut c_void) -> c_longlong;
-        fn strtoull_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int, loc: *mut c_void) -> c_ulonglong;
-        /// `std::ios_base::Init::Init()` — what GCC 13's
-        /// `ios_base_library_init` replaced; libstdc++ 6.0.30 exports it.
-        #[link_name = "_ZNSt8ios_base4InitC1Ev"]
-        fn ios_base_init_ctor(this: *mut c_void);
-    }
-
-    // The C23 strto* variants are the same functions under new names
-    // (glibc 2.38 renamed them for the C23 `strtol`-family prototypes).
-    #[unsafe(export_name = "__isoc23_strtol")]
-    pub extern "C" fn isoc23_strtol(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_long {
-        unsafe { strtol(nptr, endptr, base) }
-    }
-    #[unsafe(export_name = "__isoc23_strtoul")]
-    pub extern "C" fn isoc23_strtoul(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulong {
-        unsafe { strtoul(nptr, endptr, base) }
-    }
-    #[unsafe(export_name = "__isoc23_strtoll")]
-    pub extern "C" fn isoc23_strtoll(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_longlong {
-        unsafe { strtoll(nptr, endptr, base) }
-    }
-    #[unsafe(export_name = "__isoc23_strtoull")]
-    pub extern "C" fn isoc23_strtoull(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int) -> c_ulonglong {
-        unsafe { strtoull(nptr, endptr, base) }
-    }
-    #[unsafe(export_name = "__isoc23_strtoll_l")]
-    pub extern "C" fn isoc23_strtoll_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int, loc: *mut c_void) -> c_longlong {
-        unsafe { strtoll_l(nptr, endptr, base, loc) }
-    }
-    #[unsafe(export_name = "__isoc23_strtoull_l")]
-    pub extern "C" fn isoc23_strtoull_l(nptr: *const c_char, endptr: *mut *mut c_char, base: c_int, loc: *mut c_void) -> c_ulonglong {
-        unsafe { strtoull_l(nptr, endptr, base, loc) }
-    }
-
-    /// `std::__cxx11::basic_string::_M_replace_cold` (GLIBCXX_3.4.31) — the
-    /// in-place tail of `_M_replace` when `s` may overlap the buffer,
-    /// verbatim from `bits/basic_string.tcc`: `_S_move` is memmove
-    /// (`ptr::copy`), `_S_copy` is memcpy (`ptr::copy_nonoverlapping`).
-    /// The member's `this` only reaches static traits helpers, so the
-    /// receiver pointer goes unused.
-    unsafe fn m_replace_cold<T: Copy>(p: *mut T, len1: usize, s: *const T, len2: usize, how_much: usize) {
-        let size = size_of::<T>();
-        if len2 != 0 && len2 <= len1 {
-            unsafe { ptr::copy(s, p, len2) };
-        }
-        if how_much != 0 && len1 != len2 {
-            unsafe { ptr::copy(p.add(len1), p.add(len2), how_much) };
-        }
-        if len2 > len1 {
-            if (s as usize) + len2 * size <= (p as usize) + len1 * size {
-                unsafe { ptr::copy(s, p, len2) };
-            } else if (s as usize) >= (p as usize) + len1 * size {
-                let poff = ((s as usize) - (p as usize)) / size + (len2 - len1);
-                unsafe { ptr::copy_nonoverlapping(p.add(poff), p, len2) };
-            } else {
-                let nleft = ((p as usize) + len1 * size - (s as usize)) / size;
-                unsafe { ptr::copy(s, p, nleft) };
-                unsafe { ptr::copy_nonoverlapping(p.add(len2), p.add(nleft), len2 - nleft) };
-            }
-        }
-    }
-
-    /// `basic_string<char>` — mangled `…_M_replace_coldEPcmPKcmm`.
-    #[unsafe(export_name = "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE15_M_replace_coldEPcmPKcmm")]
-    pub extern "C" fn m_replace_cold_char(_this: *mut c_void, p: *mut u8, len1: usize, s: *const u8, len2: usize, how_much: usize) {
-        unsafe { m_replace_cold(p, len1, s, len2, how_much) }
-    }
-
-    /// `basic_string<wchar_t>` — `…_M_replace_coldEPwmPKwmm`; `wchar_t` is
-    /// four bytes on Linux.
-    #[unsafe(export_name = "_ZNSt7__cxx1112basic_stringIwSt11char_traitsIwESaIwEE15_M_replace_coldEPwmPKwmm")]
-    pub extern "C" fn m_replace_cold_wchar(_this: *mut c_void, p: *mut u32, len1: usize, s: *const u32, len2: usize, how_much: usize) {
-        unsafe { m_replace_cold(p, len1, s, len2, how_much) }
-    }
-
-    /// `std::ios_base_library_init()` (GLIBCXX_3.4.32) — GCC 13's <iostream>
-    /// static-init hook. libstdc++ runs a function-local
-    /// `static ios_base::Init` once; `Once` is the same one-shot through the
-    /// older ctor. `Init` is an empty class — the ctor only touches static
-    /// state, so any valid `this` address serves.
-    #[unsafe(export_name = "_ZSt21ios_base_library_initv")]
-    pub extern "C" fn ios_base_library_init() {
-        static ONCE: Once = Once::new();
-        static SLOT: AtomicUsize = AtomicUsize::new(0);
-        ONCE.call_once(|| unsafe { ios_base_init_ctor(&SLOT as *const AtomicUsize as *mut c_void) });
-    }
-
-    /// Every shim, as addresses: `Rig::new` black-boxes this so the linker
-    /// always keeps the shim objects in the image for the archive to
-    /// resolve against.
-    pub fn symbols() -> [usize; 9] {
-        [
-            isoc23_strtol as usize,
-            isoc23_strtoul as usize,
-            isoc23_strtoll as usize,
-            isoc23_strtoull as usize,
-            isoc23_strtoll_l as usize,
-            isoc23_strtoull_l as usize,
-            m_replace_cold_char as usize,
-            m_replace_cold_wchar as usize,
-            ios_base_library_init as usize,
-        ]
-    }
-}
-
-// TEMPORARY PROBE — micro-step kor2's press; remove before done.
-#[test]
-fn probe_verbatim() {
-    use zgx::input::{InputEvent, PointerButton};
-    let log = std::env::temp_dir().join("probe_focus5.log");
-    let _ = std::fs::remove_file(&log);
-    let w = |m: String| {
-        use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&log).unwrap();
-        writeln!(f, "{m}").unwrap();
-    };
-    let rig = crate::helm_live::Rig::new();
-    rig.create_chat("a1");
-    rig.create_chat("a2");
-    let mut shell = rig.shell();
-    shell.ui.scene.borrow_mut().resize(1200., 800.);
-    shell.frames(60);
-    let row = "#shell-sidebar >> role:button \"Fix the build\"";
-    crate::focus_tests::keys_on_row(&mut shell, row);
-    shell.keys("shift+F10");
-    shell.wait_until(|app| app.find("role:menuitem \"Promote to Captain…\"").is_some());
-    shell.click("role:menuitem \"Promote to Captain…\"");
-    shell.wait_until(|app| app.find("role:textbox \"Name\"").is_some());
-    shell.frames(30);
-    shell.fill("role:textbox \"Name\"", "Billing");
-    shell.click("role:button \"Promote to Captain\"");
-    let t0 = std::time::Instant::now();
-    while t0.elapsed() < std::time::Duration::from_secs(10) {
-        if rig.captains().iter().any(|c| c["chatId"] == "a1") { break; }
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-    // kor2, micro-stepped: target, PointerDown, PointerUp, settle, frames.
-    let b = shell.bounds(row);
-    let (x, y) = (b.x + b.width / 2., b.y + b.height / 2.);
-    w(format!("bounds={b:?} dialog={:?} focused={:?} scope={:?}",
-        shell.find("role:dialog"), shell.ui.input.focused(), shell.ui.input.focus_scope()));
-    shell.ui.dispatch(InputEvent::PointerDown { x, y, button: PointerButton::Primary });
-    w(format!("after down: focused={:?} dialog={:?} scope={:?}", shell.ui.input.focused(), shell.find("role:dialog"), shell.ui.input.focus_scope()));
-    shell.ui.dispatch(InputEvent::PointerUp { x, y, button: PointerButton::Primary });
-    shell.settle();
-    w(format!("after up: focused={:?} scope={:?}", shell.ui.input.focused(), shell.ui.input.focus_scope()));
-    shell.frames(10);
-    let t = shell.target(row).unwrap();
-    w(format!("after frames: focused={:?} target={t:?} dialog={:?} scope={:?}", shell.ui.input.focused(), shell.find("role:dialog"), shell.ui.input.focus_scope()));
-    let ok = shell.ui.input.focus(&shell.ui.scene, Some(t));
-    w(format!("focus -> {ok} focused={:?}", shell.ui.input.focused()));
-    rig.close();
 }
