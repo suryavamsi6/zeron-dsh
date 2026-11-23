@@ -3175,6 +3175,14 @@
       "forking": "Forking…",
       "retry": "Retry"
     },
+    "captain_digest": {
+      "tab": "Digest",
+      "needs_you": "Needs you · {n}",
+      "open": "Open digest",
+      "reports": "Crew reports",
+      "empty_title": "No digest yet",
+      "empty_body": "The Captain writes one as its first turn ends."
+    },
     "lanes": {
       "subagent": "Subagent",
       "need_conversation": "Start a conversation before creating a side chat.",

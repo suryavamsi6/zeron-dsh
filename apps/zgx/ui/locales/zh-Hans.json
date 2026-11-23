@@ -3175,6 +3175,14 @@
       "forking": "正在分叉…",
       "retry": "重试"
     },
+    "captain_digest": {
+      "tab": "摘要",
+      "needs_you": "需要你 · {n}",
+      "open": "打开摘要",
+      "reports": "船员报告",
+      "empty_title": "还没有摘要",
+      "empty_body": "队长会在第一次回合结束时写下摘要。"
+    },
     "lanes": {
       "subagent": "子智能体",
       "need_conversation": "开始对话后才能创建侧边对话。",
