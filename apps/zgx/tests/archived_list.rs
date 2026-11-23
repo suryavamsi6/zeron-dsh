@@ -16,14 +16,18 @@ fn ui_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("ui"))
 }
 
+/// The window `archived()` sets up, in points: the fixture's and the scene's.
+const WINDOW_W: f32 = 1200.;
+const WINDOW_H: f32 = 900.;
+
 /// The shell on Settings → Archived, two thousand sessions shown.
 fn archived() -> TestApp {
     let mut app = TestApp::new(|runtime| {
         let host = ScriptHost::new(runtime, ui_dir().join("shell_fixture.luau"));
-        host.window_size(runtime.signal((1200., 900.)));
+        host.window_size(runtime.signal((WINDOW_W, WINDOW_H)));
         host
     });
-    app.ui.scene.borrow_mut().resize(1200., 900.);
+    app.ui.scene.borrow_mut().resize(WINDOW_W, WINDOW_H);
     app.frames(30);
     assert_eq!(app.error(), None, "the shell failed to load");
     assert!(app.host.run_command("archive_thousands"));
@@ -38,8 +42,8 @@ fn archived() -> TestApp {
     app
 }
 
-/// Each row of `Chat <n>` built: its words and where it stands.
-fn rows(app: &mut TestApp) -> Vec<(String, f32)> {
+/// Each row of `Chat <n>` built: its words, where it stands and how tall.
+fn rows(app: &mut TestApp) -> Vec<(String, f32, f32)> {
     let mut out = Vec::new();
     for line in app.tree().lines() {
         let line = line.trim_start();
@@ -55,14 +59,19 @@ fn rows(app: &mut TestApp) -> Vec<(String, f32)> {
         }
         let rest = &line[at + 1..];
         let Some(end) = rest.find('"') else { continue };
-        let y = rest[end + 1..]
-            .trim()
+        let box_part = rest[end + 1..].trim();
+        let y = box_part
             .split(' ')
             .next()
             .and_then(|p| p.split(',').nth(1))
             .and_then(|v| v.parse().ok());
-        if let Some(y) = y {
-            out.push((rest[..end].to_string(), y));
+        let h = box_part
+            .split(' ')
+            .nth(1)
+            .and_then(|p| p.split('x').nth(1))
+            .and_then(|v| v.parse().ok());
+        if let (Some(y), Some(h)) = (y, h) {
+            out.push((rest[..end].to_string(), y, h));
         }
     }
     out
@@ -81,7 +90,7 @@ fn a_reload_puts_the_page_back_with_the_same_rows_in_the_same_places() {
         "only the rows it shows: {before:?}"
     );
     assert!(
-        before.iter().all(|(words, _)| words != "Chat 1"),
+        before.iter().all(|(words, ..)| words != "Chat 1"),
         "far from the first: {before:?}"
     );
     app.host.reload().expect("the reload");
@@ -113,7 +122,16 @@ fn a_rows_wash_runs_edge_to_edge_in_its_card() {
         .set_state("shell_settings_scroll", Value::Num(3000.))
         .unwrap();
     app.frames(10);
-    let (words, _) = rows(&mut app).into_iter().nth(3).expect("rows in view");
+    // The dump the rows come from is line-budgeted: it holds the first few
+    // rows the page built, however many that is, and the settings list above
+    // them moves as pages are added. Which of those rows stand wholly inside
+    // the window is the page's own answer, so take that one rather than
+    // counting to a fixed place: a clipped row's wash would be read off the
+    // wrong box.
+    let (words, _, _) = rows(&mut app)
+        .into_iter()
+        .find(|(_, y, h)| *y >= 0. && *y + *h <= WINDOW_H)
+        .expect("a row wholly in view");
     let target = format!("#settings-page >> role:group \"{words}\"");
     let row = app.find(&target).expect("the row");
     let bounds = app.ui.scene.borrow().bounds(row);

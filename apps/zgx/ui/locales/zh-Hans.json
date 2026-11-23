@@ -2557,10 +2557,10 @@
         "terms": "导入 deepseek 导出 zip 聊天 只读"
       },
       "choose": "选择文件…",
-      "busy": "正在导入…",
       "imported": "{n, plural, =0 {未导入聊天。} other {已导入 # 个聊天。}}",
       "already": "{n, plural, =0 {之前都不在这里。} other {其中 # 个之前已存在。}}",
       "kept": "保留 {kept}/{total} 个对话。",
+      "kept_ceiling": "导出包含 10,000 个或更多会话；已保留最新的 {kept} 个。",
       "failed": "导入未完成。",
       "retry": "重试"
     },

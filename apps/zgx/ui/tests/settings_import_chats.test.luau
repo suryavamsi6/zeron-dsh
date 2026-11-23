@@ -71,6 +71,26 @@ test("Import chats sends the picked path once and shows the engine's counts", fu
 	expect(app:has(`{PAGE} >> "4 of 5 conversations kept."`)).to_be(true)
 end)
 
+test("Import chats says the newest kept when the engine reports no total", function()
+	local app = settings()
+	app:set_state("settings_stub_files", { { path = "/tmp/deepseek-export.zip", name = "deepseek-export.zip" } })
+	-- (The engine's `total` is null past its ceiling: it kept the newest 1000
+	-- and invented no count, so the page must say that rather than hiding
+	-- that anything was left out.)
+	app:set_state("settings_stub_import_answer", {
+		imported = 1000,
+		alreadyPresent = 0,
+		chats = {},
+		kept = 1000,
+	})
+	app:click("#settings-import-chats")
+	app:frames(20)
+	expect(app:has(`{PAGE} >> "1000 chats imported."`)).to_be(true)
+	expect(app:has(`{PAGE} >> "The export holds 10,000 or more conversations; the newest 1000 were kept."`)).to_be(true)
+	-- (No "kept of total" row: there is no total to say.)
+	expect(app:has(`{PAGE} >> "1000 of 0 conversations kept."`)).to_be(false)
+end)
+
 test("Import chats says the engine's refusal and retries the same path", function()
 	local app = settings()
 	app:set_state("settings_stub_files", { { path = "/tmp/deepseek-export.zip", name = "deepseek-export.zip" } })

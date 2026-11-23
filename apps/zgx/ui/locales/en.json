@@ -2557,10 +2557,10 @@
         "terms": "import deepseek export zip chats read only"
       },
       "choose": "Choose file…",
-      "busy": "Importing…",
       "imported": "{n, plural, =0 {No chats imported.} one {# chat imported.} other {# chats imported.}}",
       "already": "{n, plural, =0 {None were here before.} one {# was already here.} other {# were already here.}}",
       "kept": "{kept} of {total} conversations kept.",
+      "kept_ceiling": "The export holds 10,000 or more conversations; the newest {kept} were kept.",
       "failed": "The import didn’t finish.",
       "retry": "Try again"
     },

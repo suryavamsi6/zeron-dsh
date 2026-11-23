@@ -15,11 +15,13 @@ local host = require("@app/screens/settings/host")
 local search = require("@app/screens/settings/search")
 
 local M = { ID = "import", TITLE = "Import chats" }
-search.index(M.ID, "Import chats", "import deepseek chats export zip read only conversations", {
+-- Its findability, as the other pages have it: the palette's words come from
+-- the locales too, so the terms a person searches are the ones the page says.
+search.index(M.ID, ui.t("settings.import_chats.title"), ui.t("settings.import_chats.terms"), {
 	{
 		key = "import",
-		title = "Import DeepSeek chats…",
-		terms = "import deepseek export zip chats read-only",
+		title = ui.t("settings.import_chats.action.label"),
+		terms = ui.t("settings.import_chats.action.terms"),
 	},
 })
 
@@ -80,6 +82,14 @@ local function count(field: string): number
 	return if type(a) == "table" then tonumber(a[field]) or 0 else 0
 end
 
+-- The engine's `total` is null when the export held 10 000 or more: it keeps
+-- the newest 1000 and invents no count, so the page says that rather than
+-- hiding that anything was left out.
+local function total(): number?
+	local a = answer:get()
+	return if type(a) == "table" then tonumber(a.total) else nil
+end
+
 function M.view(): Node
 	return ds.Settings.Page {
 		title = ui.t("settings.import_chats.title"),
@@ -115,6 +125,14 @@ function M.view(): Node
 						return ui.t("settings.import_chats.already", { n = count("alreadyPresent") }):get()
 					end,
 				},
+				ui.show(function(): boolean
+					return total() == nil and count("kept") > 0
+				end, ds.Settings.Row {
+					id = "settings-import-kept-ceiling",
+					label = function(): string
+						return ui.t("settings.import_chats.kept_ceiling", { kept = count("kept") }):get()
+					end,
+				}),
 				ui.show(function(): boolean
 					return count("total") > count("kept")
 				end, ds.Settings.Row {

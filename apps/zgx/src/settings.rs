@@ -335,16 +335,28 @@ pub fn install(_cx: &mut WindowContext, host: &ScriptHost) {
                 .call(&method, params)
                 .await
                 .map(|answer| json_value(&answer))
-                .map_err(|error| {
-                    // An engine too old for the method: said as what to do.
-                    if error.to_ascii_lowercase().contains("unknown method") {
-                        "outdated".into()
-                    } else {
-                        engine::outcome(&error).into()
-                    }
-                })
+                .map_err(|error| engine_error(&method, &error))
         }
     });
+}
+
+/// What the page is told when an engine call fails.
+///
+/// Two of these are not `engine::outcome`'s business. A method an older engine
+/// does not have is said as what to do, not as the engine's own text — every
+/// page that calls one would otherwise print "unknown method: …" at a person.
+/// And `ImportDeepSeekChats` refuses in sentences written for a person
+/// ("the export is not a JSON file", "the export holds no conversations"), so
+/// its own words are the answer: collapsing them into `outcome`'s "failed"
+/// leaves the page with nothing to say and the person nothing to fix.
+fn engine_error(method: &str, error: &str) -> String {
+    if error.to_ascii_lowercase().contains("unknown method") {
+        return "outdated".into();
+    }
+    if method == "ImportDeepSeekChats" {
+        return error.to_owned();
+    }
+    engine::outcome(error).into()
 }
 
 /// The largest background image taken.
@@ -847,6 +859,36 @@ fn snake(item: &Json) -> Json {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // SUR-120's refusals are the engine's own sentences, and they have to
+    // reach the page: `outcome` would fold each into "failed" and the import
+    // page would print that instead of what to fix. The one exception is an
+    // engine too old for the method, which is said as what to do — checked
+    // first, so an old engine's "unknown method: ImportDeepSeekChats" is
+    // "outdated" rather than a sentence about a method nobody has.
+    #[test]
+    fn the_import_refusal_keeps_the_engine_sentence() {
+        let refusal = "the export holds no conversations, so there was nothing to import";
+        assert_eq!(
+            engine_error("ImportDeepSeekChats", refusal),
+            refusal,
+            "the import page prints this: it must be the engine's sentence, not \"failed\""
+        );
+        assert_eq!(
+            engine_error("ImportDeepSeekChats", "unknown method: ImportDeepSeekChats"),
+            "outdated",
+            "an older engine is said as what to do, before the sentence is kept"
+        );
+    }
+
+    // Every other method keeps the outcome words the pages already switch on,
+    // so this fix is the import's alone and does not change a second page.
+    #[test]
+    fn other_methods_still_get_the_outcome_word() {
+        assert_eq!(engine_error("GetCommitCredit", "offline"), "offline");
+        assert_eq!(engine_error("GetCommitCredit", "the edge said signed out"), "signed_out");
+        assert_eq!(engine_error("GetCommitCredit", "something else entirely"), "failed");
+    }
 
     // Registering is everything short of sounding: the System Sound server
     // opens and accepts every sound zgx plays, from the file it's played
