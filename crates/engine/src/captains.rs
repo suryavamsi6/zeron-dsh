@@ -577,9 +577,10 @@ pub fn provision_profile(home: &Path, bundle: &Path) -> ProvisionOutcome {
 }
 
 /// Rule 2: no profile exists — write the template dsh ships, byte for
-/// byte, then link `node_modules/<bundle>` at the packaged bundle.
-/// Bundles resolve from the profile's `node_modules` first, so the link
-/// is what must never dangle.
+/// byte, then link `node_modules/<bundle>` at the packaged bundle, or
+/// materialise it where no link primitive exists. Bundles resolve from
+/// the profile's `node_modules` first, so the link is what must never
+/// dangle.
 fn create_profile(profile: &Path, bundle: &Path) -> ProvisionOutcome {
     let node_modules = profile.join("node_modules");
     if let Err(error) = std::fs::create_dir_all(&node_modules) {
@@ -609,9 +610,11 @@ fn create_profile(profile: &Path, bundle: &Path) -> ProvisionOutcome {
 /// Rules 1 and 3: a profile exists, so only what is missing is added —
 /// the `dependencies` member and the `dsh.profile.bundles` element as
 /// surgical text edits on the bytes it already holds (a re-serialisation
-/// would rewrite a real person's file), and the `node_modules` link,
-/// re-pointed when it does not resolve to `bundle`. The patch layer and
-/// the workspace file of an existing profile are never touched.
+/// would rewrite a real person's file), and the `node_modules` entry,
+/// re-pointed when it is a link that does not resolve to `bundle` and
+/// refused when it is a real directory or file that is not the bundle.
+/// The patch layer and the workspace file of an existing profile are
+/// never touched.
 fn complete_profile(profile: &Path, bundle: &Path, text: &str) -> ProvisionOutcome {
     let manifest_path = profile.join("package.json");
     let manifest: Value = match serde_json::from_str(text) {
@@ -723,12 +726,40 @@ fn complete_profile(profile: &Path, bundle: &Path, text: &str) -> ProvisionOutco
         edits.sort_by_key(|edit| edit.0);
         let mut updated = String::with_capacity(text.len() + 128);
         let mut rest = 0usize;
-        for (at, insert) in edits {
+        let mut i = 0;
+        while i < edits.len() {
+            let at = edits[i].0;
             updated.push_str(&text[rest..at]);
-            updated.push_str(&insert);
+            // Inserts landing at the same offset — two missing root
+            // members into a `{}` manifest is the case that ships — are
+            // one insertion with commas between the members: applied
+            // independently, the second drops the separator and the
+            // write does not parse.
+            let mut merged = edits[i].1.clone();
+            i += 1;
+            while i < edits.len() && edits[i].0 == at {
+                if !merged.ends_with(',') {
+                    merged.push(',');
+                }
+                merged.push_str(&edits[i].1);
+                i += 1;
+            }
+            updated.push_str(&merged);
             rest = at;
         }
         updated.push_str(&text[rest..]);
+        // The write happens only when what would land still parses as a
+        // JSON object: a manifest that cannot be completed safely is
+        // refused, never written.
+        match serde_json::from_str::<Value>(&updated) {
+            Ok(value) if value.is_object() => {}
+            _ => {
+                return ProvisionOutcome::Refused(format!(
+                    "{} could not be completed safely; fix or delete it",
+                    manifest_path.display()
+                ));
+            }
+        }
         if let Err(error) = std::fs::write(&manifest_path, updated) {
             return ProvisionOutcome::Refused(format!(
                 "cannot write {}: {error}",
@@ -742,16 +773,41 @@ fn complete_profile(profile: &Path, bundle: &Path, text: &str) -> ProvisionOutco
     }
 }
 
-/// Whether `profile/node_modules/<bundle>` already resolves to `bundle`
-/// — a read, never a write.
+/// Whether `profile/node_modules/<bundle>` already *is* the bundle — a
+/// read, never a write: a link that canonicalises to `bundle`, or a real
+/// directory whose `package.json` names it, which is what a hoisted pnpm
+/// install or a materialised copy leaves.
 fn link_resolves(profile: &Path, bundle: &Path) -> bool {
-    std::fs::canonicalize(profile.join("node_modules").join(BUNDLE_NAME))
-        .is_ok_and(|target| target == bundle)
+    let entry = profile.join("node_modules").join(BUNDLE_NAME);
+    if std::fs::canonicalize(&entry).is_ok_and(|target| target == bundle) {
+        return true;
+    }
+    // `symlink_metadata` reports the entry's own type: `is_dir` here is a
+    // real directory, never a link to one.
+    std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_dir())
+        && names_bundle(&entry)
+}
+
+/// Whether the real directory at `entry` is the bundle itself: its
+/// `package.json` parses and carries `"name": "<bundle>"` — the shape a
+/// hoisted install or a materialised copy leaves.
+fn names_bundle(entry: &Path) -> bool {
+    std::fs::read_to_string(entry.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|manifest| manifest["name"].as_str().map(str::to_owned))
+        .is_some_and(|name| name == BUNDLE_NAME)
 }
 
 /// Link `profile/node_modules/<bundle>` at `bundle`: created when absent,
-/// re-pointed when it resolves anywhere else — only that one entry is
-/// ever removed, never another `node_modules` name.
+/// re-pointed when it is a link resolving anywhere else — and only the
+/// link itself is ever removed, never another `node_modules` name and
+/// never the tree a link points at. A real directory or file at that
+/// name is a person's package, not ours: one that is already the bundle
+/// is `link_resolves`' present case, and anything else refuses rather
+/// than being deleted or overwritten. Where no link primitive exists —
+/// Windows without Developer Mode cannot make a directory symlink — the
+/// bundle is materialised instead.
 fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
     if link_resolves(profile, bundle) {
         return Ok(());
@@ -761,26 +817,96 @@ fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
     std::fs::create_dir_all(&node_modules)
         .map_err(|error| format!("cannot create {}: {error}", node_modules.display()))?;
     match std::fs::symlink_metadata(&link) {
-        Ok(metadata) => {
-            let removed = if metadata.is_dir() {
-                std::fs::remove_dir_all(&link)
-            } else {
-                std::fs::remove_file(&link)
-            };
-            removed.map_err(|error| format!("cannot re-point {}: {error}", link.display()))?;
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            remove_link(&link)
+                .map_err(|error| format!("cannot re-point {}: {error}", link.display()))?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "{} is not the {BUNDLE_NAME} bundle; fix or remove it",
+                link.display()
+            ));
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(format!("cannot inspect {}: {error}", link.display()));
         }
     }
-    link_dir(bundle, &link).map_err(|error| {
-        format!(
-            "cannot link {} to {}: {error}",
-            link.display(),
-            bundle.display()
-        )
-    })
+    match link_dir(bundle, &link) {
+        Ok(()) => Ok(()),
+        Err(link_error) => materialise_bundle(bundle, &link).map_err(|copy_error| {
+            format!(
+                "cannot link {} to {} ({link_error}) or materialise it there ({copy_error})",
+                link.display(),
+                bundle.display()
+            )
+        }),
+    }
+}
+
+/// Remove `link`, which `symlink_metadata` reported as a symlink: unix
+/// unlinks it whatever it points at; Windows splits link removal by the
+/// target's shape — a directory link removes as a directory and anything
+/// else as a file — so the directory shape is tried first. The link's
+/// target is never touched.
+#[cfg(windows)]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link))
+}
+
+/// Remove `link`, which `symlink_metadata` reported as a symlink: an
+/// unlink removes it whatever it points at, and the target is untouched.
+#[cfg(not(windows))]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+/// Materialise the bundle at `link` — the fallback for hosts with no
+/// usable link primitive — as a real directory holding the files the
+/// bundle ships. The copy stages beside `link` and renames over it, so a
+/// failure leaves no half-shipped bundle at the entry: the staging
+/// directory is this function's own and is cleaned up; `link` itself —
+/// absent when this is reached — is never touched.
+fn materialise_bundle(bundle: &Path, link: &Path) -> std::io::Result<()> {
+    let staging = link.with_file_name(format!(".{BUNDLE_NAME}.materialising"));
+    let result = (|| {
+        match std::fs::symlink_metadata(&staging) {
+            // Stale staging is this function's own, left by a crashed run.
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&staging)?,
+            Ok(_) => std::fs::remove_file(&staging)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir(&staging)?;
+        copy_bundle(bundle, &staging, true)?;
+        std::fs::rename(&staging, link)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Copy the files the bundle ships from `from` into `to`, recursively:
+/// the manifest, the entry point, the patch layer and `src` — which
+/// `index.js` imports — with the packager's own `node_modules` and `test`
+/// left out at the top level. A link inside the bundle is not followed.
+fn copy_bundle(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        if top && matches!(entry.file_name().to_str(), Some("node_modules" | "test")) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if file_type.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_bundle(&entry.path(), &target, false)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
 }
 
 /// `symlink_dir` per platform; a failure is a refusal, never a panic.

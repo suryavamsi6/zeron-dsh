@@ -92,17 +92,32 @@ impl Rig {
     }
 
     /// The bundle dsh would load: listed in the profile manifest *and*
-    /// resolvable from the profile's own `node_modules`.
+    /// resolvable from the profile's own `node_modules` — either as a link at
+    /// the packaged directory or as a materialised copy of it, because the
+    /// link primitive is not available everywhere (Windows without Developer
+    /// Mode has no unprivileged symlink).
     fn provisioned(&self) -> bool {
         let manifest = self.manifest_json();
         let listed = manifest["dsh"]["profile"]["bundles"]
             .as_array()
             .is_some_and(|bundles| bundles.iter().any(|b| b == BUNDLE));
-        let linked = std::fs::canonicalize(self.profile().join("node_modules").join(BUNDLE))
+        listed && self.resolves_bundle()
+    }
+
+    /// The profile's `node_modules` entry holds the packaged bundle: a link
+    /// that canonicalises to it, or a copy that names itself.
+    fn resolves_bundle(&self) -> bool {
+        let entry = self.profile().join("node_modules").join(BUNDLE);
+        let linked = std::fs::canonicalize(&entry)
             .ok()
             .zip(std::fs::canonicalize(&self.bundle).ok())
-            .is_some_and(|(linked, staged)| linked == staged);
-        listed && linked
+            .is_some_and(|(entry, staged)| entry == staged);
+        let materialised = std::fs::read_to_string(entry.join("package.json"))
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|manifest| manifest["name"].as_str().map(str::to_owned))
+            .is_some_and(|name| name == BUNDLE);
+        linked || materialised
     }
 }
 
@@ -247,11 +262,11 @@ async fn a_provisioned_profile_is_a_no_op_on_the_next_run() {
     );
 }
 
-/// Rule 5: a manifest that cannot be parsed is never edited — a Captain run
-/// is refused with instructions rather than starting with no role section
-/// and no Drive tools, and the file is left exactly as it was.
+/// Rule 5: a manifest that cannot be parsed is never edited — the run is
+/// refused **with a reason and instructions** rather than starting with no
+/// role section and no Drive tools, and the file is left exactly as it was.
 #[tokio::test]
-async fn an_unparseable_profile_is_left_alone_and_refuses_a_captain() {
+async fn an_unparseable_profile_is_left_alone_and_refuses_the_run() {
     let rig = Rig::new();
     let dir = rig.profile();
     std::fs::create_dir_all(&dir).expect("the user profile should exist");
@@ -261,7 +276,7 @@ async fn an_unparseable_profile_is_left_alone_and_refuses_a_captain() {
     let refused = rig.prepare(Some("a-captain-chat")).await;
     assert!(
         refused.is_err(),
-        "a Captain run must not start with an unprovisioned profile; got {refused:?}"
+        "a chat run must not start with an unprovisioned profile; got {refused:?}"
     );
     let message = refused.unwrap_err();
     assert!(
@@ -279,4 +294,152 @@ async fn an_unparseable_profile_is_left_alone_and_refuses_a_captain() {
     rig.prepare(None)
         .await
         .expect("an ordinary chat should still prepare");
+}
+
+/// r2 defect 1 (red on `8625bbb82`): a `{}` manifest — a real file dsh itself
+/// would accept — must be completed into **valid JSON**. Inserting both root
+/// members at the same offset produced `{"dependencies": …"dsh": …}` with no
+/// comma: the write returned Ok, and the next prepare could not parse the file
+/// it had just written, refusing every chat from then on.
+#[tokio::test]
+async fn an_empty_object_manifest_is_completed_into_valid_json() {
+    let rig = Rig::new();
+    let dir = rig.profile();
+    std::fs::create_dir_all(&dir).expect("the profile directory exists");
+    std::fs::write(dir.join("package.json"), "{}").expect("the empty manifest writes");
+
+    rig.prepare(Some("a-chat"))
+        .await
+        .expect("prepare should complete an empty manifest, not fail on it");
+
+    let text = rig.manifest();
+    let manifest: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("provisioning wrote invalid JSON ({error}): {text}"));
+    assert_eq!(
+        manifest["dependencies"][BUNDLE].as_str().is_some_and(|spec| spec.starts_with("link:")),
+        true,
+        "the completed manifest should carry the bundle dependency; saw {text}"
+    );
+    assert_eq!(
+        manifest["dsh"]["profile"]["bundles"]
+            .as_array()
+            .is_some_and(|bundles| bundles.iter().any(|bundle| bundle == BUNDLE)),
+        true,
+        "the completed manifest should list the bundle; saw {text}"
+    );
+    assert!(rig.provisioned(), "the completed profile should resolve the bundle");
+
+    let first = rig.manifest();
+    rig.prepare(Some("another-chat"))
+        .await
+        .expect("a completed manifest is a no-op on the next prepare");
+    assert_eq!(rig.manifest(), first, "the second prepare must not rewrite it");
+}
+
+/// r2 defect 2 (red on `8625bbb82`), first half: a real directory at
+/// `node_modules/zeron-dsh-captains` that *is* the bundle — what a hoisted
+/// pnpm install leaves — is the bundle already present. Removing it to make
+/// room for a link deletes a user's installed plugin.
+#[tokio::test]
+async fn a_real_bundle_directory_is_left_where_it_is() {
+    let rig = Rig::new();
+    let entry = rig.profile().join("node_modules").join(BUNDLE);
+    std::fs::create_dir_all(&entry).expect("the installed bundle directory exists");
+    for name in ["package.json", "index.js"] {
+        std::fs::copy(bundle_source().join(name), entry.join(name))
+            .expect("the installed bundle carries its files");
+    }
+    let marker = entry.join("installed-by-the-user");
+    std::fs::write(&marker, b"keep me").expect("the marker writes");
+    let manifest_before = std::fs::read(entry.join("package.json")).expect("the bundle manifest reads");
+
+    rig.prepare(Some("a-chat"))
+        .await
+        .expect("an installed bundle satisfies provisioning");
+
+    assert!(marker.is_file(), "the installed bundle directory must not be removed");
+    assert_eq!(
+        std::fs::read(entry.join("package.json")).expect("the bundle manifest still reads"),
+        manifest_before,
+        "an installed bundle's files must be left byte-identical"
+    );
+    assert!(rig.provisioned(), "the installed bundle is the present bundle");
+
+    let first = rig.manifest();
+    rig.prepare(Some("another-chat"))
+        .await
+        .expect("the second prepare is a no-op");
+    assert_eq!(rig.manifest(), first, "the second prepare must not rewrite the manifest");
+    assert!(marker.is_file(), "the second prepare must not touch the directory either");
+}
+
+/// r2 defect 2 (red on `8625bbb82`), second half: a **foreign** directory at
+/// the bundle's `node_modules` name is somebody else's package. It is never
+/// removed; the Captain cannot get its bundle, so the run refuses with a
+/// reason that names the path and says what to do — a silent skip is the exact
+/// failure this issue exists for.
+#[tokio::test]
+async fn a_foreign_directory_is_never_removed_and_refuses_the_run() {
+    let rig = Rig::new();
+    let entry = rig.profile().join("node_modules").join(BUNDLE);
+    std::fs::create_dir_all(&entry).expect("the foreign package directory exists");
+    let foreign = "{\"name\":\"some-other-plugin\",\"version\":\"1.0.0\"}";
+    std::fs::write(entry.join("package.json"), foreign).expect("the foreign manifest writes");
+    let marker = entry.join("marker");
+    std::fs::write(&marker, b"do not delete").expect("the marker writes");
+
+    let refused = rig.prepare(Some("a-chat")).await;
+    assert!(
+        refused.is_err(),
+        "a chat run must not start against a profile it could not provision; got {refused:?}"
+    );
+    let message = refused.unwrap_err();
+    assert!(
+        message.contains(BUNDLE),
+        "the refusal should name the entry it could not take; saw {message:?}"
+    );
+    assert!(
+        message.contains("delete") || message.contains("fix") || message.contains("remove"),
+        "the refusal should say what to do about it; saw {message:?}"
+    );
+    assert!(marker.is_file(), "a foreign package directory must never be removed");
+    assert_eq!(
+        std::fs::read_to_string(entry.join("package.json")).expect("the foreign manifest still reads"),
+        foreign,
+        "a foreign package's files must be left byte-identical"
+    );
+
+    // A chatless run (title generation boots sdk-minimal) still prepares: the
+    // problem is reported, not turned into a wall in front of everything.
+    rig.prepare(None).await.expect("a chatless run still prepares");
+}
+
+/// Regression guard for the failure the issue was filed on: a dangling bundle
+/// link left by a copied `DSH_HOME` is re-pointed at the packaged bundle, so
+/// the runtime does not skip the bundle and run with zero `apply` calls.
+/// Unix-only: it stages a raw symlink (the link primitive Windows lacks).
+#[cfg(unix)]
+#[tokio::test]
+async fn a_dangling_bundle_link_is_repointed() {
+    let rig = Rig::new();
+    let dir = rig.profile();
+    std::fs::create_dir_all(dir.join("node_modules")).expect("the profile node_modules exists");
+    std::fs::write(
+        dir.join("package.json"),
+        format!(
+            "{{\n  \"name\": \"dsh-profile-sdk\",\n  \"dependencies\": {{ \"{BUNDLE}\": \"link:/no/such/bundle\" }},\n  \"dsh\": {{ \"profile\": {{ \"bundles\": [\"{BUNDLE}\"] }} }}\n}}\n"
+        ),
+    )
+    .expect("the copied manifest writes");
+    std::os::unix::fs::symlink("/no/such/bundle", dir.join("node_modules").join(BUNDLE))
+        .expect("the dangling link writes");
+
+    rig.prepare(Some("a-chat"))
+        .await
+        .expect("a dangling link must be re-pointed, not refused");
+
+    assert!(
+        rig.resolves_bundle(),
+        "the copied profile's dangling link should resolve the packaged bundle"
+    );
 }

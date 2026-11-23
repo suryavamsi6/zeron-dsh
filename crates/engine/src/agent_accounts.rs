@@ -324,12 +324,13 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
                     tracing::warn!(error = %reason, "dsh profile bundle not provisioned");
                     // A chat run boots the sdk profile: without the bundle
                     // it would start a turn that silently loses the Captain
-                    // section and its Drive tools, so refuse it visibly. A
-                    // chatless run — a title generation — boots sdk-minimal
-                    // and still prepares.
+                    // section and its Drive tools, so the run is refused
+                    // with a reason and what to do about it, not warned
+                    // and started anyway. A chatless run — a title
+                    // generation — boots sdk-minimal and still prepares.
                     if chat_id.is_some() {
                         return Err(format!(
-                            "the dsh profile at {} could not take the Captains bundle: {reason}",
+                            "run refused: the dsh profile at {} could not take the Captains bundle: {reason}",
                             self.0.config.deepseek_home.display()
                         ));
                     }
