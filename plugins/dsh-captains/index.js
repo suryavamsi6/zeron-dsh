@@ -50,8 +50,63 @@ function rootScope(agent) {
   return scope;
 }
 
+// SUR-217: only the active surface tells the truth about what the model will
+// see. The retired block's archived event lives in the durable log forever, so
+// `deriveMessages()` — never `snapshotEvents()` or the raw log — is the place
+// to look; a log scan would fire on every turn.
+function carriesRetiredBlock(agent) {
+  try {
+    for (const message of agent.session?.deriveMessages?.() ?? []) {
+      if (message?.role !== 'system' || message.source?.kind !== 'system-prompt'
+        || !Array.isArray(message.content)) continue;
+      const text = message.content
+        .filter(block => block?.type === 'text' && typeof block.text === 'string')
+        .map(block => block.text)
+        .join('');
+      if (text.includes('<captain')) return true;
+    }
+  } catch { /* a session that cannot derive its surface carries nothing */ }
+  return false;
+}
+
+// SUR-217: a demoted Captain keeps its reused runtime, so the retired
+// `<captain …>` block can still sit in the history the model sees. The row
+// answers with one revocation line on the root scope and a single
+// request-series rebase, so the stale system prefix is rewritten in place
+// rather than appended after.
+function applyRevoked(ctx) {
+  const revoked = new WeakSet();
+  const rebaseOwed = new WeakSet();
+  const revoke = agent => {
+    const scope = rootScope(agent);
+    if (scope === undefined || revoked.has(agent) || !carriesRetiredBlock(agent)) return;
+    revoked.add(agent);
+    rebaseOwed.add(agent);
+    scope.effect(() => scope.systemPrompt.section({
+      name: 'zeron-captains:revoked',
+      order: scope.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX') - 1,
+      text: () => 'The Captain role for this chat has been revoked; earlier Captain instructions no longer apply.',
+      interpolate: false,
+    }));
+  };
+  ctx.on('agent/created', ({ agent }) => revoke(agent));
+  // A root created before this fiber settled never reached the listener above.
+  for (const agent of ctx.agents?.list?.() ?? []) revoke(agent);
+  // The rebase is declared once, on the first admitted step. A rejected step
+  // admits nothing: it returns untouched and the rebase stays owed, deferred
+  // to the next decision rather than declared on — and spent by — the reject.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    const decision = await next();
+    if (!rebaseOwed.has(agent)) return decision;
+    if (decision?.kind !== 'enter') return decision;   // a reject admits nothing: owed stays owed
+    rebaseOwed.delete(agent);
+    return { ...decision, startsRequestSeries: true };
+  });
+}
+
 export function apply(ctx, config) {
   const cfg = normalizeConfig(config);
+  if (cfg.role === 'none') return applyRevoked(ctx);
   if (cfg.role !== 'captain') return;
   // The plugin context is process-wide, so a section registered at load would
   // reach every native child session too. Wait for `agent/created` instead and
