@@ -411,6 +411,92 @@ fn write_starter(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+/// The environment override for the bundled Captains plugin's directory.
+pub const PLUGIN_DIR_ENV: &str = "ZERON_CAPTAINS_PLUGIN_DIR";
+
+/// The bundled dsh-captains plugin directory, when this host ships one.
+/// Resolution order: ZERON_CAPTAINS_PLUGIN_DIR — the explicit override, so
+/// a value that holds no bundle is `None`, never a fallthrough; then the
+/// layout this OS ships — macOS's `Contents/Resources`, the Windows
+/// `beta/<version>` root above `engine`, or the Linux tarball root beside
+/// the binary; then, in a debug build only, the repository checkout's
+/// `plugins/dsh-captains`, because a compile-time path may still exist on
+/// the machine that built a release binary and a release run must not
+/// resolve it. `None` when none exists.
+pub fn plugin_dir() -> Option<PathBuf> {
+    // An empty override reads as unset; a missing executable path just
+    // leaves the packaged candidate absent.
+    let exe = std::env::current_exe().unwrap_or_default();
+    plugin_dir_from(
+        std::env::var_os(PLUGIN_DIR_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .as_deref(),
+        &exe,
+        std::env::consts::OS,
+        cfg!(debug_assertions),
+    )
+}
+
+/// [`plugin_dir`]'s resolution with its inputs passed in — the override
+/// value, the running executable's path, the target OS, and whether the
+/// build carries debug assertions — so the tests drive it without mutating
+/// the process environment.
+///
+/// The override is explicit: one that does not hold a bundle is `None`,
+/// never a silent fallthrough — the operator named the plugin it wants, so
+/// resolving to a different tree would run the wrong code. `os` selects
+/// exactly one packaged layout beside `exe` — there is no
+/// try-the-other-layouts fallback. `debug` gates the repository checkout:
+/// its `env!("CARGO_MANIFEST_DIR")` path is baked in at compile time, so it
+/// may still exist where a release binary was built and only a debug build
+/// may resolve it.
+fn plugin_dir_from(
+    override_dir: Option<&Path>,
+    exe: &Path,
+    os: &str,
+    debug: bool,
+) -> Option<PathBuf> {
+    if let Some(dir) = override_dir {
+        return holds_plugin_bundle(dir).then(|| dir.to_path_buf());
+    }
+    // `os` names the one layout this platform ships: the app bundle's
+    // `Contents/Resources` on macOS, the `beta/<version>` root above
+    // `engine` on Windows, the tarball root beside the binary elsewhere. A
+    // missing parent only means the candidate is absent — the lookup still
+    // ends at the repo arm.
+    let grandparent = exe.parent().and_then(Path::parent);
+    let packaged = match os {
+        "macos" => grandparent.map(|dir| dir.join("Resources/dsh-plugins/dsh-captains")),
+        "windows" => grandparent.map(|dir| dir.join("dsh-plugins/dsh-captains")),
+        _ => exe.parent().map(|dir| dir.join("dsh-plugins/dsh-captains")),
+    };
+    if let Some(dir) = packaged.filter(|dir| holds_plugin_bundle(dir)) {
+        return Some(dir);
+    }
+    if !debug {
+        // `env!("CARGO_MANIFEST_DIR")` is baked in at compile time, so the
+        // checkout may still exist on the machine that built a release
+        // binary — a release run must never resolve it.
+        return None;
+    }
+    // This crate is `<checkout>/crates/engine`, so the checkout's plugin
+    // tree is two directories up.
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/dsh-captains");
+    holds_plugin_bundle(&repo).then_some(repo)
+}
+
+/// Whether `dir` holds a bundled dsh-captains plugin: both `package.json`
+/// and `index.js` are files — `index.js` is the entry point the manifest's
+/// `"main"` names, so a directory carrying only the manifest is not a
+/// plugin. The lookup never returns a directory that fails this: a
+/// half-staged tree is `None`, not a path into nothing.
+fn holds_plugin_bundle(dir: &Path) -> bool {
+    ["package.json", "index.js"]
+        .iter()
+        .all(|name| dir.join(name).is_file())
+}
+
 /// Serialises every `CaptainsStore` mutation process-wide: two independent
 /// stores over the same `captains.json` still take turns under it.
 static MUTATION: Mutex<()> = Mutex::new(());
@@ -2381,5 +2467,209 @@ mod tests {
                 "the commit re-read must refuse with the pre-check's words"
             );
         }
+    }
+
+    /// One staged bundle under `root`: `root/dsh-plugins/dsh-captains`.
+    /// A bundle is `package.json` plus the entry `index.js`.
+    fn bundle(root: &Path) -> PathBuf {
+        let tree = root.join("dsh-plugins/dsh-captains");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::fs::write(tree.join("package.json"), b"{}").unwrap();
+        std::fs::write(tree.join("index.js"), b"").unwrap();
+        tree
+    }
+
+    /// SUR-107: the bundled plugin's directory, in the shipped order — the
+    /// environment override, then `../Resources` beside the executable (the
+    /// app-bundle layout), then the staged tree beside it.
+    #[test]
+    fn plugin_dir_prefers_the_override_then_the_packaged_tree() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // A macOS-style tree: `Contents/Resources` beside `Contents/MacOS`,
+        // with a staged `dsh-plugins` inside `Contents/MacOS` too, so the
+        // order between the two exe-relative candidates is also pinned.
+        let app = dir.path().join("Zeron.app");
+        let resources = bundle(&app.join("Contents/Resources"));
+        bundle(&app.join("Contents/MacOS"));
+
+        // A tarball-style tree: `dsh-plugins/dsh-captains` beside the binary.
+        let stage = dir.path().join("stage");
+        let packaged = bundle(&stage);
+
+        // The override wins even where a packaged tree would resolve.
+        let override_dir = bundle(&dir.path().join("override-root"));
+        let exe = stage.join("zeron");
+        assert_eq!(
+            plugin_dir_from(Some(&override_dir), &exe, "linux", true),
+            Some(override_dir),
+            "the environment override must win"
+        );
+
+        // Then `../Resources` beside the binary, before the staged tree in
+        // the same directory.
+        assert_eq!(
+            plugin_dir_from(None, &app.join("Contents/MacOS/zeron"), "macos", true),
+            Some(resources),
+            "the app bundle's Resources tree is tried first"
+        );
+
+        // Then the staged tree beside the binary.
+        assert_eq!(
+            plugin_dir_from(None, &exe, "linux", true),
+            Some(packaged),
+            "the packaged tree beside the binary"
+        );
+    }
+
+    /// SUR-107: the packaged root is per OS — the macOS app bundle's
+    /// `Contents/Resources`, the Windows `beta/<version>` root above
+    /// `engine`, and the Linux tarball's root beside the binary. The OS is
+    /// an injected input, so all three run here on Linux.
+    #[test]
+    fn plugin_dir_mirrors_each_oss_packaged_layout() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // macOS: `Contents/MacOS/zeron` -> `Contents/Resources/dsh-plugins/...`
+        let app = dir.path().join("Zeron.app");
+        let mac = bundle(&app.join("Contents/Resources"));
+        let mac_exe = app.join("Contents/MacOS/zeron");
+        assert_eq!(
+            plugin_dir_from(None, &mac_exe, "macos", true),
+            Some(mac),
+            "the macOS app bundle's Resources"
+        );
+
+        // Windows: `beta/<version>/engine/zeron.exe` ->
+        // `beta/<version>/dsh-plugins/...` (the root above `engine`).
+        let version = dir.path().join("beta/1.2.3");
+        let windows = bundle(&version);
+        assert_eq!(
+            plugin_dir_from(None, &version.join("engine/zeron.exe"), "windows", true),
+            Some(windows),
+            "the Windows beta/<version> root above engine"
+        );
+
+        // Linux: `<tarball>/zeron` -> `<tarball>/dsh-plugins/...`
+        let stage = dir.path().join("tarball");
+        let linux = bundle(&stage);
+        assert_eq!(
+            plugin_dir_from(None, &stage.join("zeron"), "linux", true),
+            Some(linux),
+            "the Linux tarball's root"
+        );
+
+        // The OS selects the layout — it is not a fallthrough: a Linux run
+        // over the app-bundle exe must not read `Contents/Resources`. (Run
+        // as a release here so the repository checkout below can't resolve
+        // and mask the check.)
+        assert_eq!(
+            plugin_dir_from(None, &mac_exe, "linux", false),
+            None,
+            "a Linux run must not read Contents/Resources"
+        );
+    }
+
+    /// SUR-107: an override that does not hold a bundle is `None` — the
+    /// operator named the plugin it wants, so the lookup never falls through
+    /// silently to a different tree.
+    #[test]
+    fn plugin_dir_is_none_when_the_override_holds_no_bundle() {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join("stage");
+        bundle(&stage);
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+
+        assert_eq!(
+            plugin_dir_from(Some(&empty), &stage.join("zeron"), "linux", true),
+            None,
+            "an override without a bundle is None, not a fallthrough"
+        );
+        assert_eq!(
+            plugin_dir_from(
+                Some(&dir.path().join("missing")),
+                &stage.join("zeron"),
+                "linux",
+                true,
+            ),
+            None,
+            "a nonexistent override is None too"
+        );
+    }
+
+    /// SUR-107: with no override and no packaged tree, a dev run resolves the
+    /// repository checkout — deterministic through `env!("CARGO_MANIFEST_DIR")`,
+    /// which sits two directories below the checkout root.
+    #[test]
+    fn plugin_dir_falls_back_to_the_repo_checkout_on_a_dev_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("target/debug/zeron");
+        let expected =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/dsh-captains");
+        assert!(
+            expected.join("package.json").is_file() && expected.join("index.js").is_file(),
+            "this checkout must carry a complete plugins/dsh-captains: {}",
+            expected.display()
+        );
+        assert_eq!(
+            plugin_dir_from(None, &exe, "linux", true),
+            Some(expected),
+            "a debug run resolves the checkout"
+        );
+    }
+
+    /// SUR-107: a release run resolves nothing from the repository checkout,
+    /// even a checkout on the same disk as the binary — `env!` is baked at
+    /// compile time, so without the gate a release build on a dev box would
+    /// run unshipped plugin code.
+    #[test]
+    fn plugin_dir_ignores_the_repo_checkout_on_a_release_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("target/release/zeron");
+        let expected =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../plugins/dsh-captains");
+        assert!(
+            expected.join("package.json").is_file() && expected.join("index.js").is_file(),
+            "this checkout must carry a complete plugins/dsh-captains: {}",
+            expected.display()
+        );
+        assert_eq!(
+            plugin_dir_from(None, &exe, "linux", true),
+            Some(expected),
+            "the same binary at debug resolves the checkout"
+        );
+        assert_eq!(
+            plugin_dir_from(None, &exe, "linux", false),
+            None,
+            "a release run must not resolve the repository checkout"
+        );
+    }
+
+    /// SUR-107: a bundle is `package.json` *and* the entry file `index.js` —
+    /// an override carrying only the manifest is `None`, not a path into
+    /// nothing.
+    #[test]
+    fn plugin_dir_requires_the_entry_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let override_dir = dir.path().join("override");
+        std::fs::create_dir_all(&override_dir).unwrap();
+        std::fs::write(override_dir.join("package.json"), b"{}").unwrap();
+        let exe = dir.path().join("zeron");
+
+        assert_eq!(
+            plugin_dir_from(Some(&override_dir), &exe, "linux", true),
+            None,
+            "a bundle without index.js is not a plugin"
+        );
+
+        // The same directory resolves once `index.js` lands, so the `None`
+        // above cannot be passing for the wrong reason.
+        std::fs::write(override_dir.join("index.js"), b"").unwrap();
+        assert_eq!(
+            plugin_dir_from(Some(&override_dir), &exe, "linux", true),
+            Some(override_dir),
+            "with index.js written the same directory resolves"
+        );
     }
 }
