@@ -4109,7 +4109,20 @@ impl RpcService for EngineRpc {
                 RpcReply::value(&commands)
             }
             methods::QUEUE_COMMAND => {
-                let p: QueueCommandParams = parse_params(params)?;
+                let mut p: QueueCommandParams = parse_params(params)?;
+                // Who resolved a question is the caller's to prove, never the
+                // payload's to claim: an agent is stamped from its scoped
+                // token (it cannot forge the person's client); a local
+                // caller's own `by` (the MCP server's, a plugin's) is kept.
+                if let SessionCommandPayload::RespondInput { by, .. } = &mut p.command {
+                    *by = Some(match zeron_rpc::caller() {
+                        zeron_rpc::Caller::Agent { chat } => {
+                            zeron_proto::InputActor::Agent { chat_id: chat }
+                        }
+                        // Local IPC is the person's own client; a peer is their other device.
+                        _ => by.take().unwrap_or(zeron_proto::InputActor::Client),
+                    });
+                }
                 if matches!(
                     p.command,
                     SessionCommandPayload::Run { .. } | SessionCommandPayload::Steer { .. }

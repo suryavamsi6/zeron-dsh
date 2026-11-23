@@ -166,7 +166,7 @@ impl AgentHost for Host {
         Ok(lock(&self.pending).get(chat).cloned())
     }
 
-    fn answer(&self, chat: &str, request: &str, answers: Vec<UserInputAnswer>) -> Result<String, String> {
+    fn answer(&self, chat: &str, request: &str, answers: Vec<UserInputAnswer>, _by: Option<InputActor>) -> Result<String, String> {
         lock(&self.answered).push((chat.into(), request.into(), answers));
         Ok("cmd-1".into())
     }

@@ -1191,7 +1191,7 @@ pub struct ToolDiff {
 /// `Client` resolution is the person-facing local path, not a claim that a
 /// human was verified present.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InputActor {
     /// No provenance was captured (events written before actors were recorded).
     #[default]

@@ -34,7 +34,9 @@ use zeron_doc::{
     SessionCommandPayload, SessionCommandStatus, SessionDoc, SessionMessageEntry, SubagentStatus,
     evaluate_command,
 };
-use zeron_proto::{ConversationSourceContext, HarnessId, UserInputAnswer, UserInputQuestion};
+use zeron_proto::{
+    ConversationSourceContext, HarnessId, InputActor, UserInputAnswer, UserInputQuestion,
+};
 use zeron_sync::DocsStore;
 
 use crate::chat2_checkpoint::{CheckpointPost, chat2_checkpoint_parts, post_chat2_checkpoint};
@@ -42,7 +44,7 @@ use crate::http_error::describe_http_error;
 use crate::project_actions::{
     ProjectActionSetupHandoff, ProjectActionsStore, launch_project_setup_action,
 };
-use crate::sessions::{SessionsEngine, SteerOutcome};
+use crate::sessions::{RespondInputOutcome, SessionsEngine, SteerOutcome};
 use crate::workspace_host::WorkspaceHost;
 use crate::{EngineError, Terminals, new_id, now_ms};
 
@@ -6883,10 +6885,22 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
-                ..
+                by,
             } => {
-                if sessions.respond_input(chat_id, request_id, answers.clone())? {
-                    return Ok((SessionCommandStatus::Applied, None));
+                match sessions.respond_input(chat_id, request_id, answers.clone(), by.clone())? {
+                    RespondInputOutcome::Applied => {
+                        return Ok((SessionCommandStatus::Applied, None));
+                    }
+                    // A person-only card an agent or a plugin tried to answer:
+                    // refused, not applied — the resolver stays parked for the
+                    // person's own client.
+                    RespondInputOutcome::NeedsPerson => {
+                        return Ok((
+                            SessionCommandStatus::Rejected,
+                            Some("this is a decision only the person's own client can answer".into()),
+                        ));
+                    }
+                    RespondInputOutcome::NoPending => {}
                 }
                 // No live resolver. Only a request id the doc shows as an
                 // OPEN question on a SETTLED entry gets the orphan fallback:
@@ -6924,6 +6938,20 @@ impl DocHost {
                     return Ok((
                         SessionCommandStatus::Applied,
                         Some("closed unanswered".into()),
+                    ));
+                }
+                // The orphan's rules are the live resolver's: a person-only
+                // question refuses an agent's or a plugin's answer — nobody
+                // resumes a dead run to decide for the person.
+                if questions.iter().any(|q| q.requires_person)
+                    && matches!(
+                        by,
+                        Some(InputActor::Agent { .. }) | Some(InputActor::Plugin { .. })
+                    )
+                {
+                    return Ok((
+                        SessionCommandStatus::Rejected,
+                        Some("this is a decision only the person's own client can answer".into()),
                     ));
                 }
                 // The run died under the question (engine restart, crash).

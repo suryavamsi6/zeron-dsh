@@ -31,7 +31,7 @@ use zeron_doc::{
 };
 use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, RunRequest, SandboxLevel, Session, SessionStatus,
+    AgentEvent, DoneStatus, HarnessId, InputActor, RunRequest, SandboxLevel, Session, SessionStatus,
     UserInputAnswer, UserInputQuestion,
 };
 
@@ -61,7 +61,23 @@ pub enum SteerOutcome {
     NotSteerable,
 }
 
-type PendingInputs = Arc<Mutex<HashMap<String, oneshot::Sender<Vec<UserInputAnswer>>>>>;
+/// Outcome of a `respond_input`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RespondInputOutcome {
+    /// The resolver took the answers and `InputResolved` went out.
+    Applied,
+    /// A `requires_person` question refused a non-person answer: the request
+    /// stays parked for the person's own client.
+    NeedsPerson,
+    /// No such request is pending (unknown id, or the run already settled).
+    NoPending,
+}
+
+/// A parked input request: the questions asked (a `requires_person` one only
+/// the person's own client may answer) beside the run's resolver.
+type PendingInputs = Arc<
+    Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>>,
+>;
 
 pub(crate) fn ensure_run_harness(harness: HarnessId) -> Result<(), EngineError> {
     if harness.can_run() {
@@ -1619,7 +1635,7 @@ impl SessionsEngine {
                 let (mut tx, rx) = oneshot::channel();
                 let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
-                lock(&pending).insert(request_id.clone(), answer_tx);
+                lock(&pending).insert(request_id.clone(), (questions.clone(), answer_tx));
                 let _ = engine_tx.send(AgentEvent::InputRequested {
                     request_id: request_id.clone(),
                     questions,
@@ -2214,7 +2230,7 @@ impl SessionsEngine {
             return Ok(false); // parked between turns: nothing to stop
         }
         // Unpark questions first: the stopped turn can never be answered.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -2259,7 +2275,7 @@ impl SessionsEngine {
         // classified as an error instead of an interrupted turn.
         let _ = cancel.send(true);
         // Unpark questions before harness teardown, which can await them.
-        let parked: Vec<_> = lock(&pending).drain().map(|(_, tx)| tx).collect();
+        let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
             let _ = tx.send(Vec::new());
         }
@@ -2297,31 +2313,47 @@ impl SessionsEngine {
     }
 
     /// Resolve a pending `request_input` question set. Empty `answers` close
-    /// it unanswered — the harness answers with its own decline. Returns
-    /// `false` when no such request is pending (unknown id, or the run
-    /// already settled).
+    /// it unanswered — the harness answers with its own decline. A
+    /// `requires_person` question refuses a non-empty answer that isn't the
+    /// person's (`by` names an agent or a plugin): it stays parked for the
+    /// person's own client. `NoPending` when no such request is pending
+    /// (unknown id, or the run already settled).
     pub fn respond_input(
         &self,
         chat_id: &str,
         request_id: &str,
         answers: Vec<UserInputAnswer>,
-    ) -> Result<bool, EngineError> {
+        by: Option<InputActor>,
+    ) -> Result<RespondInputOutcome, EngineError> {
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
         let Some((pending, engine_tx)) = target else {
-            return Ok(false);
+            return Ok(RespondInputOutcome::NoPending);
         };
-        let Some(resolver) = lock(&pending).remove(request_id) else {
-            return Ok(false);
+        let mut parked = lock(&pending);
+        let refused = parked.get(request_id).is_some_and(|(questions, _)| {
+            !answers.is_empty()
+                && questions.iter().any(|q| q.requires_person)
+                && matches!(
+                    by,
+                    Some(InputActor::Agent { .. }) | Some(InputActor::Plugin { .. })
+                )
+        });
+        if refused {
+            return Ok(RespondInputOutcome::NeedsPerson);
+        }
+        let Some((_, resolver)) = parked.remove(request_id) else {
+            return Ok(RespondInputOutcome::NoPending);
         };
+        drop(parked);
         let _ = resolver.send(answers.clone());
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
             answers: Some(answers),
-            by: None,
+            by: Some(by.unwrap_or(InputActor::Client)),
         });
-        Ok(true)
+        Ok(RespondInputOutcome::Applied)
     }
 
     /// Boot recovery has a revival of this chat on its way.
@@ -6403,7 +6435,7 @@ async fn drive_run(
                         let resolver = lock(&inner.runs)
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
-                        if let Some(tx) = resolver {
+                        if let Some((_, tx)) = resolver {
                             let _ = tx.send(Vec::new());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
@@ -6710,7 +6742,7 @@ async fn drive_run(
                 .filter(|h| h.run_id == run_id)
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
-                for (_, tx) in lock(&pending).drain() {
+                for (_, (_, tx)) in lock(&pending).drain() {
                     let _ = tx.send(Vec::new());
                 }
             }
