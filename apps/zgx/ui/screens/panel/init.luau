@@ -46,6 +46,9 @@
 --   Panel.open_digest(session, chat)  a Captain's Digest for that chat, as a
 --                                 tab of the session's panel (its tab if
 --                                 open already): screens/chat/captain_digest
+--   Panel.open_drive(session, chat)   a Captain's Drive for that chat, as a
+--                                 tab of the session's panel (its tab if
+--                                 open already): screens/chat/captain_drive
 --   Panel.toggle_files()          ⌘E: the panel's Files tab in front, or closed
 --   Panel.toggle_terminal()       ⌘J: the same for a terminal
 --   Panel.step_tab(by)            ⌃Tab/⌃⇧Tab while the panel has the keyboard
@@ -646,6 +649,32 @@ function M.open_digest(session: any, chat: string)
 		set_files(true)
 	end
 end
+
+-- A Captain's Drive as a tab of `session`'s panel: the one already showing
+-- that chat's Drive, else a new one, and the panel open. It is a sibling of
+-- the Digest tab (the Captain's own pages): the listing and the viewer read
+-- a chat, never a path (`screens/chat/captain_drive`).
+function M.open_drive(session: any, chat: string)
+	local k = state.key(session, nil)
+	if not k then
+		return
+	end
+	local found: string? = nil
+	for _, t in state.of(k).tabs do
+		if t.kind == "captain_drive" and t.chat == chat then
+			found = t.id
+		end
+	end
+	if found then
+		state.activate(k, found)
+	else
+		state.open(k, "captain_drive", { chat = chat })
+	end
+	local set_files = (if shell_view then shell_view.set_files else nil) :: ((boolean) -> ())?
+	if set_files then
+		set_files(true)
+	end
+end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab
 end
@@ -685,6 +714,12 @@ local function title_of(tab: Tab): (string, boolean)
 			return tab.title, false
 		end
 		return ui.t("chat.captain_digest.tab"):get(), false
+	end
+	if tab.kind == "captain_drive" then
+		if tab.title and tab.title ~= "" then
+			return tab.title, false
+		end
+		return ui.t("chat.captain_drive.tab"):get(), false
 	end
 	-- (A run action's: its name, as the shipping app titles it.)
 	if tab.title and tab.title ~= "" then
@@ -885,6 +920,7 @@ M.Panel = ui.component(function(props: Props): Node
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
 			elseif tab.kind == "captain_digest" then Icon { name = "document", size = 14 }
+			elseif tab.kind == "captain_drive" then Icon { name = "folder", size = 14 }
 			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then Icon { name = Lanes.icon(tab) :: any, size = 14 }
 			else ui.presence(function(): string
 				-- (A file tab's file by its name; none yet, "": by the file,
@@ -1354,10 +1390,10 @@ M.Panel = ui.component(function(props: Props): Node
 	-- runs, its project's actions, what can open here (each with its key,
 	-- heard wherever the keyboard is but in a text field: `M.home_key`), and
 	-- its side chats and subagents.
-	local function open_kind(kind: state.Kind)
+	local function open_kind(kind: state.Kind, extra: { [string]: any }?)
 		local k = key:peek()
 		if k then
-			state.open(k, kind)
+			state.open(k, kind, extra)
 		end
 	end
 	local function empty_page(k: string, visible: () -> boolean): Node
@@ -1377,8 +1413,8 @@ M.Panel = ui.component(function(props: Props): Node
 			showing = visible,
 			-- (Under the card's edge and its strip.)
 			above = BAND_H + CARD_EDGE,
-			open_kind = function(kind: string)
-				open_kind(kind :: state.Kind)
+			open_kind = function(kind: string, extra: { [string]: any }?)
+				open_kind(kind :: state.Kind, extra)
 			end,
 			open_plugin_tab = function(session_id: string, tab: { [string]: any })
 				M.open_plugin_tab(session_id, tab)
@@ -1471,6 +1507,23 @@ M.Panel = ui.component(function(props: Props): Node
 				fill = true,
 				title = ui.t("chat.captain_digest.empty_title") :: any,
 				body = ui.t("chat.captain_digest.empty_body") :: any,
+			}
+		end
+		if tab.kind == "captain_drive" then
+			-- (The Digest tab's sibling, loaded the same way: the Drive's
+			-- listing and its viewer are the chat page's own module.)
+			local ok, CaptainDrive = pcall(function(): any
+				return (require :: any)("@app/screens/chat/captain_drive")
+			end)
+			if ok and CaptainDrive and CaptainDrive.Tab then
+				return CaptainDrive.Tab { chat = tab.chat or session or "" }
+			end
+			return ds.EmptyState {
+				icon = "folder",
+				size = "sm",
+				fill = true,
+				title = ui.t("chat.captain_drive.empty_title") :: any,
+				body = ui.t("chat.captain_drive.empty_body") :: any,
 			}
 		end
 		if tab.kind == "files" then

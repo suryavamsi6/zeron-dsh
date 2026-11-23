@@ -159,7 +159,7 @@ export type Props = {
 	-- it's for (none on a project's or a page's panel).
 	key: string,
 	session: string?,
-	open_kind: (kind: string) -> (),
+	open_kind: (kind: string, extra: { [string]: any }?) -> (),
 	open_plugin_tab: (session: string, tab: { [string]: any }) -> (),
 	-- An action run in a terminal tab of its own (its name, and what runs it).
 	open_action: (title: string, run: { [string]: any }) -> (),
@@ -1227,6 +1227,40 @@ M.Page = ui.component(function(props: Props): Node
 			props.open_kind("terminal")
 		end },
 	}
+	-- A Captain's own pages, beside its Digest: the Drive its files stand in
+	-- (`screens/chat/captain_drive`). The roster names whether this chat is
+	-- one, read as the strip reads it.
+	local CaptainDigest: any = nil
+	if sid and sid ~= "" then
+		local ok, found = pcall(function(): any
+			return (require :: any)("@app/screens/chat/captain_digest")
+		end)
+		if ok then
+			CaptainDigest = found
+		end
+	end
+	if CaptainDigest and CaptainDigest.reload then
+		ui.effect(function()
+			CaptainDigest.reload(sid)
+		end)
+	end
+	local is_captain = ui.computed(function(): boolean
+		if not CaptainDigest or not sid then
+			return false
+		end
+		return CaptainDigest.captains:get()[sid] ~= nil
+	end)
+	local drive_row = ui.show(function(): boolean
+		return is_captain:get()
+	end, PanelHome.Choice {
+		id = "panel-open-captain-drive",
+		icon = "folder",
+		label = locale.t("panel.empty.drive"),
+		key = "D",
+		on_click = function()
+			props.open_kind("captain_drive", { chat = sid })
+		end,
+	})
 	-- (A new chat with no project: no folder for a file viewer to show.)
 	if props.key == "no-project" then
 		table.remove(choices, 2)
@@ -1242,9 +1276,23 @@ M.Page = ui.component(function(props: Props): Node
 	end
 	local letters: { [string]: () -> () } = {}
 	local rows: { Node } = {}
-	for _, c in choices do
+	local drive_at = if props.key == "no-project" then 1 else 2
+	for i, c in choices do
 		letters[c.key] = c.run
+		if i == drive_at then
+			table.insert(rows, drive_row)
+		end
 		table.insert(rows, PanelHome.Choice { id = c.id, icon = c.icon, label = locale.t(c.label), key = c.key, on_click = c.run })
+	end
+	if drive_at > #choices then
+		table.insert(rows, drive_row)
+	end
+	-- (Its letter, heard where the home is: a chat that is not a Captain has
+	-- no Drive to open.)
+	letters["D"] = function()
+		if is_captain:get() then
+			props.open_kind("captain_drive", { chat = sid })
+		end
 	end
 	-- Its letters heard while it's here (one home at a time: the last made).
 	local mine: Live = {
