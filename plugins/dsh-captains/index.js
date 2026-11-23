@@ -20,6 +20,7 @@ export const inject = ['systemPrompt', 'tools', 'agents', 'skills'];
 // must not take the chat down with it.
 function peerModule(specifier, onMissing) {
   const anchors = [import.meta.url];
+  if (typeof process.argv[1] === 'string' && process.argv[1] !== '') anchors.push(process.argv[1]);
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     for (const exe of ['dsh', 'dsh.exe', 'dsh.cmd']) {
       try { anchors.push(realpathSync(join(dir, exe))); } catch { /* no dsh on this PATH entry */ }
