@@ -7048,6 +7048,99 @@ mod tests {
         core.sessions.shutdown().await;
     }
 
+    /// A Captain's delegated child joins its crew when its row is created —
+    /// before a first prompt could run — and a replay adds nothing. An
+    /// explicit side chat, a parent that is not a live Captain, and a claimed
+    /// agent identity with no parent all record no membership.
+    #[tokio::test]
+    async fn a_captains_delegated_child_joins_its_crew_once() {
+        let temp = tempfile::tempdir().unwrap();
+        let core = crate::EngineCore::assemble_with_profile(
+            crate::EngineProfile::local(temp.path()).unwrap(),
+            std::sync::Arc::new(HarnessRegistry::new()),
+            HarnessId::Mock,
+            None,
+        )
+        .unwrap();
+        let rpc = core.rpc_service();
+        let create = |chat: &str, parent: Option<&str>, kind: Option<&str>| {
+            let mut params = serde_json::json!({"op":"createChat", "chatId":chat,
+                "deviceId":core.device_id,
+                "config":{"harness":"deepseek","sandbox":"workspace-write"}});
+            if let Some(parent) = parent {
+                params["parentChatId"] = parent.into();
+            }
+            if let Some(kind) = kind {
+                params["childKind"] = kind.into();
+            }
+            params
+        };
+        rpc.handle(methods::MUTATE, create("captain", None, None))
+            .await
+            .unwrap();
+        core.captains.promote("captain", "Helm").unwrap();
+
+        rpc.handle(
+            methods::MUTATE,
+            create("delegated", Some("captain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // The run's own stamp reads the roster: the role is there with the row.
+        let stamp = crate::captains::captains_env(
+            &core.captains.snapshot(),
+            temp.path(),
+            "delegated",
+        )
+        .expect("a delegated child of a Captain is crew");
+        let stamp: serde_json::Value = serde_json::from_str(&stamp).unwrap();
+        assert_eq!(stamp["role"], "crew");
+        assert_eq!(stamp["captainId"], "captain");
+
+        // A replay creates no second membership.
+        rpc.handle(
+            methods::MUTATE,
+            create("delegated", Some("captain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // An explicit side chat of a Captain stays out of its crew.
+        rpc.handle(
+            methods::MUTATE,
+            create("side", Some("captain"), Some("side")),
+        )
+        .await
+        .unwrap();
+        // A parent that is not a live Captain is nobody's crew.
+        rpc.handle(
+            methods::MUTATE,
+            create("ordinary-child", Some("plain"), Some("subagent")),
+        )
+        .await
+        .unwrap();
+        // A claimed identity with no parent is not a delegation.
+        zeron_rpc::with_caller(
+            zeron_rpc::Caller::Agent {
+                chat: Some("captain".to_owned()),
+            },
+            rpc.handle(
+                methods::MUTATE,
+                create("claimed", None, Some("subagent")),
+            ),
+        )
+        .await
+        .unwrap();
+
+        let registry = core.captains.snapshot();
+        let captain = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == "captain")
+            .expect("the Captain is on the roster");
+        assert_eq!(captain.crew, vec!["delegated".to_owned()]);
+        core.sessions.shutdown().await;
+    }
+
     #[tokio::test]
     async fn voice_origin_uses_normal_remote_routing() {
         let temp = tempfile::tempdir().unwrap();
