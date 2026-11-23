@@ -195,7 +195,10 @@ never by rebasing.
     `model_publish`, `sign_in_catalog` + `engine discover-models`, the per-provider vault
     materials, the expanded `CLOUD_HARNESSES`, provider UI in `agents.rs` and the iOS agent
     list, and the 17-provider vault enum/`ALL`. The cut keeps DeepSeek and the GitHub key only;
-    Cloud accounts stay the fork's `deepseek-key` implementation.
+    Cloud accounts stay the fork's `deepseek-key` implementation. The Edge publish half —
+    `POST /runner/models`, `POST /cloud/{orgId}/models` and the `Published*` types in
+    `edge/src/cloud/models.ts` — stays as forward-compat for that future producer; the read half
+    (`GET /cloud/{orgId}/models` via `cloudModels(published.latest)`) is live picker surface today.
   - **Taken from it:** `grantMany` and `POST /vault/{org}/grants` — the route is back at
     `edge/src/vault-routes.ts:250` with its batch test re-pointed to `deepseek-key`; the batched
     RPC is provider-agnostic, so it does not need the multi-provider catalog.
