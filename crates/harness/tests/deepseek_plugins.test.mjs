@@ -631,3 +631,235 @@ test('the sidecar refuses a captains row without the bundle', { timeout: 300000 
   const ordinary = await sidecar({ here, env }, sdkRoot, checkout, home, undefined, 'dsh-session-b');
   assert.equal(ordinary.frame.type, 'ready', `an ordinary chat was refused: ${ordinary.lines.join('\n')}`);
 });
+
+// SUR-85 (superseding acceptance): a crew chat serves the Captain's CREW.md as
+// a prompt section re-read at every assembly, and a changed file — including
+// one that reverses a rule — restarts the request series so the retired copy
+// cannot linger. The only proof is the HTTP body itself: every turn must send
+// exactly one <crew-rules> block carrying the current file and nothing older.
+test('a reversed CREW.md still sends one current crew-rules block and no stale copy', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-crew-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-crew-bundle-'));
+  const drive = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-crew-drive-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  t.after(() => rm(drive, { recursive: true, force: true }));
+  // pnpm links the checkout it is given, so install a copy and leave the
+  // repository's plugins directory untouched.
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const { requests, baseURL } = await mockModel(t);
+  const require_ = createRequire(join(sdkRoot, 'package.json'));
+  let sdkClient;
+  try {
+    sdkClient = require_.resolve('@deepseek-ai/dsh-sdk-client');
+  } catch {
+    return t.skip('the SDK client cannot be resolved');
+  }
+  const { DeepSeekHarness } = await import(pathToFileURL(sdkClient).href);
+
+  // The bundle declares zeron-captains inert; this row replaces its config
+  // with the crew role pointed at the temp Drive.
+  const row = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: drive };
+  const patch = join(checkout, 'crew-row.yml');
+  await writeFile(patch, `- ${JSON.stringify({ insert: [{ id: 'zeron-captains', name: 'zeron-dsh-captains', config: row }] })}\n`);
+
+  const harness = new DeepSeekHarness({
+    profile: 'sdk', dshHome: home, dshBin, cwd: checkout, processCwd: checkout, model: 'deepseek-flash',
+    env: { ...env, DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: baseURL },
+    patches: [patch], initializeTimeoutMs: 60000, requestTimeoutMs: 120000,
+  });
+
+  const alpha = 'RULE-ALPHA: file every report under reports/.';
+  const beta = 'RULE-BETA: never file a report; hand the work back to the Captain.';
+  const crew = join(drive, 'CREW.md');
+  const turns = [];
+  try {
+    await harness.start();
+    const session = harness.session('zeron-crew-rules');
+    const runTurn = async turn => {
+      const start = requests.length;
+      const result = await session.run(`Reply with a brief acknowledgement for turn ${turn}.`);
+      assert.equal(result.sessionId, session.id);
+      assert.equal(result.finishReason, 'completed', `turn ${turn} did not finish: ${result.finishReason ?? result}`);
+      const calls = requests.slice(start).filter(request => request.path.endsWith('/messages')).map(request => request.input);
+      assert.ok(calls.length > 0, `turn ${turn} produced no model request`);
+      return calls;
+    };
+    await writeFile(crew, alpha);
+    turns.push(await runTurn(1));
+    await writeFile(crew, beta);
+    turns.push(await runTurn(2));
+    turns.push(await runTurn(3));
+  } finally {
+    await harness.close();
+  }
+
+  const count = (value, needle) => value.split(needle).length - 1;
+  const system = input => typeof input.system === 'string' ? input.system
+    : (input.system ?? []).map(block => block?.text ?? '').join('');
+  const crewBlocks = text => [...text.matchAll(/<crew-rules\b[^>]*>[\s\S]*?<\/crew-rules>/g)].map(([block]) => block);
+  // The runtime piggybacks its session log on the request and journals each
+  // series' rendered system message inside it; that echo is the same current
+  // block, not a copy the model consumes, so the one-block rule is counted on
+  // the model-facing request. The retired-marker sweep stays body-wide: an
+  // older block must not survive anywhere, journal included.
+  const surface = input => {
+    const { dsh_session_log, ...rest } = input;
+    return JSON.stringify(rest);
+  };
+  for (const [index, calls] of turns.entries()) {
+    const turn = index + 1;
+    for (const input of calls) {
+      assert.equal(count(surface(input), '<crew-rules'), 1,
+        `turn ${turn} carried ${count(surface(input), '<crew-rules')} crew-rules opening tags in the request`);
+      const blocks = crewBlocks(system(input));
+      assert.equal(blocks.length, 1, `turn ${turn} has ${blocks.length} crew-rules blocks in system`);
+      assert.ok(blocks[0].startsWith('<crew-rules captain="Helm">'), `turn ${turn} crew-rules block is malformed: ${blocks[0].slice(0, 80)}`);
+      assert.ok(blocks[0].includes(turn === 1 ? alpha : beta), `turn ${turn} did not serve the current rule`);
+      if (turn > 1) {
+        const body = JSON.stringify(input);
+        assert.ok(!body.includes('RULE-ALPHA'), `turn ${turn} still carries the retired rule`);
+      }
+    }
+  }
+
+  // The runtime may embed its session log in the request; when it does, the
+  // reversal turn must show a series restart. The body assertions above are
+  // the contract, so the field's absence is not a failure.
+  if (turns.flat().some(input => input.dsh_session_log !== undefined)) {
+    const restarted = turns[1].some(input => (input.dsh_session_log?.events ?? [])
+      .some(event => event?.type === 'request/header' && (event.data?.startsSeries === true || event.data?.reason === 'series')));
+    assert.ok(restarted, 'the reversal turn carried no series restart in its session log');
+  }
+});
+
+// SUR-85 r2: the engine stops a parked crew sidecar after idle and resumes its
+// session on the next message, so the first turn of a NEW process is the normal
+// path, not an edge. That process has no in-memory baseline; the resumed series
+// still holds the CREW.md it was built from, so the turn must rebase to the file
+// as it is now. The proof stays the HTTP body: exactly one current block, and no
+// retired rule anywhere.
+test('a restarted runtime sends one current crew-rules block for the resumed session', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-restart-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-restart-bundle-'));
+  const drive = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-restart-drive-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  t.after(() => rm(drive, { recursive: true, force: true }));
+  // pnpm links the checkout it is given, so install a copy and leave the
+  // repository's plugins directory untouched.
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const { requests, baseURL } = await mockModel(t);
+  const require_ = createRequire(join(sdkRoot, 'package.json'));
+  let sdkClient;
+  try {
+    sdkClient = require_.resolve('@deepseek-ai/dsh-sdk-client');
+  } catch {
+    return t.skip('the SDK client cannot be resolved');
+  }
+  const { DeepSeekHarness } = await import(pathToFileURL(sdkClient).href);
+
+  // The bundle declares zeron-captains inert; this row replaces its config
+  // with the crew role pointed at the temp Drive.
+  const row = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: drive };
+  const patch = join(checkout, 'crew-row.yml');
+  await writeFile(patch, `- ${JSON.stringify({ insert: [{ id: 'zeron-captains', name: 'zeron-dsh-captains', config: row }] })}\n`);
+
+  const alpha = 'RULE-ALPHA: file every report under reports/.';
+  const beta = 'RULE-BETA: never file a report; hand the work back to the Captain.';
+  const crew = join(drive, 'CREW.md');
+  // Two runtimes, same profile: the second one is a new process resuming the
+  // session the first one persisted.
+  const options = () => ({
+    profile: 'sdk', dshHome: home, dshBin, cwd: checkout, processCwd: checkout, model: 'deepseek-flash',
+    env: { ...env, DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: baseURL },
+    patches: [patch], initializeTimeoutMs: 60000, requestTimeoutMs: 120000,
+  });
+  const callsSince = start => requests.slice(start)
+    .filter(request => request.path.endsWith('/messages')).map(request => request.input);
+
+  // Turn 1 in the first runtime: the series is built against alpha.
+  let sessionId;
+  let firstTurn;
+  const before = new DeepSeekHarness(options());
+  try {
+    await before.start();
+    const session = before.session('zeron-crew-rules');
+    await writeFile(crew, alpha);
+    const start = requests.length;
+    const result = await session.run('Reply with a brief acknowledgement before the restart.');
+    assert.equal(result.finishReason, 'completed', `turn 1 did not finish: ${result.finishReason ?? result}`);
+    assert.equal(result.sessionId, session.id);
+    sessionId = session.id;
+    firstTurn = callsSince(start);
+  } finally {
+    await before.close();
+  }
+  assert.ok(firstTurn.length > 0, 'turn 1 produced no model request');
+
+  // The runtime is gone; CREW.md changes while it is down; a new process
+  // resumes the persisted session for the next message.
+  await writeFile(crew, beta);
+  const after = new DeepSeekHarness(options());
+  let resumedId;
+  let restartedTurn;
+  try {
+    await after.start();
+    const resumed = await after.resumeSession(sessionId);
+    const start = requests.length;
+    const result = await resumed.run('Reply with a brief acknowledgement after the restart.');
+    assert.equal(result.finishReason, 'completed', `the resumed turn did not finish: ${result.finishReason ?? result}`);
+    resumedId = result.sessionId;
+    restartedTurn = callsSince(start);
+  } finally {
+    await after.close();
+  }
+  assert.equal(resumedId, sessionId, 'the restarted runtime did not resume the same session');
+  assert.ok(restartedTurn.length > 0, 'the resumed turn produced no model request');
+
+  const count = (value, needle) => value.split(needle).length - 1;
+  const system = input => typeof input.system === 'string' ? input.system
+    : (input.system ?? []).map(block => block?.text ?? '').join('');
+  const crewBlocks = text => [...text.matchAll(/<crew-rules\b[^>]*>[\s\S]*?<\/crew-rules>/g)].map(([block]) => block);
+  // The runtime echoes its rendered system message inside `dsh_session_log`;
+  // that echo is the current block, not a copy the model consumes, so the
+  // one-block rule is counted on the model-facing request while the retired
+  // marker is swept from the whole body.
+  const surface = input => {
+    const { dsh_session_log, ...rest } = input;
+    return JSON.stringify(rest);
+  };
+
+  // Before the restart the series really carried alpha, so the resumed turn is
+  // a stale-copy test rather than an empty one.
+  assert.ok(firstTurn.some(input => system(input).includes(alpha)), 'turn 1 never served the pre-restart rule');
+
+  for (const input of restartedTurn) {
+    assert.equal(count(surface(input), '<crew-rules'), 1,
+      `the resumed turn carried ${count(surface(input), '<crew-rules')} crew-rules opening tags in the request`);
+    const blocks = crewBlocks(system(input));
+    assert.equal(blocks.length, 1, `the resumed turn has ${blocks.length} crew-rules blocks in system`);
+    assert.ok(blocks[0].startsWith('<crew-rules captain="Helm">'), `the resumed block is malformed: ${blocks[0].slice(0, 80)}`);
+    assert.ok(blocks[0].includes(beta), 'the resumed turn did not serve the current rule');
+    const body = JSON.stringify(input);
+    assert.ok(!body.includes('RULE-ALPHA'), 'the resumed turn still carries the retired rule');
+  }
+});

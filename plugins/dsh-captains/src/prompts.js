@@ -1,4 +1,4 @@
-const escapeAttr = s => String(s)
+export const escapeAttr = s => String(s)
   .replace(/&/g, '&amp;')
   .replace(/</g, '&lt;')
   .replace(/>/g, '&gt;')
