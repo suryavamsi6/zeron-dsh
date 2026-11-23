@@ -772,7 +772,9 @@ test("a side chat row's menu is the sidebar's, without pin or move; a top-level 
 		expect(side).to_contain(item)
 	end
 	expect(side).never.to_contain("Pin")
-	expect(side).never.to_contain("Move to")
+	-- (The sections' "Move to": the crew's "Move to Captain" (SUR-91) is a
+	-- different item, offered disabled with its reason.)
+	expect(string.find(`{side},`, ",Move to,", 1, true)).to_be(nil)
 	app:set_state("test_menu_of", "chat-1")
 	app:command("session_menu")
 	local top = tostring(app:state("test_menu_labels"))
