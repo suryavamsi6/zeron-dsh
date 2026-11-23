@@ -603,7 +603,7 @@ impl HarnessRegistry {
     pub fn set_title_settings(&self, mut settings: TitleSettings) -> Result<(), String> {
         if let Some(id) = settings.harness {
             let enabled = self.enabled_set().contains(&id)
-                || (cfg!(debug_assertions) && id == HarnessId::Mock && self.is_registered(id));
+                || (id == HarnessId::Mock && id.can_run() && self.is_registered(id));
             if !zeron_harness::supports_titles(id) || !enabled {
                 return Err("Choose an enabled harness that supports title generation".into());
             }
@@ -748,7 +748,7 @@ fn full_registry() -> HarnessRegistry {
     zeron_harness::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(zeron_harness::DeepSeekHarness::new()));
-    if cfg!(debug_assertions) && std::env::var("COMET_HARNESS").as_deref() == Ok("mock") {
+    if HarnessId::Mock.can_run() && std::env::var("COMET_HARNESS").as_deref() == Ok("mock") {
         registry.register(Arc::new(MockHarness {
             script: vec![AgentEvent::Done {
                 status: DoneStatus::Completed,
@@ -859,7 +859,7 @@ mod tests {
         }
         assert!(registry.descriptors().iter().all(|descriptor|
             descriptor.id == HarnessId::DeepSeek
-                || (cfg!(debug_assertions) && descriptor.id == HarnessId::Mock)));
+                || (descriptor.id == HarnessId::Mock && HarnessId::Mock.can_run())));
     }
 
     #[test]
@@ -886,6 +886,15 @@ mod tests {
         registry.register(Arc::new(MockHarness { script: vec![] }));
         assert!(registry.enabled_set().is_empty());
         assert!(registry.set_enabled(HarnessId::Mock, true).is_err());
+    }
+
+    /// The registry's Mock gates route through `can_run`; engine tests turn
+    /// the `mock-harness` feature on via dev-dependencies, shipped builds
+    /// leave it off.
+    #[test]
+    fn mock_can_run_in_engine_tests() {
+        assert!(HarnessId::Mock.can_run());
+        assert!(HarnessId::DeepSeek.can_run());
     }
 }
 
