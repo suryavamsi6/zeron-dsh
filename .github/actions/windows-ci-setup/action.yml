@@ -2,13 +2,18 @@ name: Windows CI setup
 description: >-
   Prepare a Windows runner for the Windows test jobs: toolchain, shader
   compiler, a cheaper release profile for the CI builds, cargo-nextest and the
-  Rust cache.
+  Rust caches.
 
 inputs:
   save-rust-cache:
     description: >-
       Whether this job saves the shared Windows Rust cache when it runs on main.
       Give it to exactly one job. Pull requests never save.
+    default: 'false'
+  save-zgx-rust-cache:
+    description: >-
+      Whether this job saves the apps/zgx Rust cache when it runs on main.
+      Give it to the job that builds the desktop app. Pull requests never save.
     default: 'false'
 
 runs:
@@ -36,14 +41,21 @@ runs:
       shell: pwsh
       # CI only: the binaries built and tested here are NOT the shipped ones
       # (release.yml still builds those with the committed profile). Thin LTO is
-      # off and the workspace's own crates are built at opt-level 0; third-party
+      # off, codegen-units is the release default rather than apps/zgx's 1, and
+      # each workspace's own crates are built at opt-level 0; third-party
       # dependencies (gpui, tokio, ...) keep the release opt-level. Written to
       # $CARGO_HOME/config.toml so Cargo.toml is untouched and every cargo
       # invocation in the job, including the ones inside
-      # scripts/package-windows.ps1, picks it up.
+      # scripts/package-windows.ps1, picks it up. That config is global, so the
+      # same overrides reach the apps/zgx workspace (`Build the desktop app`
+      # builds it from its own folder); its members are listed by the second
+      # `cargo metadata` call — the root workspace's listing does not know
+      # zeron-zgx.
       run: |
-        $members = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages.name
-        $config = @('[profile.release]', 'lto = false')
+        $members = @('Cargo.toml', 'apps/zgx/Cargo.toml') | ForEach-Object {
+          (cargo metadata --no-deps --format-version 1 --manifest-path $_ | ConvertFrom-Json).packages.name
+        }
+        $config = @('[profile.release]', 'lto = false', 'codegen-units = 16')
         foreach ($name in $members) {
           $config += "[profile.release.package.`"$name`"]"
           $config += 'opt-level = 0'
@@ -73,4 +85,18 @@ runs:
         cache-on-failure: true
         # Workspace crates are rebuilt on every change anyway and are cheap at
         # opt-level 0, so keep them out of the cache.
+        cache-workspace-crates: false
+    # apps/zgx is a workspace of its own with a different dependency graph, and
+    # only the `app` job builds it — a cache of its own (adding `apps/zgx ->
+    # target` to the shared `windows` one would not help: `tests` saves that
+    # cache and never builds zgx, so it would stay cold there). The job given
+    # save-zgx-rust-cache writes it, on main only.
+    - if: ${{ inputs.save-zgx-rust-cache == 'true' }}
+      uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      with:
+        shared-key: windows-zgx
+        workspaces: apps/zgx -> target
+        add-job-id-key: false
+        save-if: ${{ inputs.save-zgx-rust-cache == 'true' && github.ref == 'refs/heads/main' }}
+        cache-on-failure: true
         cache-workspace-crates: false
