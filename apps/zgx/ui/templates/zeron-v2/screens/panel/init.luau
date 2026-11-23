@@ -551,6 +551,31 @@ function M.open_lane_tab(session: string, lane: { kind: string, id: string, titl
 		set_files(true)
 	end
 end
+-- A Captain's Digest as a tab of `session`'s panel: the one already showing
+-- that chat's Digest, else a new one, and the panel open. The chat is the
+-- roster's to name (`screens/chat/captain_digest` reads whether it is a
+-- Captain): a tab of a chat that is not one shows the Digest's empty state.
+function M.open_digest(session: any, chat: string)
+	local k = state.key(session, nil)
+	if not k then
+		return
+	end
+	local found: string? = nil
+	for _, t in state.of(k).tabs do
+		if t.kind == "captain_digest" and t.chat == chat then
+			found = t.id
+		end
+	end
+	if found then
+		state.activate(k, found)
+	else
+		state.open(k, "captain_digest", { chat = chat })
+	end
+	local set_files = (if shell_view then shell_view.set_files else nil) :: ((boolean) -> ())?
+	if set_files then
+		set_files(true)
+	end
+end
 if lanes_card then
 	lanes_card.opener = M.open_lane_tab
 end
@@ -584,6 +609,12 @@ local function title_of(tab: Tab): (string, boolean)
 	if tab.kind == "files" then
 		local path, dirty = Files.tab_file(tab.id)
 		return if path then base_name(path) else ui.t("panel.tab.files"):get(), dirty
+	end
+	if tab.kind == "captain_digest" then
+		if tab.title and tab.title ~= "" then
+			return tab.title, false
+		end
+		return ui.t("chat.captain_digest.tab"):get(), false
 	end
 	-- (A run action's: its name, as the shipping app titles it.)
 	if tab.title and tab.title ~= "" then
@@ -746,6 +777,7 @@ M.Panel = ui.component(function(props: Props): Node
 					return ui.image { src = path, w = 14, h = 14, fit = "contain", rounded = "$radius.sm" }
 				end)
 			elseif tab.kind == "plugin" then Icon { name = (tab.icon or "widget") :: any, size = 14 }
+			elseif tab.kind == "captain_digest" then Icon { name = "document", size = 14 }
 			elseif (tab.kind == "side_chat" or tab.kind == "subagent") and Lanes then Icon { name = Lanes.icon(tab) :: any, size = 14 }
 			else ui.presence(function(): string
 				-- (A file tab's file by its name; none yet, "": by the file,
@@ -1306,6 +1338,23 @@ M.Panel = ui.component(function(props: Props): Node
 				fill = true,
 				title = ui.t("panel.broken.browser.title") :: any,
 				body = ui.t("panel.broken.browser.body") :: any,
+			}
+		end
+		if tab.kind == "captain_digest" then
+			-- (Its own module: loaded here, as a terminal's is, so a panel of
+			-- files and terminals stands if the chat page's modules cannot.)
+			local ok, CaptainDigest = pcall(function(): any
+				return (require :: any)("@app/screens/chat/captain_digest")
+			end)
+			if ok and CaptainDigest and CaptainDigest.Tab then
+				return CaptainDigest.Tab { chat = tab.chat or "" }
+			end
+			return ds.EmptyState {
+				icon = "document",
+				size = "sm",
+				fill = true,
+				title = ui.t("chat.captain_digest.empty_title") :: any,
+				body = ui.t("chat.captain_digest.empty_body") :: any,
 			}
 		end
 		if tab.kind == "files" then

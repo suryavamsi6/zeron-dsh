@@ -123,3 +123,115 @@ fn every_captain_action_forwards_to_its_own_rpc_method_and_surfaces_a_refusal() 
         "a refusal reaches the page as the host's error, in the engine's own words"
     );
 }
+
+/// The Digest tab's one read: the roster's `drivePath` is the only path it
+/// takes, the Drive's three files come back as they are on disk, a linked
+/// file out of the Drive is not read, and a chat that is not a Captain is
+/// refused in the page's error instead of answering an empty Drive.
+#[test]
+fn the_digest_action_reads_only_the_roster_captain_s_drive() {
+    let dir = tempfile::tempdir().unwrap();
+    let drive = dir.path().join("drive");
+    std::fs::create_dir_all(drive.join("state")).unwrap();
+    std::fs::create_dir_all(drive.join("reports")).unwrap();
+    std::fs::write(drive.join("DIGEST.md"), "Billing: 2 asks.").unwrap();
+    std::fs::write(
+        drive.join("state/needs-you.json"),
+        r#"{"version":1,"updatedAt":"2026-11-22T01:00:00Z","items":["one","two"]}"#,
+    )
+    .unwrap();
+    // Two reports, the newer one second on disk: the tab reads them newest
+    // first, so what it shows does not depend on the folder's order.
+    let alpha = drive.join("reports/alpha.md");
+    let beta = drive.join("reports/beta.md");
+    std::fs::write(&alpha, "alpha report").unwrap();
+    std::fs::write(&beta, "beta report").unwrap();
+    let now = std::time::SystemTime::now();
+    std::fs::File::options().write(true).open(&alpha).unwrap().set_modified(now - std::time::Duration::from_secs(60)).unwrap();
+    std::fs::File::options().write(true).open(&beta).unwrap().set_modified(now).unwrap();
+    // A link planted in the Drive that points out of it: never read.
+    #[cfg(unix)]
+    {
+        let outside = dir.path().join("outside.md");
+        std::fs::write(&outside, "not the Captain's").unwrap();
+        std::os::unix::fs::symlink(&outside, drive.join("reports/escape.md")).unwrap();
+    }
+
+    let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+    let done = Rc::new(Cell::new(false));
+    let roster = json!({ "captains": [
+        { "chatId": "cap-a", "name": "Billing", "drivePath": drive.to_string_lossy() },
+    ] });
+    let call = move |method: &'static str, _params: Json| -> crate::providers::McpCall {
+        let roster = roster.clone();
+        Box::pin(async move {
+            match method {
+                "Captains" => Ok(roster),
+                other => Err(format!("unexpected method {other}")),
+            }
+        })
+    };
+
+    let page = r#"
+local CHATS = { "cap-a", "chat-z" }
+
+local function summarise(a: any): string
+	local items = table.concat((a.needsYou and a.needsYou.items) or {}, "+")
+	local reports = {}
+	for _, report in a.reports or {} do
+		table.insert(reports, report.name .. ":" .. report.text)
+	end
+	return string.format("digest=%s items=%s reports=%s", tostring(a.digest), items, table.concat(reports, ";"))
+end
+
+local function step(i: number)
+	if i > #CHATS then
+		ui.invoke("test.done", nil)
+		return
+	end
+	ui.call("CaptainDrive", { chatId = CHATS[i] }):after(function(answer: any)
+		ui.invoke("test.record", summarise(answer))
+		step(i + 1)
+	end, function(err: any)
+		ui.invoke("test.record", "err:" .. tostring(err.message))
+		step(i + 1)
+	end)
+end
+
+step(1)
+
+return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "captain drive" }) })
+"#;
+
+    let app = {
+        let lines = Rc::clone(&lines);
+        let done = Rc::clone(&done);
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "captain_drive", page);
+            crate::captains::install_over(&host, call);
+            host.action("test.record", move |line| {
+                lines.borrow_mut().push(crate::auth::text(&line));
+            });
+            host.action("test.done", move |_| done.set(true));
+            host
+        })
+    };
+    let mut app = app;
+    for _ in 0..2000 {
+        app.frames(1);
+        if done.get() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(done.get(), "the page never finished its reads; what came back: {:?}", lines.borrow());
+
+    assert_eq!(
+        *lines.borrow(),
+        vec![
+            "digest=Billing: 2 asks. items=one+two reports=beta.md:beta report;alpha.md:alpha report".to_owned(),
+            "err:That chat is not a Captain on this device".to_owned(),
+        ],
+        "the Drive's files, newest report first, and a refusal for a chat that is not a Captain"
+    );
+}

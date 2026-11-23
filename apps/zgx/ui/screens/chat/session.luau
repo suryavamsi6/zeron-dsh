@@ -11,6 +11,7 @@
 local ds = require("@ds")
 local T = require("@ds/transcript")
 local store = require("@app/screens/chat/store")
+local CaptainDigest = require("@app/screens/chat/captain_digest")
 local route = require("@app/screens/shell/route")
 -- Its side chats and subagents, in a card at the top right (the title
 -- bar's "Show session details").
@@ -260,6 +261,18 @@ local function Session(id: Id?): Node
 				min_h = 0,
 				-- Under the composer, to its footer's line.
 				pb = Dock.page_pad(),
+				-- (A Captain's chat: what it asks you for, over the transcript,
+				-- and the way to its Digest tab. Nothing for any other chat.)
+				CaptainDigest.Strip {
+					chat = which,
+					open = function(chat: string)
+						local panel: any = boundary.load("@app/screens/panel")
+						local id = which()
+						if panel and panel.open_digest and id then
+							(panel.open_digest :: any)(id, chat)
+						end
+					end,
+				},
 				ui.column {
 					w_full = true,
 					grow = 1,
