@@ -37,6 +37,9 @@ pub fn build_id() -> &'static str {
 }
 pub mod auth;
 mod captains;
+// SUR-108: the packaged-bundle property resolves through the same lookup the
+// engine uses, so the release case drives the real function rather than a copy.
+pub use captains::{PLUGIN_DIR_ENV, plugin_dir};
 mod change_request_store;
 pub mod change_requests;
 mod chat2_checkpoint;

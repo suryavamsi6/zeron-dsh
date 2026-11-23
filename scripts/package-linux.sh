@@ -113,7 +113,7 @@ install -m 755 "$BIN" "$STAGE/zeron"
 install -m 755 "$ENGINE_BIN" "$STAGE/zeron-engine"
 install -m 644 "$ROOT/dist/zeron.desktop" "$STAGE/zeron.desktop"
 install -m 644 "$ROOT/dist/zeron.png" "$STAGE/zeron.png"
-install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
+install -m 644 "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$ROOT/README.md" "$STAGE/"
 mkdir -p "$STAGE/licenses/fonts"
 cp "$ROOT/assets/fonts/licenses/"* "$STAGE/licenses/fonts/"
 cp "$ROOT/crates/voice/NOTICE.md" "$STAGE/licenses/parakeet-v3.txt"
@@ -122,12 +122,9 @@ if [[ -n "$ZGX_VERSION" ]]; then
   # beside the binary. Not zgx's generated types or the tests.
   rsync -a --exclude '.zgx/' --exclude '/tests/' --exclude '.lock' --exclude '.DS_Store' \
     "$ROOT/apps/zgx/ui/" "$STAGE/ui/"
-  rsync -a --exclude '.zgx/' --exclude '.DS_Store' \
-    "$ROOT/apps/zgx/plugins-builtin/" "$STAGE/plugins-builtin/"
-  # Each ships the canonical SDK, as scripts/package-zgx-macos.sh.
-  for dir in "$STAGE/plugins-builtin/"*/; do
-    cp "$ROOT/apps/zgx/plugins-sdk/zeron.luau" "$dir/zeron.luau"
-  done
+  # Zeron's own plugins (the app's and the repository's Captains bundle),
+  # staged as scripts/package-zgx-macos.sh and package-windows.ps1 stage them.
+  "$ROOT/scripts/stage-plugins-builtin.sh" "$STAGE"
   cp "$ROOT/apps/zgx/fonts/"*-OFL.txt "$STAGE/licenses/fonts/"
   rm -rf "$OUT_DIR/.stable"
 fi

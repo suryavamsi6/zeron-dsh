@@ -94,6 +94,23 @@ function Copy-Scripts([string]$From, [string]$To) {
     $global:LASTEXITCODE = 0
 }
 
+function Find-GitBash {
+    # Git Bash runs the shared plugin staging step, as `shell: bash` does on
+    # the runners. Find it beside git.exe: a bare `bash` on the PATH can be
+    # WSL's instead.
+    $git = (Get-Command 'git' -ErrorAction SilentlyContinue).Source
+    if ($git) {
+        $dir = Split-Path $git -Parent
+        foreach ($candidate in @("$dir\bash.exe", "$dir\..\bin\bash.exe", "$dir\..\usr\bin\bash.exe",
+                                 "$dir\..\..\bin\bash.exe", "$dir\..\..\usr\bin\bash.exe")) {
+            if (Test-Path -LiteralPath $candidate) { return (Resolve-Path -LiteralPath $candidate).Path }
+        }
+    }
+    $command = Get-Command 'bash' -ErrorAction SilentlyContinue
+    if ($command) { return $command.Source }
+    throw 'Git Bash (bash.exe) is required to stage the built-in plugins'
+}
+
 Push-Location $root
 try {
     if ($ZgxVersion) {
@@ -152,7 +169,7 @@ try {
     New-Item -ItemType Directory -Force -Path $stage | Out-Null
     Copy-Item -LiteralPath $built -Destination (Join-Path $stage 'zeron.exe')
     @{ releases_url = $ReleasesUrl } | ConvertTo-Json | Set-Content -Encoding utf8NoBOM -LiteralPath (Join-Path $stage 'zeron-update.json')
-    Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md' -Destination $stage
+    Copy-Item -LiteralPath 'LICENSE','THIRD_PARTY_NOTICES.md','README.md' -Destination $stage
     $licenses = Join-Path $stage 'licenses/fonts'
     New-Item -ItemType Directory -Force -Path $licenses | Out-Null
     Copy-Item -Path 'assets/fonts/licenses/*' -Destination $licenses
@@ -161,11 +178,11 @@ try {
         $files = Join-Path $stage "beta/$version"
         Copy-Scripts 'apps/zgx/ui' (Join-Path $files 'ui')
         Remove-Item -LiteralPath (Join-Path $files 'ui/tests') -Recurse -Force
-        Copy-Scripts 'apps/zgx/plugins-builtin' (Join-Path $files 'plugins-builtin')
-        # Each ships the canonical SDK, as scripts/package-zgx-macos.sh.
-        foreach ($dir in Get-ChildItem -Directory -LiteralPath (Join-Path $files 'plugins-builtin')) {
-            Copy-Item -LiteralPath 'apps/zgx/plugins-sdk/zeron.luau' -Destination (Join-Path $dir.FullName 'zeron.luau') -Force
-        }
+        # Zeron's own plugins (the app's and the repository's Captains bundle),
+        # staged as scripts/package-zgx-macos.sh and package-linux.sh stage them.
+        & (Find-GitBash) -c '"$(cygpath -u "$0")" "$(cygpath -u "$1")"' `
+            (Join-Path $root 'scripts/stage-plugins-builtin.sh') $files
+        if ($LASTEXITCODE -ne 0) { throw 'staging the built-in plugins failed' }
         New-Item -ItemType Directory -Force -Path (Join-Path $files 'engine') | Out-Null
         Copy-Item -LiteralPath $ZgxEngine -Destination (Join-Path $files 'engine/zeron.exe')
         Copy-Item -Path 'apps/zgx/fonts/*-OFL.txt' -Destination $licenses
