@@ -1255,6 +1255,44 @@ impl SessionsEngine {
         request.env.insert(STAMP.to_owned(), provider);
     }
 
+    /// What a crew-report wake carries: the launch the Captain's own chat
+    /// would send — the row's configured harness, route, model, sandbox and
+    /// access, run in the chat's folder. Built on the defaults instead, the
+    /// wake restarts the Captain on the engine's route in `~`, another mode
+    /// than the person set (SUR-232). A chat with no config predates them:
+    /// its wake keeps the defaults it always ran with. The picker's
+    /// `provider` stays inside `model_options`; `dispatch_inner` takes it
+    /// into env on the way in.
+    fn wake_request(
+        config: Option<&zeron_proto::ChatConfig>,
+        cwd: Option<String>,
+        harness: HarnessId,
+        line: String,
+    ) -> RunRequest {
+        RunRequest {
+            prompt: line,
+            harness: Some(harness),
+            model: config.and_then(|config| config.model.clone()),
+            reasoning: config.and_then(|config| config.reasoning),
+            model_options: config
+                .map(|config| config.model_options.clone())
+                .unwrap_or_default(),
+            cwd: cwd.unwrap_or_else(|| "~".into()),
+            sandbox: config
+                .map(|config| config.sandbox)
+                .unwrap_or(SandboxLevel::WorkspaceWrite),
+            auto_approve: false,
+            access: config.map(|config| config.access).unwrap_or_default(),
+            plan: config.is_some_and(|config| config.plan),
+            attachments: Vec::new(),
+            worktree: None,
+            mcp: None,
+            extra_mcp: Vec::new(),
+            resume: None,
+            env: Default::default(),
+        }
+    }
+
     /// The Captain role a chat plays is launch configuration: a run's
     /// `prepare` stamps it into `env` ([`crate::captains::captains_env`]),
     /// so the routing decision must compare it too — a promote or demote
@@ -3124,29 +3162,24 @@ impl Inner {
         let Some(host) = self.doc_host() else {
             return;
         };
+        let config = host
+            .workspace()
+            .and_then(|ws| ws.chat_config(captain_id));
+        let cwd = host
+            .workspace()
+            .and_then(|ws| ws.chat(captain_id).ok().flatten())
+            .and_then(|chat| chat.cwd);
         // The auto path does the starting: `queue_command` on an idle
         // Captain starts a turn, on a busy one the command steers at the
         // boundary. `auto_approve: false` — a wake must not approve on the
         // user's behalf, and it must not inherit the crew's sandbox or
         // access mode.
-        let request = RunRequest {
-            prompt: line,
-            harness: Some(host.harness_for(captain_id)),
-            model: None,
-            reasoning: None,
-            model_options: Default::default(),
-            cwd: "~".into(),
-            sandbox: SandboxLevel::WorkspaceWrite,
-            auto_approve: false,
-            access: Default::default(),
-            plan: false,
-            attachments: Vec::new(),
-            worktree: None,
-            mcp: None,
-            extra_mcp: Vec::new(),
-            resume: None,
-            env: Default::default(),
-        };
+        let request = SessionsEngine::wake_request(
+            config.as_ref(),
+            cwd,
+            host.harness_for(captain_id),
+            line,
+        );
         if let Err(error) = host.queue_command(
             captain_id,
             SessionCommandPayload::Run {
