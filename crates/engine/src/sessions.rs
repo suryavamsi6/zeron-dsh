@@ -8812,6 +8812,20 @@ mod tests {
         false
     }
 
+    /// The turn's blocking write has landed once the stored list is `items`.
+    async fn wait_for_items(path: &std::path::Path, items: &[&str]) -> bool {
+        for _ in 0..200 {
+            if let Ok(raw) = std::fs::read_to_string(path)
+                && let Ok(stored) = serde_json::from_str::<serde_json::Value>(&raw)
+                && stored["items"] == serde_json::json!(items)
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
     #[tokio::test]
     async fn a_captain_turn_records_its_needs_you_file() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -8955,8 +8969,11 @@ mod tests {
             None
         ));
         let path = drive.join("state").join(crate::needs_you::FILE);
-        assert!(wait_for(&path).await, "the file is written: {}", path.display());
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            wait_for_items(&path, &["approve the deploy"]).await,
+            "the seed turn's write landed: {}",
+            path.display()
+        );
         assert!(posted.lock().expect("posted").is_empty(), "the first read only seeds");
 
         // A new item rings once, titled by the Captain's name.
@@ -8971,6 +8988,13 @@ mod tests {
             DoneStatus::Completed,
             None
         ));
+        assert!(
+            wait_for_items(&path, &["approve the deploy", "pick a name"]).await,
+            "the turn's write landed: {}",
+            path.display()
+        );
+        // The banner follows the write in the same blocking task; the post
+        // itself is what proves it ran, so it is polled too.
         for _ in 0..60 {
             if !posted.lock().expect("posted").is_empty() {
                 break;
@@ -8982,19 +9006,28 @@ mod tests {
             vec![("Ada needs you".to_string(), "pick a name".to_string())]
         );
 
-        // An unchanged turn rings nothing.
+        // An unchanged turn rings nothing. The file is not rewritten, so a
+        // stored-list poll would match instantly and prove nothing: the posted
+        // vector must instead stay at one banner for a bounded wait while the
+        // turn's task runs.
         assert!(sessions.turn_end_writes(
             "cap-a",
             Some(&captain_stamp(&drive)),
             DoneStatus::Completed,
             None
         ));
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert_eq!(posted.lock().expect("posted").len(), 1);
+        for _ in 0..200 {
+            assert_eq!(
+                posted.lock().expect("posted").len(),
+                1,
+                "an unchanged turn rings nothing"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
     }
 
     #[tokio::test]
-    async fn an_archived_captains_turn_end_notifies_nothing() {
+    async fn captains_needs_you_an_archived_captain_notifies_nothing() {
         const ARCHIVED: &str = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), ARCHIVED);
@@ -9008,14 +9041,15 @@ mod tests {
         let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
         // Seed the baseline, then add an item: an archived Captain stays quiet.
         sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
-        assert!(wait_for(&drive.join("state").join(crate::needs_you::FILE)).await);
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for_items(&path, &["approve the deploy"]).await);
         std::fs::write(
             drive.join("DIGEST.md"),
             "## Needs you\n- approve the deploy\n- pick a name\n",
         )
         .expect("digest");
         sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(wait_for_items(&path, &["approve the deploy", "pick a name"]).await);
         assert!(posted.lock().expect("posted").is_empty(), "an archived Captain rings nothing");
     }
 

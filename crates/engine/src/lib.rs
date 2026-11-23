@@ -384,18 +384,13 @@ impl EngineCore {
         }
         sessions.set_plugins(plugins.clone());
         // A Captain's newly-added "Needs you" items ring through the same
-        // banner path as the engine's own (SUR-93).
+        // banner path as the engine's own finished-turn notice
+        // (`post_asked`, unpaced): the plugin-request path paces and drops,
+        // which would lose an item whose baseline has already advanced.
         {
             let (data_dir, focus) = (data_dir.to_path_buf(), viewport_focus.clone());
             sessions.set_needs_you_post(Arc::new(move |title, body, session| {
-                crate::desktop_notify::post_for(
-                    &data_dir,
-                    &focus,
-                    "captain-needs-you",
-                    title,
-                    body,
-                    session,
-                );
+                crate::desktop_notify::post_asked(&data_dir, &focus, title, body, session);
             }));
         }
         sessions.set_doc_host(doc_host.clone());

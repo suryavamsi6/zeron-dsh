@@ -499,12 +499,19 @@ mod tests {
     }
 
     #[test]
-    fn captains_needs_you_a_failed_read_keeps_the_baseline() {
+    fn captains_needs_you_a_failed_read_keeps_the_baseline_and_a_recovery_reports_only_new_items() {
         let seen = Seen::default();
-        seen.new_items("cap-a", Some(vec!["a".to_string()]));
-        assert!(seen.new_items("cap-a", None).is_empty());
-        // A recovery does not burst: "a" was already seen.
+        // Seeded: "a" has been seen.
         assert!(seen.new_items("cap-a", Some(vec!["a".to_string()])).is_empty());
+        // The file cannot be read: nothing rings and the baseline stays.
+        assert!(seen.new_items("cap-a", None).is_empty());
+        // The recovery carries the seen item plus one new one: exactly the new
+        // one rings. An implementation that dropped the baseline on the failed
+        // read would treat this as a first read and ring nothing.
+        assert_eq!(
+            seen.new_items("cap-a", Some(vec!["a".to_string(), "b".to_string()])),
+            vec!["b".to_string()]
+        );
     }
 
     #[test]
