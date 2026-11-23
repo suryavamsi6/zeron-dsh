@@ -374,6 +374,7 @@ impl DemoHost {
                 SessionCommandPayload::RespondInput {
                     request_id,
                     answers,
+                    ..
                 } => {
                     let _ = core.write(|doc| doc.resolve_input(&request_id, &answers));
                     if answers.is_empty() {

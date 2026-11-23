@@ -1654,6 +1654,7 @@ impl SessionHandle {
             SessionCommandPayload::RespondInput {
                 request_id: request_id.to_owned(),
                 answers,
+                by: None,
             },
         )?;
         client.after_command(&self.core, false);

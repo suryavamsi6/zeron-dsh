@@ -1636,6 +1636,7 @@ impl SessionsEngine {
                             let _ = engine_tx.send(AgentEvent::InputResolved {
                                 request_id,
                                 answers: Some(Vec::new()),
+                                by: None,
                             });
                         }
                     }
@@ -2318,6 +2319,7 @@ impl SessionsEngine {
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
             answers: Some(answers),
+            by: None,
         });
         Ok(true)
     }
@@ -8169,6 +8171,7 @@ mod tests {
         let answered = |id: &str| AgentEvent::InputResolved {
             request_id: id.into(),
             answers: None,
+            by: None,
         };
         assert!(tail_of(vec![started(), asked("q1")], false).awaiting_input);
         assert!(

@@ -1186,6 +1186,24 @@ pub struct ToolDiff {
     pub new_text: String,
 }
 
+/// Who resolved a question the run was parked on. Recorded on the event so a
+/// consumer can tell the person's own client from an agent or a plugin; a
+/// `Client` resolution is the person-facing local path, not a claim that a
+/// human was verified present.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum InputActor {
+    /// No provenance was captured (events written before actors were recorded).
+    #[default]
+    Unattributed,
+    /// The person's own client: the desktop app's local IPC, the CLI, or their other device.
+    Client,
+    /// An agent through its scoped MCP token; `chat_id` is the chat it serves, when it names one.
+    Agent { chat_id: Option<String> },
+    /// A plugin agent, by the identity it answers as.
+    Plugin { plugin: String, name: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserInputQuestion {
@@ -1199,6 +1217,9 @@ pub struct UserInputQuestion {
     pub prefill: Option<String>,
     #[serde(default)]
     pub multiline: bool,
+    /// This question is a decision the run must not resolve from an agent or a plugin; only the person's own client may answer it. Absent in older docs.
+    #[serde(default)]
+    pub requires_person: bool,
     /// A short note from the agent's reviewer on why this is asked. Already
     /// included in `question` for clients that only read text; a client that
     /// knows the field can show it apart from what is asked.
@@ -1351,12 +1372,16 @@ pub enum AgentEvent {
     #[serde(rename_all = "camelCase")]
     InputResolved {
         request_id: String,
-        /// What the person answered, exactly as the run received it. Empty
+        /// What the resolver answered, exactly as the run received it. Empty
         /// when the questions closed without an answer (dismissed, or the run
         /// stopped waiting). Absent on events written before answers were
         /// recorded — nothing is known about them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<Vec<UserInputAnswer>>,
+        /// Who resolved it; `None` for events written before actors were
+        /// recorded or for a closed-unanswered request.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<InputActor>,
     },
     /// A confirmed new assignment. When tagged as Subagent, this reopens the
     /// same child transcript even if the provider does not echo the user text.

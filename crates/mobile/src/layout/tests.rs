@@ -216,6 +216,7 @@ fn question_chip_reads_what_was_answered() {
         multi_select: false,
         prefill: None,
         multiline: false,
+        requires_person: false,
     };
     let chip = |questions: Vec<zeron_proto::UserInputQuestion>, resolved: bool, answers: Option<Vec<zeron_proto::UserInputAnswer>>| {
         let mut w = worker(390.0);

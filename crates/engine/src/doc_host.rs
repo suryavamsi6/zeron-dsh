@@ -6883,6 +6883,7 @@ impl DocHost {
             SessionCommandPayload::RespondInput {
                 request_id,
                 answers,
+                ..
             } => {
                 if sessions.respond_input(chat_id, request_id, answers.clone())? {
                     return Ok((SessionCommandStatus::Applied, None));

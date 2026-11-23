@@ -40,6 +40,7 @@ pub fn question(header: impl Into<String>, question: impl Into<String>) -> UserI
         multi_select: false,
         prefill: None,
         multiline: false,
+        requires_person: false,
     }
 }
 

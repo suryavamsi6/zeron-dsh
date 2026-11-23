@@ -218,6 +218,7 @@ impl AgentHost for EngineAgentHost {
         let payload = SessionCommandPayload::RespondInput {
             request_id: request.to_owned(),
             answers,
+            by: None,
         };
         self.doc_host
             .queue_command_with_transfers(chat, payload, Vec::new())

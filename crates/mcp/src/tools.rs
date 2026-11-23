@@ -1712,6 +1712,7 @@ impl Tools {
                 &SessionCommandPayload::RespondInput {
                     request_id: request_id.clone(),
                     answers,
+                    by: None,
                 },
             )
             .await?;
