@@ -244,8 +244,19 @@ jobs:
     timeout-minutes: 5
     steps:
       - env:
-          FAILED: ${{ contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') }}
           RESULTS: ${{ toJSON(needs) }}
         run: |
-          echo "$RESULTS" | python3 -c 'import json,sys; [print(k.ljust(13), v["result"]) for k, v in json.load(sys.stdin).items()]'
-          test "$FAILED" = false
+          echo "$RESULTS" | python3 -c '
+          import json, sys
+          needs = json.load(sys.stdin)
+          for name, job in needs.items():
+              print(name.ljust(13), job["result"])
+          bad = [
+              (name, job["result"])
+              for name, job in needs.items()
+              if job["result"] not in ("success", "skipped")
+          ]
+          if bad:
+              print("not success or skipped: " + ", ".join(f"{name}={result}" for name, result in bad))
+              sys.exit(1)
+          '
