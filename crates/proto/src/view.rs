@@ -1322,6 +1322,7 @@ mod input_outcome_tests {
             multi_select: false,
             prefill: None,
             multiline: false,
+            requires_person: false,
         }
     }
 

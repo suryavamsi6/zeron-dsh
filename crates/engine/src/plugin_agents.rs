@@ -214,10 +214,12 @@ impl AgentHost for EngineAgentHost {
         chat: &str,
         request: &str,
         answers: Vec<UserInputAnswer>,
+        by: Option<zeron_proto::InputActor>,
     ) -> Result<String, String> {
         let payload = SessionCommandPayload::RespondInput {
             request_id: request.to_owned(),
             answers,
+            by,
         };
         self.doc_host
             .queue_command_with_transfers(chat, payload, Vec::new())

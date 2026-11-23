@@ -53,6 +53,11 @@ pub enum SessionCommandPayload {
     RespondInput {
         request_id: String,
         answers: Vec<UserInputAnswer>,
+        /// Who is answering; stamped by the engine for agent callers. `None`
+        /// means the local client (a pre-actor command in an older doc reads
+        /// the same way).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<zeron_proto::InputActor>,
     },
 }
 

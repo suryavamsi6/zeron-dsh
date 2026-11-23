@@ -51,8 +51,8 @@ use std::time::{Duration, Instant};
 use futures::future::BoxFuture;
 use serde_json::{Map, Value as Json, json};
 use zeron_proto::{
-    AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel,
-    Session, SessionStatus, UserInputAnswer, run_errors::ProviderProblem,
+    AgentAccount, AgentAccountsSnapshot, Chat, ChatConfig, DoneStatus, HarnessId, InputActor, Model,
+    ReasoningLevel, Session, SessionStatus, UserInputAnswer, run_errors::ProviderProblem,
 };
 
 pub const USAGE_READ: &str = "usage.read";
@@ -194,8 +194,9 @@ pub trait AgentHost: Send + Sync + 'static {
     fn pending_input(&self, _chat: &str) -> Result<Option<String>, String> {
         Ok(None)
     }
-    /// `QueueCommand respondInput`, as `respond_to_input` answers.
-    fn answer(&self, _chat: &str, _request: &str, _answers: Vec<UserInputAnswer>) -> Result<String, String> {
+    /// `QueueCommand respondInput`, as `respond_to_input` answers; `by` is
+    /// who the answer is from (a plugin answers as itself).
+    fn answer(&self, _chat: &str, _request: &str, _answers: Vec<UserInputAnswer>, _by: Option<InputActor>) -> Result<String, String> {
         Err("Answering isn't available on this device".into())
     }
     /// Record who sent `id` (a message, a queued row) beside `chat`'s
@@ -1246,7 +1247,17 @@ impl Agents {
             return Err(Refused::new(reason::BAD_CALL, "Say each question's answer: answers = { { question, labels } }"));
         }
         self.loop_guard(by)?;
-        let id = host.answer(&chat.id, &request, answers).map_err(|why| Refused::new(reason::FAILED, why))?;
+        let id = host
+            .answer(
+                &chat.id,
+                &request,
+                answers,
+                Some(InputActor::Plugin {
+                    plugin: by.plugin.clone(),
+                    name: by.name.clone(),
+                }),
+            )
+            .map_err(|why| Refused::new(reason::FAILED, why))?;
         self.record(by, json!({ "op": "answer", "chat": chat.id, "request": request }));
         tracing::info!(plugin = %by.plugin, chat = %chat.id, "plugins: answered a chat's question");
         Ok(json!({ "status": "answered", "chat": chat.id, "request": request, "id": id }))

@@ -461,6 +461,7 @@ async fn a_fork_settles_the_running_subagent_chips_it_copies() {
                         prefill: None,
                         multiline: false,
                         multi_select: false,
+                        requires_person: false,
                     }],
                     resolved: false,
                     answers: None,

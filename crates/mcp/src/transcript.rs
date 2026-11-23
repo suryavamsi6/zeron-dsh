@@ -332,6 +332,7 @@ mod tests {
             multi_select: false,
             prefill: None,
             multiline: false,
+            requires_person: false,
         };
         let input =
             |id: &str, answers: Option<Vec<zeron_proto::UserInputAnswer>>| MessagePart::Input {

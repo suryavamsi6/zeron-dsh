@@ -1583,8 +1583,11 @@ async fn rpc_surface_over_in_memory_transport() {
 }
 
 /// Harness that asks one question through RunControls and echoes the answer —
-/// "picked none" when the question closed without one.
-struct EchoAnswerHarness;
+/// "picked none" when the question closed without one. `requires_person`
+/// marks its question a decision only the person's own client may answer.
+pub struct EchoAnswerHarness {
+    pub requires_person: bool,
+}
 #[async_trait]
 impl Harness for EchoAnswerHarness {
     fn id(&self) -> HarnessId {
@@ -1611,6 +1614,7 @@ impl Harness for EchoAnswerHarness {
         controls: RunControls,
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        let requires_person = self.requires_person;
         tokio::spawn(async move {
             let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
                 note: None,
@@ -1622,6 +1626,7 @@ impl Harness for EchoAnswerHarness {
                 prefill: None,
                 multiline: false,
                 multi_select: false,
+                requires_person,
             }])
             .await
             .unwrap_or_default();
@@ -1661,7 +1666,12 @@ fn recorded_answers(core: &EngineCore) -> Option<Vec<zeron_proto::UserInputAnswe
 #[tokio::test]
 async fn closing_a_question_unanswered_declines_and_records_it() {
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(EchoAnswerHarness));
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1704,6 +1714,7 @@ async fn closing_a_question_unanswered_declines_and_records_it() {
         SessionCommandPayload::RespondInput {
             request_id,
             answers: vec![],
+            by: None,
         },
     );
     wait_for(
@@ -1762,6 +1773,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_person: false,
                 }],
                 resolved: false,
                 answers: None,
@@ -1779,6 +1791,7 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
         SessionCommandPayload::RespondInput {
             request_id: "req-dead".into(),
             answers: vec![],
+            by: None,
         },
     );
     wait_for(
@@ -1806,7 +1819,12 @@ async fn closing_a_dead_runs_question_records_it_without_a_new_turn() {
 #[tokio::test]
 async fn respond_input_resolves_pending_question() {
     let dir = tempfile::tempdir().unwrap();
-    let core = assemble(dir.path(), Arc::new(EchoAnswerHarness));
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
     let handle = core.doc_host.open(CHAT).unwrap();
     queue_as_viewer(
         handle.doc(),
@@ -1863,6 +1881,7 @@ async fn respond_input_resolves_pending_question() {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
             }],
+            by: None,
         },
     );
 
@@ -1943,6 +1962,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_person: false,
                 }])
                 .await
                 .unwrap_or_default();
@@ -2011,6 +2031,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
             }],
+            by: None,
         },
     );
     wait_for(
@@ -2058,6 +2079,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["b".into()],
             }],
+            by: None,
         },
     );
     wait_for(
@@ -2138,6 +2160,7 @@ async fn interrupt_unblocks_a_run_awaiting_input() {
                         prefill: None,
                         multiline: false,
                         multi_select: false,
+                        requires_person: false,
                     }])
                     .await;
                     interrupt.cancelled().await;
@@ -2289,6 +2312,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     prefill: None,
                     multiline: false,
                     multi_select: false,
+                    requires_person: false,
                 };
                 // The pre-fix provider shape: surface the question under
                 // the harness's own id BEFORE asking through the bridge.
@@ -2394,6 +2418,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                 question_id: "q1".into(),
                 labels: vec!["a".into()],
             }],
+            by: None,
         },
     );
 
@@ -2426,6 +2451,345 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
         "session to settle idle",
     )
     .await;
+}
+
+/// The run journal's `inputResolved` rows for `chat`, oldest first — each a
+/// `{"seq","event"}` object; the `Done` event flushes the file, so read only
+/// once the session is Idle.
+fn input_resolved_events(dir: &std::path::Path, chat: &str) -> Vec<serde_json::Value> {
+    let path = dir
+        .join("orgs/dev-org/dev-user/journals")
+        .join(format!("{chat}.jsonl"));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|row| row["event"]["type"] == "inputResolved")
+        .collect()
+}
+
+/// An agent answering a question from ANOTHER chat (through its scoped MCP
+/// server) is recorded on the journaled `inputResolved` as that agent — both
+/// when it names the chat by exact title and by a unique id prefix.
+#[tokio::test]
+async fn respond_input_from_another_chat_records_who_answered() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    // The MCP resolve_chat reads the workspace rows: the chat needs one, and
+    // it needs its title set before the tool looks it up.
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    core.workspace
+        .rename_chat(CHAT, "Ship decision (test)")
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let tools = zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+        zeron_rpc::memory_client(core.rpc_service()),
+        zeron_mcp::Origin {
+            chat_id: Some("chat-other".into()),
+            ..Default::default()
+        },
+    )));
+
+    // Turn 1: the agent finds the chat by its exact title.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-title",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+    tools
+        .call(
+            "respond_to_input",
+            serde_json::json!({
+                "chat": "Ship decision (test)",
+                "answers": [{ "question_id": "q1", "labels": ["b"] }],
+            }),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked b"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1, "one inputResolved so far: {events:?}");
+    assert_eq!(
+        events[0]["event"]["by"],
+        serde_json::json!({"kind": "agent", "chatId": "chat-other"})
+    );
+
+    // Turn 2: the same agent, resolving the chat by a unique id prefix.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-prefix",
+        SessionCommandPayload::Run {
+            request: run_request("ask me again"),
+            message_id: "m-2".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input again",
+    )
+    .await;
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "second input part in doc",
+    )
+    .await;
+    tools
+        .call(
+            "respond_to_input",
+            serde_json::json!({
+                "chat": "chat-e2",
+                "answers": [{ "question_id": "q1", "labels": ["a"] }],
+            }),
+        )
+        .await
+        .unwrap();
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked a"))
+            })
+        },
+        "second answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle again",
+    )
+    .await;
+
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 2, "both answers journaled: {events:?}");
+    assert_eq!(
+        events[1]["event"]["by"],
+        serde_json::json!({"kind": "agent", "chatId": "chat-other"})
+    );
+    core.shutdown().await;
+}
+
+/// A `requires_person` question is a decision only the person may make: an
+/// agent's answer is refused with a resolution (the card stays up), and the
+/// person's own client is the one whose answer lands — journaled as such.
+#[tokio::test]
+async fn requires_person_card_refuses_an_agent_and_accepts_the_client() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: true,
+        }),
+    );
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    core.workspace
+        .rename_chat(CHAT, "Release decision (test)")
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let tools = zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+        zeron_rpc::memory_client(core.rpc_service()),
+        zeron_mcp::Origin {
+            chat_id: Some("chat-other".into()),
+            ..Default::default()
+        },
+    )));
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-person",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.parts.iter().any(|p| {
+                    matches!(
+                        p,
+                        MessagePart::Input {
+                            resolved: false,
+                            ..
+                        }
+                    )
+                })
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+    let request_id = entries(&core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    resolved: false,
+                    ..
+                } => Some(request_id.clone()),
+                _ => None,
+            })
+        })
+        .expect("the person-only question is live");
+
+    // The agent's answer is refused: it is not the person this card is for.
+    let reply = tools
+        .call(
+            "respond_to_input",
+            serde_json::json!({
+                "chat": "Release decision (test)",
+                "answers": [{ "question_id": "q1", "labels": ["b"] }],
+            }),
+        )
+        .await
+        .unwrap();
+    let command_id = reply["commandId"].as_str().unwrap().to_string();
+    wait_for(
+        || {
+            command_status(&core, &command_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the agent's answer to settle",
+    )
+    .await;
+    let (status, resolution) = command_status(&core, &command_id).unwrap();
+    assert_eq!(
+        status,
+        SessionCommandStatus::Rejected,
+        "an agent must not settle a person-only card"
+    );
+    assert!(
+        resolution
+            .as_deref()
+            .is_some_and(|text| text.contains("person")),
+        "the refusal names the person: {resolution:?}"
+    );
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::AwaitingInput),
+        "the question is still the person's to answer"
+    );
+
+    // The person's client answers; the run resumes and records who.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-client",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["b".into()],
+            }],
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked b"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1, "only the client's answer lands: {events:?}");
+    assert_eq!(
+        events[0]["event"]["by"],
+        serde_json::json!({"kind": "client"})
+    );
+    core.shutdown().await;
 }
 
 // ---------------------------------------------------------------------------

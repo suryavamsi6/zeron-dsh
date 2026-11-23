@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use zeron_doc::{SessionCommandPayload, TranscriptWindow};
 use zeron_proto::{
-    AccessMode, Chat, ChatConfig, HarnessId, ReasoningLevel, RunRequest, SandboxLevel, Session, SessionStatus,
-    Space, UserInputAnswer,
+    AccessMode, Chat, ChatConfig, HarnessId, InputActor, ReasoningLevel, RunRequest, SandboxLevel,
+    Session, SessionStatus, Space, UserInputAnswer,
 };
 
 use crate::transcript::{RenderOptions, RenderedMessage, render_entries};
@@ -1705,6 +1705,17 @@ impl Tools {
                 labels: a.labels,
             })
             .collect();
+        // This server speaks for the agent of its origin chat: the answer is
+        // the agent's, and says so (a real agent caller's token re-stamps it;
+        // the engine only trusts a local caller's own claim).
+        let by = self
+            .zeron
+            .origin()
+            .chat_id
+            .clone()
+            .map(|chat_id| InputActor::Agent {
+                chat_id: Some(chat_id),
+            });
         let command_id = self
             .zeron
             .queue_command(
@@ -1712,6 +1723,7 @@ impl Tools {
                 &SessionCommandPayload::RespondInput {
                     request_id: request_id.clone(),
                     answers,
+                    by,
                 },
             )
             .await?;
