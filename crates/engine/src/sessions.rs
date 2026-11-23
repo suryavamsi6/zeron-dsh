@@ -8812,6 +8812,16 @@ mod tests {
         false
     }
 
+    /// No banner arrives within a bounded window: the blocking task's roster
+    /// check and post run after the write, so a bare `is_empty` can race a
+    /// late post and pass wrongly.
+    async fn no_banner(posted: &Arc<std::sync::Mutex<Vec<(String, String)>>>, what: &str) {
+        for _ in 0..80 {
+            assert!(posted.lock().expect("posted").is_empty(), "{what}");
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
     /// The turn's blocking write has landed once the stored list is `items`.
     async fn wait_for_items(path: &std::path::Path, items: &[&str]) -> bool {
         for _ in 0..200 {
@@ -9027,8 +9037,125 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn captains_needs_you_turn_end_rings_every_new_item() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = posted.clone();
+        sessions.set_needs_you_post(Arc::new(move |title, body, _chat| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((title.to_owned(), body.to_owned()));
+        }));
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for_items(&path, &["approve the deploy"]).await);
+        no_banner(&posted, "the first read only seeds").await;
+
+        // Two items are added at once: both ring, in the snapshot's order. A
+        // paced posting path would swallow the second and never re-offer it.
+        std::fs::write(
+            drive.join("DIGEST.md"),
+            "## Needs you\n- approve the deploy\n- pick a name\n- file the report\n",
+        )
+        .expect("digest");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        assert!(
+            wait_for_items(&path, &["approve the deploy", "pick a name", "file the report"]).await,
+            "the turn's write landed: {}",
+            path.display()
+        );
+        for _ in 0..200 {
+            if posted.lock().expect("posted").len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            *posted.lock().expect("posted"),
+            vec![
+                ("Ada needs you".to_string(), "pick a name".to_string()),
+                ("Ada needs you".to_string(), "file the report".to_string()),
+            ],
+            "every new item rings, not just the first"
+        );
+    }
+
+    #[tokio::test]
+    async fn captains_needs_you_a_malformed_snapshot_keeps_the_baseline_and_recovers() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = posted.clone();
+        sessions.set_needs_you_post(Arc::new(move |title, body, _chat| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((title.to_owned(), body.to_owned()));
+        }));
+        let drive = seed_digest(&home, "## Needs you\n- keep me\n");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for_items(&path, &["keep me"]).await);
+        no_banner(&posted, "the first read only seeds").await;
+
+        // The snapshot is unreadable at a turn end (an errored turn never
+        // rewrites it): nothing rings, and the baseline is kept.
+        std::fs::write(&path, "{ not json").expect("corrupt snapshot");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Errored,
+            None
+        ));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(posted.lock().expect("posted").is_empty(), "a malformed snapshot rang");
+
+        // The next good turn recovers the list: "keep me" was already seen, so
+        // only the item added while the file was unreadable rings.
+        std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- keep me\n- new one\n").expect("digest");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        assert!(wait_for_items(&path, &["keep me", "new one"]).await);
+        for _ in 0..200 {
+            if !posted.lock().expect("posted").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            *posted.lock().expect("posted"),
+            vec![("Ada needs you".to_string(), "new one".to_string())],
+            "the recovery rings only what is new since the kept baseline"
+        );
+    }
+
+    #[tokio::test]
     async fn captains_needs_you_an_archived_captain_notifies_nothing() {
         const ARCHIVED: &str = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+        const LIVE: &str = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#;
+
+        // The archived fixture: the same two turns that ring when live, each
+        // measured over a bounded window so a late post cannot pass unseen.
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), ARCHIVED);
         let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
@@ -9039,7 +9166,31 @@ mod tests {
                 .push((title.to_owned(), body.to_owned()));
         }));
         let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
-        // Seed the baseline, then add an item: an archived Captain stays quiet.
+        sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for_items(&path, &["approve the deploy"]).await);
+        no_banner(&posted, "an archived Captain rang on the seed turn").await;
+        std::fs::write(
+            drive.join("DIGEST.md"),
+            "## Needs you\n- approve the deploy\n- pick a name\n",
+        )
+        .expect("digest");
+        sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
+        assert!(wait_for_items(&path, &["approve the deploy", "pick a name"]).await);
+        no_banner(&posted, "an archived Captain rings nothing").await;
+
+        // The control: the same fixture unarchived, the same turns. Without it a
+        // roster check that never posts anything would pass the negative above.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), LIVE);
+        let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = posted.clone();
+        sessions.set_needs_you_post(Arc::new(move |title, body, _chat| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((title.to_owned(), body.to_owned()));
+        }));
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
         sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
         let path = drive.join("state").join(crate::needs_you::FILE);
         assert!(wait_for_items(&path, &["approve the deploy"]).await);
@@ -9050,7 +9201,17 @@ mod tests {
         .expect("digest");
         sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
         assert!(wait_for_items(&path, &["approve the deploy", "pick a name"]).await);
-        assert!(posted.lock().expect("posted").is_empty(), "an archived Captain rings nothing");
+        for _ in 0..200 {
+            if !posted.lock().expect("posted").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            *posted.lock().expect("posted"),
+            vec![("Ada needs you".to_string(), "pick a name".to_string())],
+            "the live control rings the new item"
+        );
     }
 
     /// A duplicate finalization of the same turn does not rewrite a finished
