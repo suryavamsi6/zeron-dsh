@@ -3207,6 +3207,21 @@
       "empty_title": "还没有摘要",
       "empty_body": "队长会在第一次回合结束时写下摘要。"
     },
+    "captain_drive": {
+      "tab": "文件区",
+      "back": "全部文件",
+      "unreadable": "这个文件读不出来。",
+      "empty_title": "还没有文件区",
+      "empty_body": "队长会在第一次回合开始时建立文件区。",
+      "about_agents": "队长自己的规则：用哪些模型、什么需要你批准。船员不读它。",
+      "about_crew": "每个船员对话在每一回合都会读的规则，比如「PR 先开成草稿」。",
+      "about_notes": "队长的计划和随手记。",
+      "about_digest": "需要你的、新的、进行中的：就是「摘要」标签页那一页。",
+      "about_reports": "船员留给队长的报告。",
+      "about_handoffs": "船员交接给队长的说明。",
+      "about_skills": "队长和船员照着做的流程，比如发布检查清单。",
+      "about_renders": "船员留下的截图和数据。"
+    },
     "lanes": {
       "subagent": "子智能体",
       "need_conversation": "开始对话后才能创建侧边对话。",
@@ -3440,6 +3455,7 @@
     "empty": {
       "browser": "浏览器",
       "files": "文件查看器",
+      "drive": "队长文件区",
       "terminal": "终端",
       "title": "打开标签页",
       "side_chat": "侧边对话",

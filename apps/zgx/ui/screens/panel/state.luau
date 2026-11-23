@@ -17,7 +17,7 @@
 
 local M = {}
 
-export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "captain_digest"
+export type Kind = "files" | "terminal" | "plugin" | "browser" | "side_chat" | "subagent" | "captain_digest" | "captain_drive"
 export type Tab = {
 	id: string,
 	kind: Kind,
@@ -177,7 +177,7 @@ function M.open(key: string, kind: Kind, extra: { [string]: any }?): string
 	if kind == "browser" and extra then
 		tab.url = extra.url
 	end
-	if (kind == "side_chat" or kind == "subagent" or kind == "captain_digest") and extra then
+	if (kind == "side_chat" or kind == "subagent" or kind == "captain_digest" or kind == "captain_drive") and extra then
 		tab.chat, tab.title, tab.data = extra.chat, extra.title, extra.data
 	end
 	if kind == "terminal" and extra then

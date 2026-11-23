@@ -3207,6 +3207,21 @@
       "empty_title": "No digest yet",
       "empty_body": "The Captain writes one as its first turn ends."
     },
+    "captain_drive": {
+      "tab": "Drive",
+      "back": "All files",
+      "unreadable": "This file couldn't be read.",
+      "empty_title": "No Drive yet",
+      "empty_body": "The Captain makes its Drive as its first turn starts.",
+      "about_agents": "The Captain's own rules: which models to use, what needs your approval. The crew never reads it.",
+      "about_crew": "Rules every crew chat reads on every turn, such as opening PRs as drafts.",
+      "about_notes": "The Captain's plan and working notes.",
+      "about_digest": "What needs you, what's new and what's in progress: the Digest tab's page.",
+      "about_reports": "Reports the crew leaves for the Captain.",
+      "about_handoffs": "Notes a crew chat hands on to the Captain.",
+      "about_skills": "Procedures the Captain and its crew follow, such as a release checklist.",
+      "about_renders": "Screenshots and data the crew leaves behind."
+    },
     "lanes": {
       "subagent": "Subagent",
       "need_conversation": "Start a conversation before creating a side chat.",
@@ -3440,6 +3455,7 @@
     "empty": {
       "browser": "Browser",
       "files": "File viewer",
+      "drive": "Captain Drive",
       "terminal": "Terminal",
       "title": "Open a tab",
       "side_chat": "Side chat",
