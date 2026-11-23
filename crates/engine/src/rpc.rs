@@ -2312,6 +2312,7 @@ impl EngineRpc {
                         .set_chat_branch(&chat_id, branch)
                         .map_err(failed)?;
                 }
+                self.enrol_delegated_child(&chat_id);
                 Ok(())
             }
             MutateParams::CreateSpace {
@@ -2567,6 +2568,43 @@ impl EngineRpc {
                     .map_err(failed)
                     .map(drop)
             }
+        }
+    }
+
+    /// Enrol a chat a live Captain just delegated to, before its first prompt
+    /// can run: the `CreateChat` paths call this as soon as the row exists.
+    /// Only a delegated child (`ChildKind::Subagent`) of a live Captain on
+    /// this device joins; a side chat, an ordinary parent, a claimed identity
+    /// with no parent and a replay of the same create record nothing. A roster
+    /// write that fails is logged, never a reason to fail a chat that exists.
+    fn enrol_delegated_child(&self, chat_id: &str) {
+        let Some(captains) = self.captains.as_ref() else {
+            return;
+        };
+        let Ok(Some(row)) = self.workspace.chat(chat_id) else {
+            return;
+        };
+        if row.child_kind != Some(zeron_proto::ChildKind::Subagent)
+            || row.device_id != self.doc_host.device_id()
+        {
+            return;
+        }
+        let Some(parent) = row.parent_chat_id.as_deref() else {
+            return;
+        };
+        let registry = captains.snapshot();
+        if !registry.is_captain(parent) {
+            return;
+        }
+        if registry
+            .captain_of_crew(chat_id)
+            .is_some_and(|owner| owner.chat_id == parent)
+        {
+            return; // a replay of the same create: already a member
+        }
+        if let Err(error) = captains.add_crew(parent, chat_id) {
+            tracing::warn!(target: "captains", chat = %chat_id, captain = %parent, %error,
+                "a delegated child did not join its Captain's crew");
         }
     }
 }
@@ -5104,6 +5142,7 @@ impl RpcService for EngineRpc {
                             .set_chat_branch(chat_id, branch)
                             .map_err(failed)?;
                     }
+                    self.enrol_delegated_child(chat_id);
                     return RpcReply::value(&serde_json::json!({
                         "ok": true, "deviceId": host.device_id, "cwd": cwd,
                     }));
