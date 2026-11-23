@@ -424,6 +424,13 @@ pub const PLUGIN_DIR_ENV: &str = "ZERON_CAPTAINS_PLUGIN_DIR";
 /// the machine that built a release binary and a release run must not
 /// resolve it. `None` when none exists.
 pub fn plugin_dir() -> Option<PathBuf> {
+    plugin_dir_env(cfg!(debug_assertions))
+}
+
+/// [`plugin_dir`]'s inputs gathered — the override value, the running
+/// executable, the target OS — with `debug` deciding whether the
+/// repository checkout may resolve.
+fn plugin_dir_env(debug: bool) -> Option<PathBuf> {
     // An empty override reads as unset; a missing executable path just
     // leaves the packaged candidate absent.
     let exe = std::env::current_exe().unwrap_or_default();
@@ -434,8 +441,18 @@ pub fn plugin_dir() -> Option<PathBuf> {
             .as_deref(),
         &exe,
         std::env::consts::OS,
-        cfg!(debug_assertions),
+        debug,
     )
+}
+
+/// [`plugin_dir`] without the repository checkout: the bundle an install
+/// laid down beside the executable, or the operator's explicit
+/// `ZERON_CAPTAINS_PLUGIN_DIR`. Provisioning writes the bundle into the
+/// `sdk` profile — a packaged app needs it done for it, and a machine
+/// running a checkout already runs the plugin from source, so a prepare
+/// on a dev or headless host must leave the profile alone.
+pub(crate) fn packaged_plugin_dir() -> Option<PathBuf> {
+    plugin_dir_env(false)
 }
 
 /// [`plugin_dir`]'s resolution with its inputs passed in — the override
@@ -495,6 +512,617 @@ fn holds_plugin_bundle(dir: &Path) -> bool {
     ["package.json", "index.js"]
         .iter()
         .all(|name| dir.join(name).is_file())
+}
+
+/// The package name the `sdk` profile must list — in `dsh.profile.bundles`
+/// so dsh loads it, and in `dependencies` with a `link:` spec so the
+/// profile's own `node_modules` resolves it.
+const BUNDLE_NAME: &str = "zeron-dsh-captains";
+
+/// The `sdk` profile template dsh's `initProfile` writes, byte for byte:
+/// the user patch layer every bundle layer is applied under, and the
+/// workspace file that makes the profile a plain hoisted pnpm project.
+const PATCH_TEMPLATE: &str = "# Your patch layer for this dsh profile, applied after every bundle layer:\n# a top-level YAML array of loader patch entries (id-targeted config\n# overrides, disables, and insert lists; `!!js` expressions allowed).\n[]\n";
+const WORKSPACE_TEMPLATE: &str = "packages:\n  - .\n\nnodeLinker: hoisted\nautoInstallPeers: false\n";
+
+/// What one provisioning attempt did to the `sdk` profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProvisionOutcome {
+    /// No profile existed: it was created from the shipped template with the bundle.
+    Created,
+    /// An existing profile was missing the bundle: only that entry was added.
+    Added,
+    /// Already listed and resolving at the packaged bundle: nothing was written.
+    Present,
+    /// Left alone, with a message to surface: the file could not be parsed,
+    /// a structural key had an unexpected shape, or a write failed.
+    Refused(String),
+}
+
+/// Provision `<home>/profiles/sdk` — the profile the dsh runtime boots —
+/// so it lists and resolves the shipped Captains bundle. It runs from the
+/// prepare step every DeepSeek run passes, so a packaged app never needs a
+/// promote-time install or pnpm and a wake or a promotion never depends on
+/// a user having run a plugin command.
+///
+/// The profile is a real person's directory, so the rules are sedate
+/// conservatism: create from the shipped template only when absent; edit
+/// an existing manifest surgically — every byte it held stays, and only
+/// the missing bundle entries are added; leave alone one that already
+/// resolves the bundle; and refuse — reported, never silently skipped —
+/// a manifest that cannot be parsed, carries a structural key of the
+/// wrong shape, or will not take a write.
+pub fn provision_profile(home: &Path, bundle: &Path) -> ProvisionOutcome {
+    let bundle = match std::fs::canonicalize(bundle) {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return ProvisionOutcome::Refused(format!(
+                "the bundled plugin directory {} cannot be resolved: {error}",
+                bundle.display()
+            ));
+        }
+    };
+    let profile = home.join("profiles").join("sdk");
+    let manifest = profile.join("package.json");
+    match std::fs::read_to_string(&manifest) {
+        Ok(text) => complete_profile(&profile, &bundle, &text),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_profile(&profile, &bundle)
+        }
+        Err(error) => ProvisionOutcome::Refused(format!(
+            "cannot read {}: {error}",
+            manifest.display()
+        )),
+    }
+}
+
+/// Rule 2: no profile exists — write the template dsh ships, byte for
+/// byte, then link `node_modules/<bundle>` at the packaged bundle, or
+/// materialise it where no link primitive exists. Bundles resolve from
+/// the profile's `node_modules` first, so the link is what must never
+/// dangle.
+fn create_profile(profile: &Path, bundle: &Path) -> ProvisionOutcome {
+    let node_modules = profile.join("node_modules");
+    if let Err(error) = std::fs::create_dir_all(&node_modules) {
+        return ProvisionOutcome::Refused(format!(
+            "cannot create {}: {error}",
+            node_modules.display()
+        ));
+    }
+    for (name, contents) in [
+        ("package.json", manifest_template(bundle)),
+        ("cordis.patch.yml", PATCH_TEMPLATE.into()),
+        ("pnpm-workspace.yaml", WORKSPACE_TEMPLATE.into()),
+    ] {
+        // Create-if-absent: a directory holding a person's own patch layer
+        // or workspace file but no manifest is still theirs — the template
+        // fills gaps, it does not overwrite them.
+        if let Err(error) = write_starter(&profile.join(name), &contents) {
+            return ProvisionOutcome::Refused(error);
+        }
+    }
+    match ensure_link(profile, bundle) {
+        Ok(()) => ProvisionOutcome::Created,
+        Err(reason) => ProvisionOutcome::Refused(reason),
+    }
+}
+
+/// Rules 1 and 3: a profile exists, so only what is missing is added —
+/// the `dependencies` member and the `dsh.profile.bundles` element as
+/// surgical text edits on the bytes it already holds (a re-serialisation
+/// would rewrite a real person's file), and the `node_modules` entry,
+/// re-pointed when it is a link that does not resolve to `bundle` and
+/// refused when it is a real directory or file that is not the bundle.
+/// The patch layer and the workspace file of an existing profile are
+/// never touched.
+fn complete_profile(profile: &Path, bundle: &Path, text: &str) -> ProvisionOutcome {
+    let manifest_path = profile.join("package.json");
+    let manifest: Value = match serde_json::from_str(text) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return ProvisionOutcome::Refused(format!(
+                "{} cannot be parsed ({error}); fix or delete it",
+                manifest_path.display()
+            ));
+        }
+    };
+    let refused_shape = |key: &str| {
+        ProvisionOutcome::Refused(format!(
+            "{key} in {} is not the shape dsh writes; fix or delete it",
+            manifest_path.display()
+        ))
+    };
+    if !manifest.is_object() {
+        return refused_shape("the document");
+    }
+    let dependencies = manifest.get("dependencies");
+    if dependencies.is_some_and(|value| !value.is_object()) {
+        return refused_shape("\"dependencies\"");
+    }
+    let dsh = manifest.get("dsh");
+    if dsh.is_some_and(|value| !value.is_object()) {
+        return refused_shape("\"dsh\"");
+    }
+    let profile_section = dsh.and_then(|value| value.get("profile"));
+    if profile_section.is_some_and(|value| !value.is_object()) {
+        return refused_shape("\"dsh.profile\"");
+    }
+    let bundles = profile_section.and_then(|value| value.get("bundles"));
+    if bundles.is_some_and(|value| !value.is_array()) {
+        return refused_shape("\"dsh.profile.bundles\"");
+    }
+    let declared = dependencies
+        .and_then(Value::as_object)
+        .is_some_and(|deps| deps.contains_key(BUNDLE_NAME));
+    let listed = bundles
+        .and_then(Value::as_array)
+        .is_some_and(|list| list.iter().any(|entry| entry.as_str() == Some(BUNDLE_NAME)));
+    if declared && listed && link_resolves(profile, bundle) {
+        return ProvisionOutcome::Present;
+    }
+
+    // The edits are byte ranges in `text`: serde_json decided what the
+    // manifest means, the scanners below only find where its pieces sit.
+    let bytes = text.as_bytes();
+    // `manifest` is an object, so the first non-whitespace byte is '{'.
+    let root_open = skip_ws(bytes, 0);
+    let unlocated = |path: &Path| {
+        ProvisionOutcome::Refused(format!(
+            "{} could not be followed for a surgical edit; fix or delete it",
+            path.display()
+        ))
+    };
+    let mut edits: Vec<(usize, String)> = Vec::new();
+    let spec = format!("\"{BUNDLE_NAME}\": {}", json!(format!("link:{}", bundle.display())));
+    if !declared {
+        if dependencies.is_some() {
+            match at(bytes, locate(bytes, root_open, &["dependencies"]), b'{') {
+                Some(open) => edits.push(member_insert(text, open, &spec)),
+                None => return unlocated(&manifest_path),
+            }
+        } else {
+            edits.push(member_insert(
+                text,
+                root_open,
+                &format!("\"dependencies\": {{{spec}}}"),
+            ));
+        }
+    }
+    if !listed {
+        if bundles.is_some() {
+            match at(bytes, locate(bytes, root_open, &["dsh", "profile", "bundles"]), b'[') {
+                Some(open) => {
+                    edits.push(element_insert(text, open, &format!("\"{BUNDLE_NAME}\"")))
+                }
+                None => return unlocated(&manifest_path),
+            }
+        } else if profile_section.is_some() {
+            match at(bytes, locate(bytes, root_open, &["dsh", "profile"]), b'{') {
+                Some(open) => edits.push(member_insert(
+                    text,
+                    open,
+                    &format!("\"bundles\": [\"{BUNDLE_NAME}\"]"),
+                )),
+                None => return unlocated(&manifest_path),
+            }
+        } else if dsh.is_some() {
+            match at(bytes, locate(bytes, root_open, &["dsh"]), b'{') {
+                Some(open) => edits.push(member_insert(
+                    text,
+                    open,
+                    &format!("\"profile\": {{\"bundles\": [\"{BUNDLE_NAME}\"]}}"),
+                )),
+                None => return unlocated(&manifest_path),
+            }
+        } else {
+            edits.push(member_insert(
+                text,
+                root_open,
+                &format!("\"dsh\": {{\"profile\": {{\"bundles\": [\"{BUNDLE_NAME}\"]}}}}"),
+            ));
+        }
+    }
+    if !edits.is_empty() {
+        edits.sort_by_key(|edit| edit.0);
+        let mut updated = String::with_capacity(text.len() + 128);
+        let mut rest = 0usize;
+        let mut i = 0;
+        while i < edits.len() {
+            let at = edits[i].0;
+            updated.push_str(&text[rest..at]);
+            // Inserts landing at the same offset — two missing root
+            // members into a `{}` manifest is the case that ships — are
+            // one insertion with commas between the members: applied
+            // independently, the second drops the separator and the
+            // write does not parse.
+            let mut merged = edits[i].1.clone();
+            i += 1;
+            while i < edits.len() && edits[i].0 == at {
+                if !merged.ends_with(',') {
+                    merged.push(',');
+                }
+                merged.push_str(&edits[i].1);
+                i += 1;
+            }
+            updated.push_str(&merged);
+            rest = at;
+        }
+        updated.push_str(&text[rest..]);
+        // The write happens only when what would land still parses as a
+        // JSON object: a manifest that cannot be completed safely is
+        // refused, never written.
+        match serde_json::from_str::<Value>(&updated) {
+            Ok(value) if value.is_object() => {}
+            _ => {
+                return ProvisionOutcome::Refused(format!(
+                    "{} could not be completed safely; fix or delete it",
+                    manifest_path.display()
+                ));
+            }
+        }
+        if let Err(error) = std::fs::write(&manifest_path, updated) {
+            return ProvisionOutcome::Refused(format!(
+                "cannot write {}: {error}",
+                manifest_path.display()
+            ));
+        }
+    }
+    match ensure_link(profile, bundle) {
+        Ok(()) => ProvisionOutcome::Added,
+        Err(reason) => ProvisionOutcome::Refused(reason),
+    }
+}
+
+/// Whether `profile/node_modules/<bundle>` already *is* the bundle — a
+/// read, never a write: a link that canonicalises to `bundle`, or a real
+/// directory whose `package.json` names it, which is what a hoisted pnpm
+/// install or a materialised copy leaves.
+fn link_resolves(profile: &Path, bundle: &Path) -> bool {
+    let entry = profile.join("node_modules").join(BUNDLE_NAME);
+    if std::fs::canonicalize(&entry).is_ok_and(|target| target == bundle) {
+        return true;
+    }
+    // `symlink_metadata` reports the entry's own type: `is_dir` here is a
+    // real directory, never a link to one.
+    std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_dir())
+        && names_bundle(&entry)
+}
+
+/// Whether the real directory at `entry` is the bundle itself: its
+/// `package.json` parses and carries `"name": "<bundle>"` — the shape a
+/// hoisted install or a materialised copy leaves.
+fn names_bundle(entry: &Path) -> bool {
+    std::fs::read_to_string(entry.join("package.json"))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|manifest| manifest["name"].as_str().map(str::to_owned))
+        .is_some_and(|name| name == BUNDLE_NAME)
+}
+
+/// Link `profile/node_modules/<bundle>` at `bundle`: created when absent,
+/// re-pointed when it is a link resolving anywhere else — and only the
+/// link itself is ever removed, never another `node_modules` name and
+/// never the tree a link points at. A real directory or file at that
+/// name is a person's package, not ours: one that is already the bundle
+/// is `link_resolves`' present case, and anything else refuses rather
+/// than being deleted or overwritten. Where no link primitive exists —
+/// Windows without Developer Mode cannot make a directory symlink — the
+/// bundle is materialised instead.
+fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
+    if link_resolves(profile, bundle) {
+        return Ok(());
+    }
+    let node_modules = profile.join("node_modules");
+    let link = node_modules.join(BUNDLE_NAME);
+    std::fs::create_dir_all(&node_modules)
+        .map_err(|error| format!("cannot create {}: {error}", node_modules.display()))?;
+    match std::fs::symlink_metadata(&link) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            remove_link(&link)
+                .map_err(|error| format!("cannot re-point {}: {error}", link.display()))?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "{} is not the {BUNDLE_NAME} bundle; fix or remove it",
+                link.display()
+            ));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!("cannot inspect {}: {error}", link.display()));
+        }
+    }
+    match link_dir(bundle, &link) {
+        Ok(()) => Ok(()),
+        Err(link_error) => materialise_bundle(bundle, &link).map_err(|copy_error| {
+            format!(
+                "cannot link {} to {} ({link_error}) or materialise it there ({copy_error})",
+                link.display(),
+                bundle.display()
+            )
+        }),
+    }
+}
+
+/// Remove `link`, which `symlink_metadata` reported as a symlink: unix
+/// unlinks it whatever it points at; Windows splits link removal by the
+/// target's shape — a directory link removes as a directory and anything
+/// else as a file — so the directory shape is tried first. The link's
+/// target is never touched.
+#[cfg(windows)]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_dir(link).or_else(|_| std::fs::remove_file(link))
+}
+
+/// Remove `link`, which `symlink_metadata` reported as a symlink: an
+/// unlink removes it whatever it points at, and the target is untouched.
+#[cfg(not(windows))]
+fn remove_link(link: &Path) -> std::io::Result<()> {
+    std::fs::remove_file(link)
+}
+
+/// Materialise the bundle at `link` — the fallback for hosts with no
+/// usable link primitive — as a real directory holding the files the
+/// bundle ships. The copy stages beside `link` and renames over it, so a
+/// failure leaves no half-shipped bundle at the entry: the staging
+/// directory is this function's own and is cleaned up; `link` itself —
+/// absent when this is reached — is never touched.
+fn materialise_bundle(bundle: &Path, link: &Path) -> std::io::Result<()> {
+    let staging = link.with_file_name(format!(".{BUNDLE_NAME}.materialising"));
+    let result = (|| {
+        match std::fs::symlink_metadata(&staging) {
+            // Stale staging is this function's own, left by a crashed run.
+            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&staging)?,
+            Ok(_) => std::fs::remove_file(&staging)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        std::fs::create_dir(&staging)?;
+        copy_bundle(bundle, &staging, true)?;
+        std::fs::rename(&staging, link)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+/// Copy the files the bundle ships from `from` into `to`, recursively:
+/// the manifest, the entry point, the patch layer and `src` — which
+/// `index.js` imports — with the packager's own `node_modules` and `test`
+/// left out at the top level. A link inside the bundle is not followed.
+fn copy_bundle(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        if top && matches!(entry.file_name().to_str(), Some("node_modules" | "test")) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if file_type.is_dir() {
+            std::fs::create_dir(&target)?;
+            copy_bundle(&entry.path(), &target, false)?;
+        } else if file_type.is_file() {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// `symlink_dir` per platform; a failure is a refusal, never a panic.
+#[cfg(unix)]
+fn link_dir(bundle: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(bundle, link)
+}
+
+/// `symlink_dir` per platform; a failure is a refusal, never a panic.
+#[cfg(windows)]
+fn link_dir(bundle: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(bundle, link)
+}
+
+/// `symlink_dir` per platform; a failure is a refusal, never a panic.
+#[cfg(not(any(unix, windows)))]
+fn link_dir(_bundle: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "no directory symlink primitive on this OS",
+    ))
+}
+
+/// The `package.json` dsh's `initProfile` writes for a profile that takes
+/// the Captains bundle: the shipped bundles plus ours, `link:`-ed in.
+fn manifest_template(bundle: &Path) -> String {
+    format!(
+        r#"{{
+  "name": "dsh-profile-sdk",
+  "private": true,
+  "dependencies": {{
+    "zeron-dsh-captains": {spec}
+  }},
+  "dsh": {{
+    "profile": {{
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-sdk-app",
+        "zeron-dsh-captains"
+      ]
+    }}
+  }}
+}}
+"#,
+        spec = json!(format!("link:{}", bundle.display()))
+    )
+}
+
+// The scans below locate structure in manifest bytes serde_json already
+// validated — they never decide JSON-ness, so strings are the only place
+// braces and brackets can hide.
+
+fn skip_ws(b: &[u8], mut p: usize) -> usize {
+    while b
+        .get(p)
+        .is_some_and(|c| matches!(c, b' ' | b'\t' | b'\r' | b'\n'))
+    {
+        p += 1;
+    }
+    p
+}
+
+/// The offset just past the closing quote of the string at `p`.
+fn string_end(b: &[u8], mut p: usize) -> usize {
+    p += 1;
+    while let Some(&c) = b.get(p) {
+        match c {
+            b'\\' => p += 2,
+            b'"' => return p + 1,
+            _ => p += 1,
+        }
+    }
+    p
+}
+
+/// The `[start, end)` span of the value at or just after `p`.
+fn value_span(b: &[u8], p: usize) -> (usize, usize) {
+    let start = skip_ws(b, p);
+    match b.get(start) {
+        Some(b'"') => (start, string_end(b, start)),
+        Some(&open @ (b'{' | b'[')) => {
+            let close = if open == b'{' { b'}' } else { b']' };
+            let mut depth = 1usize;
+            let mut i = start + 1;
+            while i < b.len() {
+                match b[i] {
+                    b'"' => i = string_end(b, i),
+                    c if c == open => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    c if c == close => {
+                        depth -= 1;
+                        i += 1;
+                        if depth == 0 {
+                            return (start, i);
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            (start, b.len())
+        }
+        Some(_) => {
+            let mut i = start;
+            while b.get(i).is_some_and(|c| {
+                !matches!(c, b' ' | b'\t' | b'\r' | b'\n' | b',' | b'}' | b']')
+            }) {
+                i += 1;
+            }
+            (start, i)
+        }
+        None => (start, start),
+    }
+}
+
+/// One member of a scanned object: the key text, where the key starts,
+/// and its value's span.
+struct Member {
+    key: String,
+    key_start: usize,
+    value: (usize, usize),
+}
+
+/// The members of the object whose `{` is at `open`, in order.
+fn object_members(b: &[u8], open: usize) -> Vec<Member> {
+    let mut members = Vec::new();
+    let mut p = skip_ws(b, open + 1);
+    while b.get(p) == Some(&b'"') {
+        let key_start = p;
+        let key_end = string_end(b, p);
+        let key = String::from_utf8_lossy(&b[key_start + 1..key_end - 1]).into_owned();
+        let value = value_span(b, skip_ws(b, skip_ws(b, key_end) + 1));
+        members.push(Member {
+            key,
+            key_start,
+            value,
+        });
+        let after = skip_ws(b, value.1);
+        match b.get(after) {
+            Some(&b',') => p = skip_ws(b, after + 1),
+            _ => return members,
+        }
+    }
+    members
+}
+
+/// The elements of the array whose `[` is at `open`: (ws_start, start,
+/// end) each, where `b[ws_start..start]` is the whitespace run — newline
+/// and indent included — the element sits after.
+fn array_elements(b: &[u8], open: usize) -> Vec<(usize, usize, usize)> {
+    let mut elements = Vec::new();
+    let mut ws_start = open + 1;
+    let mut p = skip_ws(b, ws_start);
+    while b.get(p) != Some(&b']') && p < b.len() {
+        let (start, end) = value_span(b, p);
+        elements.push((ws_start, start, end));
+        let after = skip_ws(b, end);
+        match b.get(after) {
+            Some(&b',') => {
+                ws_start = after + 1;
+                p = skip_ws(b, ws_start);
+            }
+            _ => break,
+        }
+    }
+    elements
+}
+
+/// The opening-brace offset of the value the member chain `path` names,
+/// or None when a link in the chain can't be followed in the raw bytes.
+fn locate(b: &[u8], root_open: usize, path: &[&str]) -> Option<usize> {
+    let mut open = root_open;
+    for key in path {
+        open = object_members(b, open)
+            .into_iter()
+            .find(|member| member.key == *key)?
+            .value
+            .0;
+    }
+    Some(open)
+}
+
+/// The located `open`, but only when it lands on `brace`: the shape
+/// serde_json decided and the bytes must agree — a repeated key or an
+/// escaped name makes them disagree, and then the edit is refused rather
+/// than guessed.
+fn at(b: &[u8], open: Option<usize>, brace: u8) -> Option<usize> {
+    open.filter(|&p| b.get(p) == Some(&brace))
+}
+
+/// The edit that puts `member` inside the object opened at `open`, right
+/// after the `{`: it lands in the first existing member's whitespace —
+/// newline and indent included — and takes a comma when members already
+/// follow.
+fn member_insert(text: &str, open: usize, member: &str) -> (usize, String) {
+    match object_members(text.as_bytes(), open).first() {
+        Some(first) => (
+            open + 1,
+            format!("{}{},", &text[open + 1..first.key_start], member),
+        ),
+        None => (open + 1, member.to_string()),
+    }
+}
+
+/// The edit that puts `element` inside the array opened at `open`, right
+/// before the `]`: a comma precedes it when elements already exist, and
+/// it keeps the last element's own whitespace and indent.
+fn element_insert(text: &str, open: usize, element: &str) -> (usize, String) {
+    match array_elements(text.as_bytes(), open).last() {
+        Some(&(ws_start, start, end)) => (
+            end,
+            format!(",{}{}", &text[ws_start..start], element),
+        ),
+        None => (open + 1, element.to_string()),
+    }
 }
 
 /// Serialises every `CaptainsStore` mutation process-wide: two independent
