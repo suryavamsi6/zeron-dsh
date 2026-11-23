@@ -932,7 +932,11 @@ local function read_captains()
 		local crews: { [string]: string } = {}
 		local rows: { { chatId: string, name: string } } = {}
 		for _, c in (answer and answer.captains) or {} do
-			if type(c) == "table" and type(c.chatId) == "string" then
+			-- (The roster keeps a demoted Captain as an archived record
+			-- (`captains.rs`'s roster: the live and archived rows alike), so
+			-- it is not one to offer, not a crew to join, and not a chat to
+			-- demote again: skipped here, the read is the live roster.)
+			if type(c) == "table" and type(c.chatId) == "string" and c.archived ~= true then
 				found[c.chatId] = true
 				names[c.chatId] = if type(c.name) == "string" then c.name else ""
 				table.insert(rows, { chatId = c.chatId, name = names[c.chatId] })

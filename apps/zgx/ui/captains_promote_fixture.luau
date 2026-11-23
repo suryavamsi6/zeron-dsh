@@ -7,6 +7,9 @@
 --   test_captain_calls     what the actions were sent, in order
 --   test_captains_refuse   while true, each promotion fails in the engine's
 --                          own words (as a refused one does)
+--   test_captains_archived { [chat id] = true } — rows the roster keeps as
+--                          demoted records: the fixture answers a demote the
+--                          way the engine does, so the record outlives it
 
 local tree = require("@app/shell_fixture")
 local sidebar = require("@app/screens/shell/sidebar")
@@ -14,6 +17,7 @@ local sidebar = require("@app/screens/shell/sidebar")
 local roster = ui.shared("test_captains_roster", {} :: { [string]: string })
 local calls = ui.shared("test_captain_calls", "" :: string)
 local refuse = ui.shared("test_captains_refuse", false)
+local archived = ui.shared("test_captains_archived", {} :: { [string]: boolean })
 
 -- Each call answered on the next tick, as the host's is.
 local due: { () -> () } = {}
@@ -58,7 +62,9 @@ end
 sidebar.roster = function(): any
 	local captains = {}
 	for chat, name in roster:peek() do
-		table.insert(captains, { chatId = chat, name = name, drivePath = `/drive/{chat}` })
+		-- (A demoted Captain stays on the engine's roster, archived: the page
+		-- reads that row as no Captain at all.)
+		table.insert(captains, { chatId = chat, name = name, archived = archived:peek()[chat] == true, drivePath = `/drive/{chat}` })
 	end
 	return settle({ captains = captains })
 end
@@ -69,12 +75,14 @@ sidebar.promote_call = function(chat: string, name: string): any
 		return settle(nil, `bad params: {chat} is not a chat this device knows`)
 	end
 	roster:set_key(chat, name)
+	archived:set_key(chat, nil)
 	return settle({ captains = {} })
 end
 
 sidebar.demote_call = function(chat: string): any
 	note(`demote:{chat}`)
-	roster:set_key(chat, nil)
+	-- (As the engine's: the row stays on the roster, archived.)
+	archived:set_key(chat, true)
 	return settle({ captains = {} })
 end
 

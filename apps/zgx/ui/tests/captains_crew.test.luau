@@ -156,6 +156,23 @@ test("captains_crew: a refused move says the engine's rule, leaves the row where
 	expect(sent(app)).to_be("add:a1:a2,add:a1:a2")
 	menu(app, "Write the docs")
 	expect(app:has('role:menuitem "Remove from crew"')).to_be(true)
+	app:key("escape")
+	pause(app, 300)
+	app:frames(10)
+	-- The engine's other rule, in its own words: a chat is in at most one
+	-- crew, when another window has put it in one this page has not seen.
+	app:set_state("test_crew_refuse", "a chat is in at most one crew (a2 crews for b1)")
+	app:set_state("test_crew_members", {})
+	menu(app, "Write the docs")
+	app:key("escape")
+	pause(app, 300)
+	menu(app, "Write the docs")
+	expect(app:has('role:menuitem "Move to Captain"')).to_be(true)
+	move_to(app, "Billing")
+	pause(app)
+	expect(app:wait("role:alert", { timeout_ms = 15000 })).to_be(true)
+	expect(app:tree("role:alert")).to_contain("a chat is in at most one crew (a2 crews for b1)")
+	app:set_state("test_crew_refuse", "")
 end)
 
 test("captains_crew: a Captain and a child chat say why they cannot move, instead of offering it", function()
@@ -183,5 +200,37 @@ test("captains_crew: a Captain and a child chat say why they cannot move, instea
 	app:frames(4)
 	expect(app:has('role:menuitem "Move to Captain"')).to_be(true)
 	expect(until_text(app, 'role:menu "Session actions"', "A child chat can't join a crew")).to_be(true)
+	expect(sent(app)).to_be("")
+end)
+
+test("captains_crew: a demoted Captain's archived record is not offered, and its own chat is a chat again", function()
+	local app = shell()
+	-- The engine's roster keeps a demoted Captain as an archived row: Night
+	-- shift (Tidy the tests) is one, beside the live Billing.
+	app:set_state("test_crew_captains", { a1 = "Billing", a3 = "Night shift" })
+	app:set_state("test_crew_archived", { a3 = true })
+	-- Its crew is not a crew either: the archived record's members are
+	-- nobody's crew, so their own row offers the move again.
+	app:set_state("test_crew_members", { a2 = "a3" })
+	-- (The roster is read as a menu opens, and the open that starts a read
+	-- is built from the one before: this first open is the one behind.)
+	menu(app, "Write the docs")
+	app:key("escape")
+	pause(app, 300)
+	-- Write the docs was in the archived Captain's crew: not crewed, so its
+	-- menu is a chat's, not a member's.
+	menu(app, "Write the docs")
+	expect(app:has('role:menuitem "Remove from crew"')).to_be(false)
+	-- The live Captain is offered; the archived record is not.
+	app:click('role:menuitem "Move to Captain"')
+	expect(app:wait('role:menuitem "Billing"', { timeout_ms = 15000 })).to_be(true)
+	expect(app:has('role:menuitem "Night shift"')).to_be(false)
+	app:key("escape")
+	pause(app, 300)
+	app:frames(10)
+	-- And the demoted chat itself is a chat: Promote, not Demote.
+	menu(app, "Tidy the tests")
+	expect(app:has('role:menuitem "Promote to Captain…"')).to_be(true)
+	expect(app:has('role:menuitem "Demote to chat"')).to_be(false)
 	expect(sent(app)).to_be("")
 end)

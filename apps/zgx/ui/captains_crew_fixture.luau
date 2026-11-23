@@ -9,6 +9,8 @@
 --   test_crew_calls      what the actions were sent, in order
 --   test_crew_refuse     while not "", each AddCrew fails in these words (the
 --                        engine's own sentence, as a refused one does)
+--   test_crew_archived   { [chat id] = true } — rows the roster keeps as
+--                        demoted records, as the engine does
 
 local tree = require("@app/shell_fixture")
 local sidebar = require("@app/screens/shell/sidebar")
@@ -18,6 +20,7 @@ local captains = ui.shared("test_crew_captains", {} :: { [string]: string })
 local members = ui.shared("test_crew_members", {} :: { [string]: string })
 local calls = ui.shared("test_crew_calls", "" :: string)
 local refuse = ui.shared("test_crew_refuse", "" :: string)
+local archived = ui.shared("test_crew_archived", {} :: { [string]: boolean })
 
 -- The roster the sidebar reads as it is made: Fix the build is the Captain,
 -- and no chat is in its crew yet. (The read lands before the first menu
@@ -96,7 +99,15 @@ local function roster(): any
 			end
 		end
 		table.sort(crew)
-		table.insert(out, { chatId = chat, name = name, createdAt = 0, archived = false, crew = crew, drivePath = `/drive/{chat}` })
+		table.insert(out, {
+			chatId = chat,
+			name = name,
+			createdAt = 0,
+			-- (A demoted Captain stays on the engine's roster, archived.)
+			archived = archived:peek()[chat] == true,
+			crew = crew,
+			drivePath = `/drive/{chat}`,
+		})
 	end
 	return { captains = out }
 end
