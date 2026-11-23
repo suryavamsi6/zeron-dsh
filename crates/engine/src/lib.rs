@@ -383,6 +383,21 @@ impl EngineCore {
             )));
         }
         sessions.set_plugins(plugins.clone());
+        // A Captain's newly-added "Needs you" items ring through the same
+        // banner path as the engine's own (SUR-93).
+        {
+            let (data_dir, focus) = (data_dir.to_path_buf(), viewport_focus.clone());
+            sessions.set_needs_you_post(Arc::new(move |title, body, session| {
+                crate::desktop_notify::post_for(
+                    &data_dir,
+                    &focus,
+                    "captain-needs-you",
+                    title,
+                    body,
+                    session,
+                );
+            }));
+        }
         sessions.set_doc_host(doc_host.clone());
         // A new version on trial may yet be undone, and recovering clears the
         // journals' marks of what to resume, which a rollback doesn't restore.

@@ -3072,6 +3072,14 @@ impl Inner {
         match stamp["role"].as_str() {
             Some("captain") => {
                 let chat_id = chat_id.to_string();
+                let captain_name = stamp["captainName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_owned();
+                let post = self.needs_you_post.get().cloned();
+                let seen = self.needs_you_seen.clone();
+                let data_dir = self.data_dir.get().cloned();
                 tokio::task::spawn_blocking(move || {
                     match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
                         Ok(recorded) => {
@@ -3086,6 +3094,31 @@ impl Inner {
                         Err(error) => {
                             tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
                         }
+                    }
+                    // SUR-93: only the items that are new for this Captain
+                    // ring. The roster is read here — unlike the snapshot
+                    // above, a banner must not name a Captain who was demoted
+                    // mid-run — and a failed read keeps the last good
+                    // baseline, so a recovery does not burst.
+                    let Some(post) = post else {
+                        return;
+                    };
+                    let live = data_dir
+                        .as_deref()
+                        .and_then(|dir| crate::captains::Registry::load(dir).ok())
+                        .is_some_and(|registry| registry.is_captain(&chat_id));
+                    if !live {
+                        return;
+                    }
+                    let path = drive.join("state").join(crate::needs_you::FILE);
+                    let items = crate::needs_you::read_needs_you_checked(&path);
+                    let title = if captain_name.is_empty() {
+                        "Captain needs you".to_owned()
+                    } else {
+                        format!("{captain_name} needs you")
+                    };
+                    for item in seen.new_items(&chat_id, items) {
+                        post(&title, &item, Some(&chat_id));
                     }
                 });
                 true

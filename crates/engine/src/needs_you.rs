@@ -53,23 +53,48 @@ impl Seen {
     /// nothing; a first read only seeds and returns nothing; a valid list
     /// replaces the baseline, so a valid empty list clears it.
     pub fn new_items(&self, captain: &str, items: Option<Vec<String>>) -> Vec<String> {
-        let _ = (captain, items);
-        Vec::new() // STUB: the implementation is the next brief.
+        let Some(items) = items else {
+            return Vec::new(); // a failed read keeps the last good baseline
+        };
+        let mut seen = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = seen.insert(captain.to_owned(), items.clone());
+        let Some(previous) = previous else {
+            return Vec::new(); // the first read of a Captain only seeds
+        };
+        items
+            .into_iter()
+            .filter(|item| !previous.contains(item))
+            .collect()
     }
 }
 
 /// The items `<drive>/state/needs-you.json` stores: `[]` when the file is
 /// missing, unreadable, not version 1, or not a version-1 list.
 pub fn read_needs_you(path: &Path) -> Vec<String> {
-    let _ = path;
-    Vec::new() // STUB
+    read_needs_you_checked(path).unwrap_or_default()
 }
 
 /// The same read, `None` when the file exists but cannot be read or is not a
 /// version-1 list — so a caller diffing items keeps its last good baseline.
 pub(crate) fn read_needs_you_checked(path: &Path) -> Option<Vec<String>> {
-    let _ = path;
-    None // STUB
+    #[derive(serde::Deserialize)]
+    struct Stored {
+        version: u32,
+        items: Vec<String>,
+    }
+
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Some(Vec::new()); // no file: a valid empty list
+        }
+        Err(_) => return None,
+    };
+    let stored: Stored = serde_json::from_str(&raw).ok()?;
+    (stored.version == VERSION).then_some(stored.items)
 }
 
 /// The `## Needs you` bullets of `markdown`: `-`, `*` and `N.` list items,
