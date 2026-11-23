@@ -68,6 +68,9 @@ export type Session = {
 	-- The choices made of the model's options (option id to choice id).
 	options: { [string]: string }?,
 	access: string?,
+	-- Imported from a DeepSeek export, so read-only: the host's `readOnly`
+	-- (`chat.rs` `session_value`); no turn may start and nothing may be typed.
+	readOnly: boolean?,
 	plan: boolean?,
 	-- A turn is running.
 	running: boolean?,

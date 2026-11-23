@@ -830,6 +830,11 @@ local function Composer(): Node
 			return { tone = "warning", text = why }
 		end
 		local s = open()
+		-- An imported chat is read-only (`readOnly`): the reason stands, in
+		-- the engine's words, while it is open.
+		if s and s.readOnly == true then
+			return { tone = "info", text = ui.t("chat.read_only"):get() }
+		end
 		if s and s.notice then
 			return s.notice
 		end
@@ -1670,7 +1675,10 @@ local function Composer(): Node
 			disabled = function(): boolean
 				local s = store.session:get()
 				local id = session_id:get()
-				return id ~= nil and s ~= nil and s.id == id and (s.state == "missing" or s.state == "offline")
+				return id ~= nil
+					and s ~= nil
+					and s.id == id
+					and (s.state == "missing" or s.state == "offline" or s.readOnly == true)
 			end,
 			focus = shared.focus,
 			mentions = completions.lists,

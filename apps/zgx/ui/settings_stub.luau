@@ -83,6 +83,15 @@ local mcp_set_answer = ui.state("settings_stub_mcp_set", nil :: any)
 local mcp_reload_fails = ui.state("settings_stub_mcp_reload_fails", false)
 local mcp_saved = ui.state("settings_stub_mcp_saved", nil :: any)
 local mcp_calls = ui.state("settings_stub_mcp_calls", {} :: { any })
+-- The DeepSeek import's calls and answer (Settings' Import chats, SUR-120):
+-- each picked path in order, and what the engine answers (nil: two chats
+-- imported, none before); `refuse` makes the next one fail, which is the
+-- retry case.
+local import_calls = ui.state("settings_stub_import_calls", {} :: { string })
+local import_answer = ui.state("settings_stub_import_answer", nil :: any?)
+-- The next chooser's answer: nil for the wallpaper's picture, `{}` for a
+-- cancelled chooser, else the picked files.
+local file_pick = ui.state("settings_stub_files", nil :: any)
 local signing_keys = {
 	{ key = "k_dev", fingerprint = "9f3a 21c0 77be 04d1 aa10 bb20 cc30 dd40", device_name = "dev", device_id = "d_dev", this_device = false, created_at = 1793600000 },
 	{ key = "k_old", fingerprint = "0b0b 1c1c 2d2d 3e3e 4f4f 5a5a 6b6b 7c7c", device_name = "old-laptop", device_id = "d_old", this_device = false, created_at = 1780000000, revoked_at = 1785000000 },
@@ -824,6 +833,21 @@ local answers: { [string]: (arg: any) -> any } = {
 	end,
 	["settings.engine"] = function(arg: any)
 		local m = arg.method
+		if m == "ImportDeepSeekChats" then
+			local path = if type(arg.params) == "table" then tostring(arg.params.path or "") else ""
+			import_calls:push(path)
+			if refuse:peek() then
+				refuse:set(false)
+				return settled(nil, "The export could not be read.")
+			end
+			return settled(import_answer:peek() or {
+				imported = 2,
+				alreadyPresent = 0,
+				chats = { "deepseek-1", "deepseek-2" },
+				total = 3,
+				kept = 3,
+			})
+		end
 		if string.sub(m, 1, 3) == "Set" then
 			local r = change(nil)
 			if r.error then
@@ -929,6 +953,10 @@ end
 -- A photo picked: the app's own PNG, so a headless host can draw it.
 stub.open_files = function(_opts: any): any
 	log("open_files")
+	local picked = file_pick:peek()
+	if picked ~= nil then
+		return settled(picked)
+	end
 	return settled({ { path = "assets/favicons/zeron.png", name = "zeron.png", size = 1, type = "image/png" } })
 end
 
