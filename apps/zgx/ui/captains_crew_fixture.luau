@@ -154,4 +154,16 @@ CaptainDigest.drive = function(chat: string): any
 	})
 end
 
+-- What a test drives to make the sidebar read the roster again (SUR-89's
+-- group): the app re-reads it as a menu opens or an action lands, and a
+-- test that sets `test_crew_captains`/`test_crew_members` after the mount
+-- asks for the same read.
+ui.command {
+	id = "refresh_captains",
+	title = "Read the Captains again",
+	run = function()
+		sidebar.read_captains()
+	end,
+}
+
 return tree

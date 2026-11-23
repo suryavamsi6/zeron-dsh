@@ -23,6 +23,7 @@ local status = require("@self/status")
 local sidebar = require("@self/sidebar")
 export type SidebarSession = sidebar.Session
 export type SidebarProject = sidebar.Project
+export type SidebarCaptain = sidebar.Captain
 export type StatusKind = status.Kind
 export type Harness = model_picker.Harness
 export type Model = model_picker.Model

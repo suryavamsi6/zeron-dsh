@@ -103,6 +103,9 @@ export type PullRequest = { number: number, state: ("open" | "merged" | "closed"
 -- all, just added, isn't: a new chat starts in it. `unused` says so, and it's
 -- listed with the rest, until `details.empty_projects` is off.)
 export type Project = { id: string, name: string, hue: string?, src: string?, emoji: string?, icon: string?, empty: boolean?, unused: boolean?, sessions: { Session } }
+-- A Captain (SUR-89): the chat that is one, and the chats in its crew (the
+-- chats themselves, as sessions, so their rows behave like any other).
+export type Captain = { id: string, name: string, crew: { Session } }
 -- You: your name, and an id your avatar is drawn from.
 export type User = { id: string?, name: string, avatar: string? }
 -- How its sessions are grouped (Zeron's Organize), as a key: its levels
@@ -197,6 +200,11 @@ export type Props = {
 	pinned: Live<{ Session }>?,
 	card: boolean?,
 	projects: Live<{ Project }>,
+	-- The Captains and their crews, above the projects (SUR-89): one quiet,
+	-- collapsible group; each Captain a row with its crew count, its crew
+	-- under it as ordinary session rows. The caller leaves a crew chat out of
+	-- its project's sessions, so it is listed once.
+	captains: Live<{ Captain }>?,
 	-- (A state or a function for an account that arrives or changes.)
 	user: Live<User>?,
 	-- Room left at its top for a title bar laid over it (the window's
@@ -2864,6 +2872,42 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 				end
 			end
 		end
+		-- The Captains (SUR-89): one quiet group above the projects, each a row
+		-- with its crew under it. The crew chats are sessions like any other
+		-- (their own rows, menus and selection); the caller leaves them out of
+		-- their projects so nothing is said twice.
+		local caps = if props.captains then follow(props.captains, {} :: { Captain }) else {}
+		if #caps > 0 then
+			local caps_open: State<boolean> = opened["::captains"]
+			local function captains_fold(): Fold
+				return fold_of("captains", function(): boolean
+					return caps_open:peek()
+				end, function(on: boolean)
+					caps_open:set(on)
+				end, true)
+			end
+			local cf = captains_fold()
+			local crew_total = 0
+			for _, cap in caps do
+				crew_total += #listed(cap.crew)
+			end
+			add({ kind = "title", key = "title:captains", place = "regular", chain = {}, title = "ds.sidebar.captains", n = crew_total, fold = captains_fold, open = caps_open, base = title_h })
+			if cf.present then
+				local chain = { cf }
+				for _, cap in caps do
+					local f = group_fold(`captain:{cap.id}`)
+					local crew = listed(cap.crew)
+					add({ kind = "captain", key = `captain:{cap.id}`, place = "regular", chain = chain, text = cap.name, n = #crew, fold = function(): Fold
+						return f
+					end, base = function(): number
+						return SLOT + gap_after
+					end })
+					if f.present then
+						sessions_rows(`captain:{cap.id}`, crew, by, { cf, f }, "regular", nil, nil, false)
+					end
+				end
+			end
+		end
 		-- The groups.
 		local all_groups, title = groups_of(by, placed)
 		-- (Projects with none but archived sessions: after the rest, in a
@@ -4082,6 +4126,38 @@ fn layer(input:LayerInput)->vec4<f32> {
 					-- Its trunk while it sits in a group that draws one.
 					tree_of = tree_at(),
 				})
+			elseif it.kind == "captain" then
+				-- A Captain's row: its name, its crew count, a chevron; a press
+				-- folds its crew away or open.
+				local function fold_now(): Fold?
+					local cur = item_of(key)
+					local f = if cur then cur.fold else nil
+					return if f then f() else nil
+				end
+				local function open_now(): boolean
+					local f = fold_now()
+					return f ~= nil and f.present
+				end
+				node = row {
+					class = "captain-row",
+					name = it.text :: string,
+					lead = Icon { name = if open_now() then "alt-arrow-down" else "alt-arrow-right", size = 14 },
+					words = SessionRow.line(FadeText {
+						function(): string
+							local cur = item_of(key)
+							return locale.s("ds.sidebar.crew", { n = tostring(if cur and cur.n then cur.n else 0) })
+						end,
+						shrink = 0,
+						text_size = "$font.size.xs",
+						color = "$text.tertiary",
+					}),
+					on_click = function()
+						local f = fold_now()
+						if f then
+							fold_set(f, not f.is_open())
+						end
+					end,
+				}
 			elseif it.kind == "drop" then
 				node = drop_here(it.text :: string)
 			elseif it.kind == "pager" then
