@@ -444,9 +444,50 @@ route.narrowed_project(function(): string?
 	return nil
 end)
 
+-- A chat as the list draws it (a session row's data). Shared by a project's
+-- sessions and a Captain's crew (SUR-89), so a crew chat's row says the same
+-- as it would have said in its project.
+local function session_of(c: any): any
+	local asked = asks:peek()
+	local names = devices()
+	-- (Waiting on you beats working: an approval, then a question.)
+	local status = ASKED[asked[c.id] or ""] or c.status
+	-- (The Activity view's: woken from sleep and not looked at since, the
+	-- alarm, unless it's asking for you or under way. Which shelf it's on,
+	-- and its place.)
+	local act = activity.on:peek()
+	if act and c.woke and (status == nil or status == "done") then
+		status = "woke"
+	end
+	local on_shelf = activity.shelf(c, status)
+	return kept({
+		id = c.id,
+		title = c.title,
+		status = status :: any,
+		time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
+		shelf = on_shelf,
+		rank = if act then activity.rank(c, on_shelf) else nil,
+		created = c.created,
+		agent = c.agent :: any,
+		device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
+		branch = c.branch,
+		-- (Its side chats working count as its subagents do, as its lanes'
+		-- badge counts them: screens/chat/lanes.)
+		subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
+	}) :: any
+end
+
+-- Which chat is in whose crew, and the roster's rows in its own order
+-- (SUR-91, SUR-89). Declared here, before the list that reads them is made:
+-- the list's first evaluation happens as the page is built, so a state
+-- created after it would be nil there. The roster fills them as the host
+-- answers `Captains` (read when the page is made, as a menu opens, and after
+-- a promotion or a demotion).
+local crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
+local captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
+
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
-	local asked = asks:get()
 	local only = narrow:get()
 	local just = only_project()
 	local names = devices()
@@ -496,40 +537,20 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 		end
 	end
 	for _, c in now.chats do
+		-- (A crew chat is listed under its Captain, in the Captains group:
+		-- never a second time here, SUR-89.)
+		if crew_of and crew_of:get()[c.id] then
+			continue
+		end
 		if just and not (just_group and c.project and by[c.project] == just_group) then
 			continue
 		end
 		local group = (c.project and by[c.project]) or loose
-		-- (Waiting on you beats working: an approval, then a question.)
-		local status = ASKED[asked[c.id] or ""] or c.status
-		-- (The Activity view's: woken from sleep and not looked at since, the
-		-- alarm, unless it's asking for you or under way. Which shelf it's
-		-- on, and its place; asleep, its corner says when it wakes. Off, none
-		-- of it.)
-		local act = activity.on:get()
-		if act and c.woke and (status == nil or status == "done") then
-			status = "woke"
-		end
-		if only and not only.statuses[status or "idle"] then
+		local row = session_of(c)
+		if only and not only.statuses[(row.status or "idle") :: string] then
 			continue
 		end
-		local on_shelf = activity.shelf(c, status)
-		local rank = if act then activity.rank(c, on_shelf) else nil
-		table.insert(group.sessions, kept({
-			id = c.id,
-			title = c.title,
-			status = status :: any,
-			time = if on_shelf == "asleep" and c.sleep_until then activity.wakes_in(c.sleep_until) else c.updated,
-			shelf = on_shelf,
-			rank = rank,
-			created = c.created,
-			agent = c.agent :: any,
-			device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
-			branch = c.branch,
-			-- (Its side chats working count as its subagents do, as its
-			-- lanes' badge counts them: screens/chat/lanes.)
-			subagents = (c.running_subagents or 0) + (c.working_side_chats or 0),
-		}) :: any)
+		table.insert(group.sessions, row)
 	end
 	if #loose.sessions > 0 then
 		table.insert(out, loose)
@@ -546,6 +567,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	end
 	return out
 end)
+
 
 -- The project filter (Zeron's, its view options' "Project filter"): all
 -- projects, or one, searched for, the list narrowed to it.
@@ -904,14 +926,12 @@ local M = {}
 -- chat offers Promote.
 local captains = ui.state("shell_captains", {} :: { [string]: boolean })
 local captain_names = ui.state("shell_captains_names", {} :: { [string]: string })
--- The crew (SUR-91): which Captain each member chat is in the crew of, and
--- the roster's rows in its own order. A member's menu offers Remove from
--- crew; any other top-level chat's offers Move to Captain, narrowed to the
--- Captains in its project (the engine's own rule, said before it is
+-- (Which chat is in whose crew, and the roster's rows: `crew_of` and
+-- `captain_rows`, declared above the list. A member's menu offers Remove
+-- from crew; any other top-level chat's offers Move to Captain, narrowed to
+-- the Captains in its project (the engine's own rule, said before it is
 -- broken). Stale by a menu's animation at worst: the roster is read as each
--- menu opens, and the engine's refusal is what decides.
-local crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
-local captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
+-- menu opens, and the engine's refusal is what decides.)
 local captains_reading = false
 local function read_captains()
 	if captains_reading then
@@ -948,16 +968,52 @@ local function read_captains()
 			end
 		end
 		ui.batch(function()
-			captains:set(found)
-			captain_names:set(names)
-			crew_of:set(crews)
-			captain_rows:set(rows)
+			-- (Each set as it exists: a reload can run this while the module's
+			-- own states are still being declared.)
+			if captains then
+				captains:set(found)
+			end
+			if captain_names then
+				captain_names:set(names)
+			end
+			if crew_of then
+				crew_of:set(crews)
+			end
+			if captain_rows then
+				captain_rows:set(rows)
+			end
 		end)
 	end, function()
 		captains_reading = false
 	end)
 end
 M.read_captains = read_captains
+
+-- The Captains and their crews for the sidebar's own group (SUR-89): each
+-- Captain in the roster's order, its crew as the sessions the list draws (so
+-- a crew row selects, menus and drags as any other chat's). A demoted
+-- Captain is already out of `captain_rows` (`read_captains` skips archived).
+local captain_groups = ui.computed(function(): { ds.SidebarCaptain }
+	-- (A shell booted before the roster was ever read has neither state: it
+	-- lists no Captains rather than failing the page around them. The same
+	-- guards cover a reload mid-build.)
+	if not (crew_of and captain_rows) then
+		return {}
+	end
+	local now = sessions.now:get()
+	local member_of = crew_of:get()
+	local out: { any } = {}
+	for _, row in captain_rows:get() do
+		local crew: { any } = {}
+		for _, c in now.chats do
+			if member_of[c.id] == row.chatId then
+				table.insert(crew, session_of(c))
+			end
+		end
+		table.insert(out, { id = row.chatId, name = row.name, crew = crew })
+	end
+	return out
+end)
 
 -- The host actions (SUR-83, SUR-91), each a promise, under the names the
 -- menu and its dialogs call: kept on `M` so a test stands them in
@@ -1930,6 +1986,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		island = props.island,
 		selected = shared.selected,
 		projects = projects,
+		captains = captain_groups,
 		here = function(): string?
 			local _, here = devices()
 			return here

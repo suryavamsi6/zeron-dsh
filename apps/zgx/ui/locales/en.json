@@ -435,6 +435,8 @@
       "soft_wrap": "Soft Wrap"
     },
     "sidebar": {
+      "captains": "Captains",
+      "crew": "{n} crew",
       "unknown_device": "Unknown device",
       "pr": {
         "open": "Open",
