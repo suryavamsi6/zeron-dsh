@@ -33,8 +33,8 @@ use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
-    SessionStatus, SteeringMode,
+    AccessMode, AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
+    SandboxLevel, SessionStatus, SteeringMode,
 };
 
 const CHAT: &str = "chat-captain-role";
@@ -56,6 +56,8 @@ const CAP87D: &str = "chat-sur87-cap-d";
 const CREW87D: &str = "chat-sur87-crew-d";
 const CAP87E: &str = "chat-sur87-cap-e";
 const CREW87E: &str = "chat-sur87-crew-e";
+const CAP232: &str = "chat-sur232-cap";
+const CREW232: &str = "chat-sur232-crew";
 const DEVICE: &str = "dev-captains";
 const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
@@ -1109,6 +1111,146 @@ async fn a_crew_report_wakes_an_idle_captain() {
             "the wake points at the report it describes; saw {wake:?}"
         );
     }
+
+    core.shutdown().await;
+}
+
+/// The Captain's chat row as the composer leaves it: a picked model on a
+/// gateway route (the route rides `modelOptions.provider`), a reasoning
+/// level, a project mode. Built field by field — `ChatConfig` has no default.
+fn captain_config(model: &str) -> ChatConfig {
+    ChatConfig {
+        harness: HarnessId::DeepSeek,
+        model: Some(model.into()),
+        reasoning: Some(ReasoningLevel::High),
+        model_options: serde_json::json!({ "provider": "mistral", "contextWindow": "1m" })
+            .as_object()
+            .cloned()
+            .unwrap_or_default(),
+        sandbox: SandboxLevel::ReadOnly,
+        access: AccessMode::Supervised,
+        plan: false,
+    }
+}
+
+/// SUR-232 (red): the wake carries the Captain's route. The human send path
+/// sends the chat row's model and options; the route picker's `provider`
+/// rides the options and `stamp_provider_route` takes it into
+/// `ZERON_DEEPSEEK_PROVIDER`, which is the only way the harness launches on
+/// the picked route (a model id alone is ambiguous). Today the wake
+/// hard-codes `model: None` and empty options, so the Captain restarts on the
+/// engine default route — the live failure ("Set DEEPSEEK_API_KEY in DeepSeek
+/// provider settings or the launching environment").
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_wake_carries_the_captains_configured_route() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP232, "Ada", &[CREW232]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP232).await;
+    create_chat_with(&core, CREW232).await;
+    core.workspace
+        .set_chat_config(CAP232, &captain_config("mistral-large-latest"))
+        .expect("the Captain's chat config writes");
+
+    send_to(&core, CREW232, "m1", "hold the line");
+    wait_for(
+        || answered_in(&core, CREW232, "hold the line") && parked_in(&core, CREW232),
+        "the crew turn",
+    )
+    .await;
+    wait_runs(&rig, 2, "the wake to the Captain").await;
+
+    let runs = rig.recorded();
+    let wake = &runs[1];
+    assert_eq!(
+        wake.env.get("ZERON_DEEPSEEK_PROVIDER").map(String::as_str),
+        Some("mistral"),
+        "the wake must name the Captain's route, or the harness falls back to the \
+         default one; env keys {:?}",
+        wake.env.keys().collect::<Vec<_>>()
+    );
+    assert_eq!(
+        wake.model.as_deref(),
+        Some("mistral-large-latest"),
+        "the wake carries the model the Captain's chat is set to; saw {:?}",
+        wake.model
+    );
+    assert_eq!(
+        wake.reasoning,
+        Some(ReasoningLevel::High),
+        "the wake carries the chat's reasoning level; saw {:?}",
+        wake.reasoning
+    );
+    assert_eq!(
+        wake.model_options
+            .get("contextWindow")
+            .and_then(serde_json::Value::as_str),
+        Some("1m"),
+        "the wake carries the chat's model options; saw {:?}",
+        wake.model_options
+    );
+    assert!(
+        !wake.model_options.contains_key("provider"),
+        "the route is taken into the env stamp, never forwarded as a model \
+         option; saw {:?}",
+        wake.model_options
+    );
+
+    core.shutdown().await;
+}
+
+/// SUR-232 (red): the wake runs where its Captain works, in the mode the
+/// person set. A project Captain woken on `~` runs in the host's home (the
+/// second half of SUR-220), and a wake on the defaults runs wider than the
+/// chat's own sandbox and access say.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_report_wake_runs_where_its_captain_works() {
+    let rig = Rig::new();
+    write_roster(&rig.dir, crew_roster(CAP232, "Ada", &[CREW232]));
+    let core = rig.boot();
+    create_chat_with(&core, CAP232).await;
+    create_chat_with(&core, CREW232).await;
+    let project = rig.dir.join("captains-project");
+    std::fs::create_dir_all(&project).expect("the project folder exists");
+    let project_cwd = project.to_string_lossy().into_owned();
+    core.workspace
+        .set_chat_cwd(CAP232, &project_cwd)
+        .expect("the Captain's chat cwd writes");
+    core.workspace
+        .set_chat_config(CAP232, &captain_config("mistral-large-latest"))
+        .expect("the Captain's chat config writes");
+
+    send_to(&core, CREW232, "m1", "hold the line");
+    wait_for(
+        || answered_in(&core, CREW232, "hold the line") && parked_in(&core, CREW232),
+        "the crew turn",
+    )
+    .await;
+    wait_runs(&rig, 2, "the wake to the Captain").await;
+
+    let runs = rig.recorded();
+    let wake = &runs[1];
+    assert_eq!(
+        wake.cwd, project_cwd,
+        "the wake runs in the Captain chat's folder, not the host's home; saw {:?}",
+        wake.cwd
+    );
+    assert_eq!(
+        wake.sandbox,
+        SandboxLevel::ReadOnly,
+        "the wake runs in the chat's sandbox; saw {:?}",
+        wake.sandbox
+    );
+    assert_eq!(
+        wake.access,
+        AccessMode::Supervised,
+        "the wake runs in the chat's access mode; saw {:?}",
+        wake.access
+    );
+    assert!(
+        !wake.auto_approve,
+        "a wake never approves on the person's behalf"
+    );
 
     core.shutdown().await;
 }
