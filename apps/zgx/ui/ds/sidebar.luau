@@ -552,7 +552,9 @@ return ui.component(function(props: Props): Node
 		here: string?,
 	}
 	local index = ui.computed(function(): Index
-		local projects = follow(props.projects, {} :: { Project })
+		-- (A caller mid-reload can hand nothing: an empty list, never a nil to
+		-- iterate.)
+		local projects: { Project } = follow(props.projects, {} :: { Project }) or {}
 		local here: string? = follow(props.here, nil :: string?)
 		local out: Index = { projects = projects, project_of = {}, by_project = {}, by_id = {}, pinned_ids = {}, everything = {}, devices = {}, here = here }
 		for _, p in projects do
@@ -563,7 +565,7 @@ return ui.component(function(props: Props): Node
 				table.insert(out.everything, s)
 			end
 		end
-		for _, s in follow(props.pinned, {} :: { Session }) do
+		for _, s in (follow(props.pinned, {} :: { Session }) or {}) do
 			out.by_id[s.id] = s
 			table.insert(out.pinned_ids, s.id)
 		end
@@ -603,7 +605,7 @@ return ui.component(function(props: Props): Node
 			return now().emoji
 		end
 	end
-	local pinned_ids = index:peek().pinned_ids
+	local pinned_ids = (index:peek() or { pinned_ids = {} }).pinned_ids
 local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids, sections = {} } :: Places)
 	-- Where each session is put by hand: "pinned", or its section's id.
 	local function placed_in(p: Places): { [string]: string }

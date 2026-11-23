@@ -477,10 +477,14 @@ local function session_of(c: any): any
 	}) :: any
 end
 
--- (Declared here because the list reads them while it is made: which chat is
--- in whose crew, and the roster, arrive as the host answers `Captains`.)
-local crew_of: any
-local captain_rows: any
+-- Which chat is in whose crew, and the roster's rows in its own order
+-- (SUR-91, SUR-89). Declared here, before the list that reads them is made:
+-- the list's first evaluation happens as the page is built, so a state
+-- created after it would be nil there. The roster fills them as the host
+-- answers `Captains` (read when the page is made, as a menu opens, and after
+-- a promotion or a demotion).
+local crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
+local captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
 
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
@@ -535,7 +539,7 @@ local projects = ui.computed(function(): { ds.SidebarProject }
 	for _, c in now.chats do
 		-- (A crew chat is listed under its Captain, in the Captains group:
 		-- never a second time here, SUR-89.)
-		if crew_of:get()[c.id] then
+		if crew_of and crew_of:get()[c.id] then
 			continue
 		end
 		if just and not (just_group and c.project and by[c.project] == just_group) then
@@ -922,14 +926,12 @@ local M = {}
 -- chat offers Promote.
 local captains = ui.state("shell_captains", {} :: { [string]: boolean })
 local captain_names = ui.state("shell_captains_names", {} :: { [string]: string })
--- The crew (SUR-91): which Captain each member chat is in the crew of, and
--- the roster's rows in its own order. A member's menu offers Remove from
--- crew; any other top-level chat's offers Move to Captain, narrowed to the
--- Captains in its project (the engine's own rule, said before it is
+-- (Which chat is in whose crew, and the roster's rows: `crew_of` and
+-- `captain_rows`, declared above the list. A member's menu offers Remove
+-- from crew; any other top-level chat's offers Move to Captain, narrowed to
+-- the Captains in its project (the engine's own rule, said before it is
 -- broken). Stale by a menu's animation at worst: the roster is read as each
--- menu opens, and the engine's refusal is what decides.
-crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
-captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
+-- menu opens, and the engine's refusal is what decides.)
 local captains_reading = false
 local function read_captains()
 	if captains_reading then
@@ -966,10 +968,20 @@ local function read_captains()
 			end
 		end
 		ui.batch(function()
-			captains:set(found)
-			captain_names:set(names)
-			crew_of:set(crews)
-			captain_rows:set(rows)
+			-- (Each set as it exists: a reload can run this while the module's
+			-- own states are still being declared.)
+			if captains then
+				captains:set(found)
+			end
+			if captain_names then
+				captain_names:set(names)
+			end
+			if crew_of then
+				crew_of:set(crews)
+			end
+			if captain_rows then
+				captain_rows:set(rows)
+			end
 		end)
 	end, function()
 		captains_reading = false
@@ -982,6 +994,12 @@ M.read_captains = read_captains
 -- a crew row selects, menus and drags as any other chat's). A demoted
 -- Captain is already out of `captain_rows` (`read_captains` skips archived).
 local captain_groups = ui.computed(function(): { ds.SidebarCaptain }
+	-- (A shell booted before the roster was ever read has neither state: it
+	-- lists no Captains rather than failing the page around them. The same
+	-- guards cover a reload mid-build.)
+	if not (crew_of and captain_rows) then
+		return {}
+	end
 	local now = sessions.now:get()
 	local member_of = crew_of:get()
 	local out: { any } = {}
