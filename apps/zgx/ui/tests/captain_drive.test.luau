@@ -119,3 +119,16 @@ test("captain_drive: a crew's report filed at a turn's end shows without the tab
 	-- (The tab it had, not a second one.)
 	expect(kinds(app, "cap-a")).to_be("captain_drive")
 end)
+
+test("captain_drive: a report inside reports/ opens by its Drive path, not its bare name", function()
+	local app = mount("captain_drive_fixture.luau")
+	home(app)
+	app:command("open_drive")
+	expect(app:wait("#captain-drive", { timeout_ms = 15000 })).to_be(true)
+	expect(until_text(app, "#captain-drive", "2026-11-23-a.md")).to_be(true)
+	-- Its row shows its own name; the read it makes is `reports/2026-11-23-a.md`,
+	-- the path the host lists. A bare name here is a refusal, not a read.
+	app:click('#captain-drive >> role:button "2026-11-23-a.md"')
+	expect(until_text(app, "#captain-drive", "Invoices reconciled.")).to_be(true)
+	expect(app:tree("#captain-drive")).never.to_contain("couldn't be read")
+end)

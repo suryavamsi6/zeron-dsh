@@ -25,9 +25,10 @@ local M = {}
 -- The host's listing (SUR-249): one flat array, sorted by name, each entry
 -- `{ name, kind, size?, mtime? }` whose `name` is the Drive-relative path
 -- `CaptainDriveRead` takes ("reports/2026-11-23-a.md", "DIGEST.md") and whose
--- `kind` is "file" or "directory". The Drive's top level plus `reports/`'s
--- own files; `state/` is never in it.
-export type Entry = { name: string, kind: string, size: number?, mtime: number? }
+-- `kind` is "file" or "directory". `mtime` is RFC 3339 text, as the host
+-- formats it, kept as text here (never converted). The Drive's top level plus
+-- `reports/`'s own files; `state/` is never in it.
+export type Entry = { name: string, kind: string, size: number?, mtime: string? }
 export type File = { path: string, text: string?, size: number?, truncated: boolean? }
 export type Listing = { entries: { Entry } }
 
@@ -96,7 +97,7 @@ function M.reload(chat: string?)
 					name = entry.name,
 					kind = if entry.kind == "directory" then "directory" else "file",
 					size = if type(entry.size) == "number" then entry.size else nil,
-					mtime = if type(entry.mtime) == "number" then entry.mtime else nil,
+					mtime = if type(entry.mtime) == "string" then entry.mtime else nil,
 				})
 			end
 		end
@@ -107,8 +108,11 @@ function M.reload(chat: string?)
 end
 
 -- One row of the tab: a file or a folder, and how deep it stands (a folder's
--- own files one step in).
-export type Row = { entry: Entry, depth: number, about: string? }
+-- own files one step in). `path` is what the row reads when it is opened —
+-- the Drive-relative path the host takes, which is not `entry.name` for a
+-- file inside a folder (that one shows its own name and keeps its folder in
+-- its path).
+export type Row = { entry: Entry, path: string, depth: number, about: string? }
 
 -- The listing as the tab draws it: `M.FILES` in their order and then any
 -- other file at the Drive's root, then each folder with its own files under
@@ -117,7 +121,7 @@ export type Row = { entry: Entry, depth: number, about: string? }
 function M.rows(listing: Listing?): { Row }
 	local files: { [string]: Entry } = {}
 	local folders: { [string]: Entry } = {}
-	local children: { [string]: { Entry } } = {}
+	local children: { [string]: { { entry: Entry, path: string } } } = {}
 	for _, entry in (listing and listing.entries) or {} do
 		local path = entry.name
 		local folder, below = string.match(path, "^([^/]+)/(.+)$")
@@ -128,7 +132,8 @@ function M.rows(listing: Listing?): { Row }
 					list = {}
 					children[folder] = list
 				end
-				table.insert(list, { name = below, kind = entry.kind, size = entry.size, mtime = entry.mtime })
+				-- (Its path stays the Drive's; its name is what the row shows.)
+				table.insert(list, { entry = { name = below, kind = entry.kind, size = entry.size, mtime = entry.mtime }, path = path })
 			end
 		elseif entry.kind == "directory" then
 			if entry.name ~= M.HIDDEN then
@@ -143,7 +148,7 @@ function M.rows(listing: Listing?): { Row }
 	for _, name in M.FILES do
 		local entry = files[name]
 		if entry then
-			table.insert(rows, { entry = entry, depth = 0, about = M.ABOUT[name] })
+			table.insert(rows, { entry = entry, path = entry.name, depth = 0, about = M.ABOUT[name] })
 			known[name] = true
 		end
 	end
@@ -155,7 +160,7 @@ function M.rows(listing: Listing?): { Row }
 	end
 	table.sort(others)
 	for _, name in others do
-		table.insert(rows, { entry = files[name], depth = 0, about = M.ABOUT[name] })
+		table.insert(rows, { entry = files[name], path = files[name].name, depth = 0, about = M.ABOUT[name] })
 	end
 	local order: { string } = {}
 	local placed: { [string]: boolean } = {}
@@ -178,15 +183,16 @@ function M.rows(listing: Listing?): { Row }
 	for _, name in order do
 		table.insert(rows, {
 			entry = folders[name] or { name = name, kind = "directory" },
+			path = name,
 			depth = 0,
 			about = M.ABOUT[name],
 		})
 		local inner = children[name] or {}
-		table.sort(inner, function(a: Entry, b: Entry): boolean
-			return a.name < b.name
+		table.sort(inner, function(a: any, b: any): boolean
+			return a.entry.name < b.entry.name
 		end)
 		for _, child in inner do
-			table.insert(rows, { entry = child, depth = 1, about = nil })
+			table.insert(rows, { entry = child.entry, path = child.path, depth = 1, about = nil })
 		end
 	end
 	return rows
