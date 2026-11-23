@@ -41,6 +41,37 @@ pub struct Recorded {
     pub items: usize,
 }
 
+/// The lists last read per Captain, kept for the life of the process. Diffing
+/// a fresh read against it is what makes an item "new": the first read of a
+/// Captain only seeds, and a read that fails keeps the last good list.
+#[derive(Default)]
+pub struct Seen(std::sync::Mutex<std::collections::HashMap<String, Vec<String>>>);
+
+impl Seen {
+    /// The items in `items` that the previous read for `captain` did not carry.
+    /// `None` (a read or parse failure) keeps the previous list and returns
+    /// nothing; a first read only seeds and returns nothing; a valid list
+    /// replaces the baseline, so a valid empty list clears it.
+    pub fn new_items(&self, captain: &str, items: Option<Vec<String>>) -> Vec<String> {
+        let _ = (captain, items);
+        Vec::new() // STUB: the implementation is the next brief.
+    }
+}
+
+/// The items `<drive>/state/needs-you.json` stores: `[]` when the file is
+/// missing, unreadable, not version 1, or not a version-1 list.
+pub fn read_needs_you(path: &Path) -> Vec<String> {
+    let _ = path;
+    Vec::new() // STUB
+}
+
+/// The same read, `None` when the file exists but cannot be read or is not a
+/// version-1 list — so a caller diffing items keeps its last good baseline.
+pub(crate) fn read_needs_you_checked(path: &Path) -> Option<Vec<String>> {
+    let _ = path;
+    None // STUB
+}
+
 /// The `## Needs you` bullets of `markdown`: `-`, `*` and `N.` list items,
 /// trimmed, empties dropped, capped. Harmless on a file with no such section.
 pub fn parse_needs_you(markdown: &str) -> Vec<String> {
@@ -407,5 +438,86 @@ mod tests {
             stored(dir.path())["items"],
             serde_json::json!(["one ask"])
         );
+    }
+
+    #[test]
+    fn captains_needs_you_a_first_read_seeds_without_notifying() {
+        let seen = Seen::default();
+        let items = Some(vec!["approve the deploy".to_string()]);
+        assert!(seen.new_items("cap-a", items).is_empty());
+    }
+
+    #[test]
+    fn captains_needs_you_new_items_notify_once_each() {
+        let seen = Seen::default();
+        seen.new_items("cap-a", Some(vec!["approve the deploy".to_string()]));
+        let new = seen.new_items(
+            "cap-a",
+            Some(vec!["approve the deploy".to_string(), "pick a name".to_string()]),
+        );
+        assert_eq!(new, vec!["pick a name".to_string()]);
+        // Read again: the same item is not new twice.
+        assert!(seen
+            .new_items(
+                "cap-a",
+                Some(vec!["approve the deploy".to_string(), "pick a name".to_string()]),
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn captains_needs_you_unchanged_and_removed_do_not_notify() {
+        let seen = Seen::default();
+        seen.new_items("cap-a", Some(vec!["a".to_string(), "b".to_string()]));
+        assert!(seen.new_items("cap-a", Some(vec!["a".to_string(), "b".to_string()])).is_empty());
+        assert!(seen.new_items("cap-a", Some(vec!["a".to_string()])).is_empty());
+    }
+
+    #[test]
+    fn captains_needs_you_a_failed_read_keeps_the_baseline() {
+        let seen = Seen::default();
+        seen.new_items("cap-a", Some(vec!["a".to_string()]));
+        assert!(seen.new_items("cap-a", None).is_empty());
+        // A recovery does not burst: "a" was already seen.
+        assert!(seen.new_items("cap-a", Some(vec!["a".to_string()])).is_empty());
+    }
+
+    #[test]
+    fn captains_needs_you_a_valid_empty_list_clears_the_baseline() {
+        let seen = Seen::default();
+        seen.new_items("cap-a", Some(vec!["a".to_string()]));
+        assert!(seen.new_items("cap-a", Some(Vec::new())).is_empty());
+        // Cleared, so the item returning is new again.
+        assert_eq!(
+            seen.new_items("cap-a", Some(vec!["a".to_string()])),
+            vec!["a".to_string()]
+        );
+    }
+
+    #[test]
+    fn captains_needs_you_reads_a_version_1_file_and_refuses_anything_else() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join(FILE);
+        // Missing file: an empty list, not a failure.
+        assert!(read_needs_you(&path).is_empty());
+        // A version-1 list reads.
+        std::fs::write(
+            &path,
+            r#"{"version":1,"updatedAt":"2026-11-01T00:00:00Z","items":["approve the deploy"]}"#,
+        )
+        .expect("write");
+        assert_eq!(read_needs_you(&path), vec!["approve the deploy".to_string()]);
+        assert_eq!(
+            read_needs_you_checked(&path),
+            Some(vec!["approve the deploy".to_string()])
+        );
+        // Bad JSON is an empty list, but not a good snapshot.
+        std::fs::write(&path, "{not json").expect("write");
+        assert!(read_needs_you(&path).is_empty());
+        assert_eq!(read_needs_you_checked(&path), None);
+        // Another version is ignored.
+        std::fs::write(&path, r#"{"version":2,"items":["other"]}"#).expect("write");
+        assert!(read_needs_you(&path).is_empty());
+        assert_eq!(read_needs_you_checked(&path), None);
     }
 }

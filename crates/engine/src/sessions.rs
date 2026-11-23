@@ -297,6 +297,10 @@ struct Inner {
     /// (`stamp_captain_role`) and the turn-end needs-you snapshot resolve
     /// it from here. Absent in bare tests.
     captains_home: OnceLock<std::path::PathBuf>,
+    /// The "Needs you" baselines per Captain (SUR-93).
+    needs_you_seen: Arc<crate::needs_you::Seen>,
+    /// How a new "Needs you" item rings, once assembly sets it.
+    needs_you_post: OnceLock<Arc<dyn Fn(&str, &str, Option<&str>) + Send + Sync>>,
     /// The engine's own agent MCP endpoint ([`SessionsEngine::serve_mcp_endpoint`]):
     /// runs get a token for it instead of a `zeron mcp` process.
     mcp_endpoint: Mutex<Option<Arc<zeron_mcp::http::McpHttpServer>>>,
@@ -530,6 +534,8 @@ impl SessionsEngine {
                 ipc_token_file: Mutex::new(None),
                 data_dir: OnceLock::new(),
                 captains_home: OnceLock::new(),
+                needs_you_seen: Arc::default(),
+                needs_you_post: OnceLock::new(),
                 mcp_endpoint: Mutex::new(None),
                 viewers: Arc::default(),
                 journal,
@@ -573,6 +579,16 @@ impl SessionsEngine {
     /// `state/needs-you.json` snapshot resolves the Drive from it.
     pub fn use_captains_home(&self, path: std::path::PathBuf) {
         let _ = self.inner.captains_home.set(path);
+    }
+
+    /// How a Captain's newly-added "Needs you" items ring
+    /// ([`crate::desktop_notify::post_for`]). Set by the engine's assembly;
+    /// absent in bare test assemblies.
+    pub fn set_needs_you_post(
+        &self,
+        post: Arc<dyn Fn(&str, &str, Option<&str>) + Send + Sync>,
+    ) {
+        let _ = self.inner.needs_you_post.set(post);
     }
 
     /// Test seam for the crew-report wake (SUR-87): when set, the wake line
@@ -8884,6 +8900,90 @@ mod tests {
             before,
             "a failed turn does not clobber the last good list"
         );
+    }
+
+    #[tokio::test]
+    async fn captains_needs_you_turn_end_notifies_only_new_items() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), NEEDS_YOU_REGISTRY);
+        let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = posted.clone();
+        sessions.set_needs_you_post(Arc::new(move |title, body, _chat| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((title.to_owned(), body.to_owned()));
+        }));
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        // First read seeds: the item is in the file, nothing rings.
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(wait_for(&path).await, "the file is written: {}", path.display());
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(posted.lock().expect("posted").is_empty(), "the first read only seeds");
+
+        // A new item rings once, titled by the Captain's name.
+        std::fs::write(
+            drive.join("DIGEST.md"),
+            "## Needs you\n- approve the deploy\n- pick a name\n",
+        )
+        .expect("digest");
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        for _ in 0..60 {
+            if !posted.lock().expect("posted").is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            *posted.lock().expect("posted"),
+            vec![("Ada needs you".to_string(), "pick a name".to_string())]
+        );
+
+        // An unchanged turn rings nothing.
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(posted.lock().expect("posted").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_archived_captains_turn_end_notifies_nothing() {
+        const ARCHIVED: &str = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), ARCHIVED);
+        let posted: Arc<std::sync::Mutex<Vec<(String, String)>>> = Arc::default();
+        let sink = posted.clone();
+        sessions.set_needs_you_post(Arc::new(move |title, body, _chat| {
+            sink.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push((title.to_owned(), body.to_owned()));
+        }));
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        // Seed the baseline, then add an item: an archived Captain stays quiet.
+        sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
+        assert!(wait_for(&drive.join("state").join(crate::needs_you::FILE)).await);
+        std::fs::write(
+            drive.join("DIGEST.md"),
+            "## Needs you\n- approve the deploy\n- pick a name\n",
+        )
+        .expect("digest");
+        sessions.turn_end_writes("cap-a", Some(&captain_stamp(&drive)), DoneStatus::Completed, None);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(posted.lock().expect("posted").is_empty(), "an archived Captain rings nothing");
     }
 
     /// A duplicate finalization of the same turn does not rewrite a finished
