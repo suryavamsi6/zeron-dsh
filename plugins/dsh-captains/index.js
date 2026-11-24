@@ -48,6 +48,18 @@ function peerTools() {
 
 const defineTool = spec => peerTools().defineTool(spec);
 
+// The head-commit pair below renders the step prompt with the runtime's own
+// renderer and writes it back through the runtime's own message factory, so
+// both come through the same peer anchors: an install where they cannot be
+// reached leaves the row on the declare-only path rather than failing to load.
+function peerService(specifier) {
+  let resolved;
+  return () => resolved ??= peerModule(specifier);
+}
+
+const dshLlm = peerService('@deepseek-ai/dsh-llm');
+const dshSystemPrompt = peerService('@deepseek-ai/dsh-system-prompt');
+
 // SUR-81 creates the folder engine-side; the row's driveRoot is the Drive path here.
 const driveDir = cfg => cfg.driveRoot;
 
@@ -124,9 +136,19 @@ function applyRevoked(ctx) {
 // signal are remembered; when the next admitted first step of a turn sees the
 // file has changed since the session's last admission, it declares a
 // request-series rebase so the stale copy is rewritten rather than linger.
+//
+// SUR-255: the declaration lands on the decision AFTER the waterfall, so a
+// listener inside that waterfall — pressure compaction, pricing the step and
+// writing its checkpoint — still reads the retired head. A prepended pre-step
+// listener therefore commits the rendered prompt over the live head BEFORE
+// next(), as soon as an existing baseline disagrees with the bytes just
+// served: one durable replace, never an appended second system node. The
+// prompt is captured at the same assembly the bytes were keyed to, never
+// re-read from the file, so the commit and the serve cannot disagree.
 function applyCrew(ctx, cfg) {
   const registered = new WeakSet();
   const bytesBySignal = new WeakMap();
+  const promptBySignal = new WeakMap();
   // In memory, keyed by session id. A missing entry means this process never
   // saw the bytes the resumed series was built from, so that first admitted
   // step must rebase; only a known equal baseline passes through untouched.
@@ -147,6 +169,37 @@ function applyCrew(ctx, cfg) {
       interpolate: false,
     }));
     if (typeof scope.on !== 'function') return;
+    // Capture the exact text the runtime will send for this step. Prepended
+    // so `next()` returns the fully transformed presentation; keyed by the
+    // turn signal, the same object the pre-step event carries.
+    scope.on('system-prompt/assemble', async (_assembly, { signal }, next) => {
+      const presentation = await next();
+      const prompts = dshSystemPrompt();
+      if (prompts !== undefined && signal != null) promptBySignal.set(signal, prompts.renderPrompt(presentation));
+      return presentation;
+    }, { prepend: true });
+    scope.on('agent/pre-step', (event, next) => {
+      const { messages, signal, turn, step } = event;
+      if (step !== 1 || !Array.isArray(messages) || messages.length === 0) return next();
+      const { session } = event.agent;
+      const current = bytesBySignal.get(signal);
+      const previous = lastBytes.get(session.id);
+      // Only a known baseline that the fresh bytes disagree with earns a
+      // commit: an unknown one is the resumed-session case the declared
+      // rebase already owns, an equal one changes nothing.
+      if (previous === undefined || current === undefined || previous.equals(current)) return next();
+      const llm = dshLlm();
+      const prompts = dshSystemPrompt();
+      if (llm === undefined || prompts === undefined) return next();
+      signal.throwIfAborted();
+      const headSeq = session.surface.nodes[0];
+      if (session.eventAt(headSeq)?.type !== 'system/message') throw new Error('Expected surface node zero to be a system/message');
+      const prompt = promptBySignal.get(signal);
+      if (prompt === undefined) throw new Error('The step system prompt was not captured');
+      session.append('system/message', { turn, step, message: llm.createSystemMessage(prompt) },
+        { surfaceOp: { op: 'replace', startSeq: headSeq, endSeq: headSeq }, sourceEventSeqs: [headSeq] });
+      return next();
+    }, { prepend: true });
     scope.on('agent/pre-step', async (event, next) => {
       const decision = await next();
       // only an admitted first step of a turn carries a rebase
