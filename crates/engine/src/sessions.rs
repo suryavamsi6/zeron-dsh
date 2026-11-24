@@ -8914,10 +8914,10 @@ mod tests {
         );
     }
 
-    /// An archived roster row is dispatched unstamped, so the turn-end
-    /// decision never consults the roster.
+    /// The turn-end decision keys on the stamp, not the chat id: an
+    /// unstamped turn writes no state even when its chat id is a roster row.
     #[tokio::test]
-    async fn a_roster_archived_captain_writes_no_state() {
+    async fn an_unstamped_turn_writes_no_state_even_when_its_chat_id_matches_a_roster_row() {
         let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), registry);

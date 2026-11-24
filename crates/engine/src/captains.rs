@@ -1246,16 +1246,31 @@ fn element_insert(text: &str, open: usize, element: &str) -> (usize, String) {
 /// stores over the same `captains.json` still take turns under it.
 static MUTATION: Mutex<()> = Mutex::new(());
 
-/// The engine's single read/modify/write path over `captains.json`. Every
-/// mutation takes a process-wide lock, loads the file fresh under it, applies
-/// the same rule checks as `Registry`, saves atomically, and only then
-/// publishes the new snapshot — so two racing assignments can never both
-/// win. A rule error or a save error leaves the file and the snapshot as
-/// they were.
+/// What `snapshot` serves: the last published registry, and whether it is
+/// only the empty stand-in a failed `Registry::load` degrades to. The flag
+/// shares the registry's lock so a degraded read's repair retry serialises
+/// with a `mutate` publish — without that, a retry holding an older revision
+/// could overwrite a just-saved one.
+struct Published {
+    registry: Registry,
+    /// The last `Registry::load` failed: `registry` is the empty stand-in,
+    /// and the next `snapshot` retries the file before answering.
+    degraded: bool,
+}
+
+/// The engine's single read/modify/write path over `captains.json`. Reads
+/// serve the last published registry; while the store is degraded from a
+/// failed load, the next read re-loads the file under the snapshot lock and
+/// adopts it if it now parses. Every mutation takes the process-wide
+/// `MUTATION` lock, loads the file fresh under it, applies the same rule
+/// checks as `Registry`, saves atomically, and only then publishes the new
+/// snapshot — so two racing assignments can never both win. A rule error or
+/// a save error leaves the file and the snapshot as they were.
 pub struct CaptainsStore {
     data_dir: PathBuf,
-    /// The last committed registry; replaced only after a save succeeds.
-    snapshot: Mutex<Registry>,
+    /// The last published registry; replaced only after a save succeeds, or
+    /// by a degraded read that finds the file repaired.
+    snapshot: Mutex<Published>,
     /// Writes that saved and published — the tests pin "one update per
     /// committed change", so a retry that changes nothing must not count.
     #[cfg(test)]
@@ -1264,38 +1279,59 @@ pub struct CaptainsStore {
 
 impl CaptainsStore {
     /// Open the store over `data_dir`, loading `captains.json` once. A file
-    /// that won't load degrades rather than stopping the engine: reads serve
-    /// an empty roster while the file is unreadable, and a mutation is
-    /// refused with the parse error (which names the path) because `mutate`
-    /// reloads the file under `MUTATION` — so a repaired file is written
-    /// normally on the next mutation and the degrade is no latch.
-    pub fn open(data_dir: PathBuf) -> Result<CaptainsStore, String> {
+    /// that won't load degrades rather than stopping the engine: the store
+    /// starts on an empty roster, and the degrade is no latch on either path
+    /// — the next `snapshot` retries the file and adopts it when it parses,
+    /// and a mutation reloads the file under `MUTATION`, so a repaired file
+    /// is written normally. A mutation attempted while the file is still
+    /// unreadable is refused with the parse error (which names the path).
+    pub fn open(data_dir: PathBuf) -> CaptainsStore {
         let snapshot = match Registry::load(&data_dir) {
-            Ok(snapshot) => snapshot,
+            Ok(registry) => Published {
+                registry,
+                degraded: false,
+            },
             Err(error) => {
                 tracing::warn!(
                     error = %error,
                     data_dir = %data_dir.display(),
                     "captains registry load failed; starting with an empty roster"
                 );
-                Registry::default()
+                Published {
+                    registry: Registry::default(),
+                    degraded: true,
+                }
             }
         };
-        Ok(CaptainsStore {
+        CaptainsStore {
             data_dir,
             snapshot: Mutex::new(snapshot),
             #[cfg(test)]
             commits: std::sync::atomic::AtomicUsize::new(0),
-        })
+        }
     }
 
-    /// A clone of this store's last committed registry (each store keeps its
-    /// own; only the write lock is process-wide).
+    /// A clone of this store's last published registry (each store keeps its
+    /// own; only the write lock is process-wide). While the store is degraded
+    /// the call first re-loads the file under the same lock — an externally
+    /// repaired file is adopted here, with no mutation and no reopen; a file
+    /// that still won't parse keeps the empty stand-in serving.
     pub fn snapshot(&self) -> Registry {
-        self.snapshot
+        let mut published = self
+            .snapshot
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+            .unwrap_or_else(PoisonError::into_inner);
+        if published.degraded {
+            // Held across the load so this retry can never publish an older
+            // revision over a `mutate` write.
+            if let Ok(registry) = Registry::load(&self.data_dir) {
+                *published = Published {
+                    registry,
+                    degraded: false,
+                };
+            }
+        }
+        published.registry.clone()
     }
 
     /// Committed writes, for the tests that pin "one update per committed change".
@@ -1333,7 +1369,10 @@ impl CaptainsStore {
         *self
             .snapshot
             .lock()
-            .unwrap_or_else(PoisonError::into_inner) = fresh;
+            .unwrap_or_else(PoisonError::into_inner) = Published {
+            registry: fresh,
+            degraded: false,
+        };
         // The save landed and the snapshot published: exactly one commit.
         #[cfg(test)]
         self.commits
@@ -2146,13 +2185,45 @@ mod tests {
     #[test]
     fn a_store_over_a_missing_file_starts_empty_and_promotes() {
         let dir = tempfile::tempdir().unwrap();
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         assert!(store.snapshot().captains().is_empty());
 
         store.promote("chat-1", "ada").unwrap();
         let reopened = Registry::load(dir.path()).unwrap();
         assert!(reopened.is_captain("chat-1"));
         assert_eq!(store.snapshot(), reopened);
+    }
+
+    /// SUR-215: a `captains.json` that would not load at `open` degrades to an
+    /// empty roster, and the degrade must not latch reads either — an external
+    /// repair reaches `snapshot()` with no mutation in between and no reopen.
+    #[test]
+    fn a_repair_to_an_unreadable_file_is_visible_to_the_same_store() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("captains.json"), b"{ not json").unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
+        assert!(
+            store.snapshot().captains().is_empty(),
+            "an unreadable file degrades to an empty roster"
+        );
+
+        // Repair the file the way another writer would: a complete, valid
+        // document, saved atomically over the broken one.
+        let mut repaired = Registry::default();
+        repaired.promote("cap-a", "ada").unwrap();
+        repaired.save(dir.path()).unwrap();
+
+        let roster = store.snapshot();
+        assert_eq!(
+            roster.captains().len(),
+            1,
+            "the repaired Captain is visible to the same store: {roster:?}"
+        );
+        assert!(roster.is_captain("cap-a"));
+        assert_eq!(
+            roster.run_role("cap-a"),
+            RunRole::Captain { name: "ada".into() }
+        );
     }
 
     #[test]
@@ -2378,8 +2449,8 @@ mod tests {
 
         // Two independent stores over the same file: neither shares the
         // other's snapshot, so only the process-wide lock serialises them.
-        let first = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
-        let second = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let first = CaptainsStore::open(dir.path().to_path_buf());
+        let second = CaptainsStore::open(dir.path().to_path_buf());
         // Each writer parks after its pre-lock read; the test, not the other
         // writer, decides when they are released.
         let latch = Arc::new(test_seam::Latch::new());
@@ -2438,7 +2509,7 @@ mod tests {
         let file = dir.path().join("captains.json");
         let committed_bytes = std::fs::read(&file).unwrap();
 
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         let committed_snapshot = store.snapshot();
         let err = store.add_crew("cap-b", "chat-x").unwrap_err();
         assert!(err.contains("a chat is in at most one crew"), "{err}");
@@ -2462,7 +2533,7 @@ mod tests {
         if std::fs::metadata(dir.path()).unwrap().uid() == 0 {
             return;
         }
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         let committed = store.snapshot();
 
         let mut permissions = std::fs::metadata(dir.path()).unwrap().permissions();
@@ -2574,7 +2645,7 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let home = dir.path().join("deepseek");
             std::fs::create_dir(&home).unwrap();
-            let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+            let store = CaptainsStore::open(dir.path().to_path_buf());
             Rig {
                 _dir: dir,
                 home,
@@ -2849,7 +2920,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("deepseek");
         std::fs::create_dir(&home).unwrap();
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         store.promote("cap-a", "Ada").unwrap();
         assert_eq!(store.commits(), 1);
         let chats = MovingChat {
@@ -3386,7 +3457,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("deepseek");
         std::fs::create_dir(&home).unwrap();
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         let params = json!({"chatId": "cap-a", "name": "Ada"});
 
         let facts: [(&str, Option<ChatRow>); 3] = [
@@ -3869,7 +3940,7 @@ mod tests {
             r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"userArchived":true,"crew":["chat-b"],"archivedCrew":["chat-b"]},{"chatId":"cap-b","name":"Grace","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["chat-x"]}]}"#,
         )
         .unwrap();
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         let chats = FakeChats::default()
             .row("cap-a", Some("space-1"), None)
             .row("cap-b", Some("space-1"), None)
@@ -3932,7 +4003,7 @@ mod tests {
             "cap-a"
         );
 
-        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
         let chats = FakeChats::default().row("cap-a", Some("space-1"), None);
         let rpc = CaptainsRpc {
             store: &store,
