@@ -201,16 +201,25 @@ pub(crate) async fn descendants(root: u32) -> Vec<Tracked> {
         .collect()
 }
 
-/// Whether `pid` is a process that can still execute. A zombie is not: an
-/// unreaped corpse answers `kill(pid, 0)` and keeps its process group alive,
-/// so a teardown that waits on signal 0 waits out its whole grace for nothing
-/// (SUR-260).
+/// Whether `pid` can still execute, given `zombie`'s answer for it. The
+/// process table can be unreadable on a host that hides `/proc` or libproc —
+/// `descendants` falls back to `ps` for that class — so an unreadable answer
+/// must fail open: signal 0 still knows the process is there (SUR-260).
 #[cfg(unix)]
-pub(crate) fn runs(pid: i32) -> bool {
+fn runs_with(pid: i32, zombie: fn(i32) -> bool) -> bool {
     if pid <= 0 {
         return false;
     }
-    proc_table::runs(pid)
+    // SAFETY: signal 0 only checks for existence.
+    (unsafe { libc::kill(pid, 0) }) == 0 && !zombie(pid)
+}
+
+/// Whether `pid` is a process that can still execute. A zombie does not run,
+/// and it still answers signal 0 and holds its process group, so a teardown
+/// that waits on signal 0 waits out its whole grace for a corpse (SUR-260).
+#[cfg(unix)]
+pub(crate) fn runs(pid: i32) -> bool {
+    runs_with(pid, proc_table::zombie)
 }
 
 /// One process-table row; `start` identifies the process across pid reuse.
@@ -299,22 +308,6 @@ mod proc_table {
         parse_stat(&stat).map(|(_, _, start)| start)
     }
 
-    /// Whether the process can still execute: its `/proc/<pid>/stat` state
-    /// (field 3, after the last `)`) is neither `Z` (zombie) nor `X` (dead).
-    /// An unreadable stat means the process is gone.
-    #[cfg(target_os = "linux")]
-    pub(super) fn runs(pid: i32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                let rest = &stat[stat.rfind(')')? + 1..];
-                rest.split_whitespace()
-                    .next()
-                    .map(|state| !matches!(state, "Z" | "X" | "x"))
-            })
-            .unwrap_or(false)
-    }
-
     #[cfg(target_os = "macos")]
     pub(super) fn read() -> Vec<ProcEntry> {
         // SAFETY: a null buffer asks only for the current pid count.
@@ -347,13 +340,6 @@ mod proc_table {
     #[cfg(target_os = "macos")]
     pub(super) fn start_time(pid: i32) -> Option<u64> {
         bsd_info(pid).map(|info| start_of(&info))
-    }
-
-    /// Whether the process can still execute: a zombie (`SZOMB`) cannot,
-    /// and a pid `bsd_info` cannot describe is gone.
-    #[cfg(target_os = "macos")]
-    pub(super) fn runs(pid: i32) -> bool {
-        bsd_info(pid).is_some_and(|info| info.pbi_status != libc::SZOMB as u32)
     }
 
     #[cfg(target_os = "macos")]
@@ -550,13 +536,6 @@ mod proc_table {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     pub(super) fn start_time(_pid: i32) -> Option<u64> {
         None
-    }
-
-    /// No process state to inspect here: signal 0 is all there is.
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    pub(super) fn runs(pid: i32) -> bool {
-        // SAFETY: signal 0 only checks for existence.
-        (unsafe { libc::kill(pid, 0) }) == 0
     }
 
     /// `(ppid, pgrp, starttime)` from a `/proc/<pid>/stat` line: fields 4,
@@ -932,6 +911,32 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_secs(1),
             "the teardown waited out its grace on a process that had already ended: {elapsed:?}"
+        );
+    }
+
+    /// A host can hide the process table (no `/proc`, no libproc) while `ps`
+    /// still works — `descendants` falls back to `ps` for exactly that.
+    /// `runs` must keep reporting a live process there: the old `kill(0)`
+    /// did, and a teardown that reads an unreadable table as "gone" would
+    /// send no SIGTERM and no SIGKILL at all.
+    #[test]
+    fn a_live_process_keeps_running_when_the_table_cannot_say_otherwise() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        // `zombie` cannot read the table, so it answers "not a zombie"; the
+        // live process must still count as running.
+        assert!(
+            runs_with(pid, |_| false),
+            "a live process runs when the table cannot say otherwise"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            !runs_with(pid, |_| false),
+            "a process that is gone does not run, whatever the table says"
         );
     }
 
