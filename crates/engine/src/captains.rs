@@ -297,10 +297,15 @@ impl Registry {
 
     /// The unarchive's finish step: `userArchived` clears and the spent
     /// `archivedCrew` marker is handed back — the chats the caller already
-    /// woke off `unarchive_pending`'s read. A record that is not hidden and
-    /// has no marker is `Ok((Vec::new(), false))`: nothing to spend, no
-    /// commit. The pair is (the ids the caller woke, whether the registry
-    /// changed).
+    /// woke off `unarchive_pending`'s read. The woken record is reconciled
+    /// the way `promote` reconciles a reactivated one: a kept member that
+    /// became a live Captain or joined another live crew while this one
+    /// slept is dropped, so no chat is left in two live crews. The marker
+    /// is still taken whole — the returned ids are still the ids the
+    /// caller woke, whatever the reconcile kept. A record that is not
+    /// hidden and has no marker is `Ok((Vec::new(), false))`: nothing to
+    /// spend, no commit. The pair is (the ids the caller woke, whether
+    /// the registry changed).
     pub fn unarchive(&mut self, chat_id: &str) -> Result<(Vec<String>, bool), String> {
         let Some(captain) = self
             .captains
@@ -312,7 +317,27 @@ impl Registry {
         if !captain.user_archived && captain.archived_crew.is_empty() {
             return Ok((Vec::new(), false));
         }
+        // Waking the record makes its kept crew live again, so the crew is
+        // reconciled like `promote` reconciles a reactivated record: a
+        // member that became a live Captain, or joined another live crew,
+        // while this one slept is dropped. The record itself is excluded —
+        // on the marker-retry path it is already live, and counting it
+        // would drop the whole crew it is waking with.
+        let unavailable: HashSet<String> = self
+            .captains
+            .iter()
+            .filter(|captain| captain.chat_id != chat_id && captain.live())
+            .flat_map(|captain| {
+                std::iter::once(captain.chat_id.clone()).chain(captain.crew.iter().cloned())
+            })
+            .collect();
+        let captain = self
+            .captains
+            .iter_mut()
+            .find(|captain| captain.chat_id == chat_id)
+            .expect("the lookup above found the record");
         captain.user_archived = false;
+        captain.crew.retain(|member| !unavailable.contains(member));
         Ok((std::mem::take(&mut captain.archived_crew), true))
     }
 
