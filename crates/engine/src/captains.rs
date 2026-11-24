@@ -4147,4 +4147,92 @@ mod tests {
             "with the marker spent once the wake actually landed"
         );
     }
+
+    /// A demoted record's reactivation may only drop crew members a **live**
+    /// Captain has since claimed. A hidden (`userArchived`) Captain is not
+    /// live — its crew is not stamped and it blocks nothing — so the member
+    /// it names is free and the reactivation keeps it.
+    #[test]
+    fn a_promote_keeps_a_crew_member_that_only_a_hidden_captain_names() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("cap-b", Some("space-1"), None)
+                .row("chat-c", Some("space-1"), None),
+        );
+        // A is demoted while naming chat-c. B then takes chat-c — legal,
+        // because A is not live — and is hidden, so only a non-live Captain
+        // names the member.
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-c"}),
+        )
+        .unwrap();
+        rig.call(methods::DEMOTE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .unwrap();
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-b", "name": "Grace"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-b", "chatId": "chat-c"}),
+        )
+        .unwrap();
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-b"}))
+            .expect("ArchiveCaptain hides B and archives its crew");
+
+        let roster = rig
+            .call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": "cap-a", "name": "Ada"}),
+            )
+            .unwrap();
+        assert_eq!(
+            crew(&roster, "cap-a"),
+            vec!["chat-c".to_string()],
+            "a hidden Captain names chat-c but is not live, so chat-c is free"
+        );
+    }
+
+    /// Demoting a hidden Captain is refused as bad params — the same kind as
+    /// `ArchiveCaptain` on a demoted record. It is not a no-op: it would
+    /// create the demoted-and-hidden state the archive refuses to create.
+    #[test]
+    fn a_hidden_captain_cannot_be_demoted() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain");
+        let before = rig.file();
+
+        bad_params(
+            rig.call(methods::DEMOTE_CAPTAIN, json!({"chatId": "cap-a"})),
+            "hidden",
+        );
+        assert_eq!(rig.file(), before, "the refused demote writes nothing");
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(record["archived"], false, "a hidden Captain is not demoted");
+        assert_eq!(record["userArchived"], true, "and stays hidden");
+    }
 }
