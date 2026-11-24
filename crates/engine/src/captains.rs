@@ -2155,6 +2155,38 @@ mod tests {
         assert_eq!(store.snapshot(), reopened);
     }
 
+    /// SUR-215: a `captains.json` that would not load at `open` degrades to an
+    /// empty roster, and the degrade must not latch reads either — an external
+    /// repair reaches `snapshot()` with no mutation in between and no reopen.
+    #[test]
+    fn a_repair_to_an_unreadable_file_is_visible_to_the_same_store() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("captains.json"), b"{ not json").unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        assert!(
+            store.snapshot().captains().is_empty(),
+            "an unreadable file degrades to an empty roster"
+        );
+
+        // Repair the file the way another writer would: a complete, valid
+        // document, saved atomically over the broken one.
+        let mut repaired = Registry::default();
+        repaired.promote("cap-a", "ada").unwrap();
+        repaired.save(dir.path()).unwrap();
+
+        let roster = store.snapshot();
+        assert_eq!(
+            roster.captains().len(),
+            1,
+            "the repaired Captain is visible to the same store: {roster:?}"
+        );
+        assert!(roster.is_captain("cap-a"));
+        assert_eq!(
+            roster.run_role("cap-a"),
+            RunRole::Captain { name: "ada".into() }
+        );
+    }
+
     #[test]
     fn run_role_distinguishes_captain_crew_and_unrelated_chats() {
         let mut registry = Registry::default();
