@@ -201,6 +201,18 @@ pub(crate) async fn descendants(root: u32) -> Vec<Tracked> {
         .collect()
 }
 
+/// Whether `pid` is a process that can still execute. A zombie is not: an
+/// unreaped corpse answers `kill(pid, 0)` and keeps its process group alive,
+/// so a teardown that waits on signal 0 waits out its whole grace for nothing
+/// (SUR-260).
+#[cfg(unix)]
+pub(crate) fn runs(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    proc_table::runs(pid)
+}
+
 /// One process-table row; `start` identifies the process across pid reuse.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,6 +299,22 @@ mod proc_table {
         parse_stat(&stat).map(|(_, _, start)| start)
     }
 
+    /// Whether the process can still execute: its `/proc/<pid>/stat` state
+    /// (field 3, after the last `)`) is neither `Z` (zombie) nor `X` (dead).
+    /// An unreadable stat means the process is gone.
+    #[cfg(target_os = "linux")]
+    pub(super) fn runs(pid: i32) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|stat| {
+                let rest = &stat[stat.rfind(')')? + 1..];
+                rest.split_whitespace()
+                    .next()
+                    .map(|state| !matches!(state, "Z" | "X" | "x"))
+            })
+            .unwrap_or(false)
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn read() -> Vec<ProcEntry> {
         // SAFETY: a null buffer asks only for the current pid count.
@@ -319,6 +347,13 @@ mod proc_table {
     #[cfg(target_os = "macos")]
     pub(super) fn start_time(pid: i32) -> Option<u64> {
         bsd_info(pid).map(|info| start_of(&info))
+    }
+
+    /// Whether the process can still execute: a zombie (`SZOMB`) cannot,
+    /// and a pid `bsd_info` cannot describe is gone.
+    #[cfg(target_os = "macos")]
+    pub(super) fn runs(pid: i32) -> bool {
+        bsd_info(pid).is_some_and(|info| info.pbi_status != libc::SZOMB as u32)
     }
 
     #[cfg(target_os = "macos")]
@@ -517,6 +552,13 @@ mod proc_table {
         None
     }
 
+    /// No process state to inspect here: signal 0 is all there is.
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    pub(super) fn runs(pid: i32) -> bool {
+        // SAFETY: signal 0 only checks for existence.
+        (unsafe { libc::kill(pid, 0) }) == 0
+    }
+
     /// `(ppid, pgrp, starttime)` from a `/proc/<pid>/stat` line: fields 4,
     /// 5 and 22, counted after the parenthesized command name (which may
     /// itself hold spaces and parentheses).
@@ -663,15 +705,18 @@ pub(crate) async fn terminate_tree(tracked: &[Tracked], grace: std::time::Durati
             }
         })
         .collect();
-    // SAFETY: signal 0 only checks for existence.
-    let alive = |target: i32| unsafe { libc::kill(target, 0) } == 0;
-    // The grace can outlast a process; a plain pid is re-verified before
-    // each signal, as it may have been reused in between.
+    // "Current" is still running, not merely present: an unreaped zombie
+    // answers signal 0 and holds its process group (SUR-260). A group
+    // counts while one table read finds a running member; a plain pid is
+    // re-verified before each signal, as it may have been reused in between.
     let current = |&(target, start): &(i32, Option<u64>)| {
         if target < 0 {
-            alive(target)
+            let group = -target;
+            proc_table::read()
+                .iter()
+                .any(|entry| entry.pgid == group && runs(entry.pid))
         } else {
-            still_same(target, start)
+            runs(target) && still_same(target, start)
         }
     };
     for target in &targets {
@@ -872,9 +917,47 @@ mod tests {
         // is orphaned, not killed.
         parent.kill().await.unwrap();
         assert_eq!(unsafe { libc::kill(shell, 0) }, 0, "orphan survives");
+        let started = std::time::Instant::now();
         terminate_tree(&tree, std::time::Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_ne!(unsafe { libc::kill(shell, 0) }, 0, "orphan ended");
+        // "Ended" is not `kill(pid, 0)`: on a host whose init does not reap
+        // (this box's PID 1 leaves ten zombies on an idle morning), the orphan
+        // is a corpse the kernel still answers signal 0 for. What the teardown
+        // promises is that the process no longer runs.
+        assert!(!runs(shell), "orphan still runs after the teardown");
+        // The orphan dies to the SIGTERM, so the teardown must not then sit out
+        // its whole grace waiting for a corpse: 2.01 s of a 2 s grace is the
+        // defect this pins.
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the teardown waited out its grace on a process that had already ended: {elapsed:?}"
+        );
+    }
+
+    /// A child killed but not yet reaped is a zombie, and a zombie does not
+    /// run: teardown must neither wait the grace out for it nor count it as a
+    /// surviving member of its group.
+    #[tokio::test]
+    async fn a_killed_but_unreaped_child_does_not_run() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        assert!(runs(pid), "the fixture is running");
+        // SAFETY: SIGKILL to this test's own child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runs(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!runs(pid), "a zombie is not a running process");
+        // Reap it so the fixture leaves nothing behind, then the pid is gone
+        // and still not running.
+        let _ = child.wait().await;
+        assert!(!runs(pid), "the reaped pid is not running");
     }
 
     #[test]
