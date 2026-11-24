@@ -3131,6 +3131,16 @@ impl Inner {
                 let Some(turn_text) = turn_text else {
                     return false;
                 };
+                // A textless turn earns a report only when the ending itself
+                // is the news: an error or an interruption. Decided before the
+                // claim below, so a turn that writes nothing records nothing —
+                // a later text-bearing finalization of the same run still lands.
+                let Some(text) = turn_text.text.or(match status {
+                    DoneStatus::Errored | DoneStatus::Interrupted => Some(""),
+                    _ => None,
+                }) else {
+                    return false;
+                };
                 {
                     let written = lock(&self.crew_reports);
                     if written.get(chat_id).is_some_and(|id| id == turn_text.id) {
@@ -3144,15 +3154,7 @@ impl Inner {
                 lock(&self.crew_reports).insert(chat_id.to_string(), turn_text.id.to_string());
                 let chat_id = chat_id.to_string();
                 let turn_id = turn_text.id.to_string();
-                // A textless turn earns a report only when the ending itself
-                // is the news: an error or an interruption. A completed turn
-                // with nothing to say reports what it always did — nothing.
-                let text = match turn_text.text {
-                    Some(text) => text,
-                    None if matches!(status, DoneStatus::Errored | DoneStatus::Interrupted) => "",
-                    None => return false,
-                }
-                .to_owned();
+                let text = text.to_owned();
                 let captain_id = stamp["captainId"].as_str().map(str::to_owned);
                 let inner = self.clone();
                 tokio::task::spawn_blocking(move || {
@@ -9503,6 +9505,65 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(!path.exists(), "no report is written for it");
         assert!(wakes.lock().unwrap().is_empty(), "and it wakes nobody");
+    }
+
+    /// SUR-219 r3: a textless `Completed` turn must not record a claim it never
+    /// filled. The claim exists so a *duplicate* finalization of a written turn
+    /// does not rewrite it; a turn that wrote nothing must record nothing, or a
+    /// later text-bearing finalization of the same run is turned away and no
+    /// report ever lands.
+    #[tokio::test]
+    async fn a_textless_completed_crew_turn_does_not_block_a_later_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            !sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "run-1",
+                    text: None,
+                })
+            ),
+            "the textless turn schedules nothing"
+        );
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "run-1",
+                    text: Some("late reply"),
+                })
+            ),
+            "a later text-bearing finalization of the same run must still be accepted"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("late reply"),
+            "the report lands once there is something to report: {body:?}"
+        );
     }
 
     /// SUR-87: a replayed finalization of the same crew turn queues exactly ONE
