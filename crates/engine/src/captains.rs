@@ -1661,8 +1661,8 @@ impl CaptainsRpc<'_> {
         row_gate(chat_id, self.chats.chat(chat_id), self.device_id)
     }
 
-    /// Both rows re-read under `MUTATION`, with the project rule applied to the
-    /// state being committed.
+    /// `AddCrew`'s under-lock gate: both rows re-read under `MUTATION`, with
+    /// the add-time project rule applied to the state being committed.
     fn committed_crew_rows(
         &self,
         captain_id: &str,
@@ -1780,13 +1780,17 @@ impl CaptainsRpc<'_> {
     }
 
     /// `RemoveCrew`: removing a member that isn't there is a committed
-    /// no-op; a Captain that isn't live has no crew to change.
+    /// no-op; a Captain that isn't live has no crew to change. The project
+    /// rule gates `AddCrew`, not this call — a member whose chat row moved
+    /// to another project after the add must still be releasable, so under
+    /// the lock both rows pass the row gate only.
     fn remove_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
         self.row(&params.captain_id)?;
         self.row(&params.chat_id)?;
         self.store
             .mutate(|registry| {
-                self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                self.committed_row(&params.captain_id)?;
+                self.committed_row(&params.chat_id)?;
                 let Some(captain) = registry
                     .captains()
                     .iter()
@@ -2830,6 +2834,56 @@ mod tests {
         )
         .unwrap();
         assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-y".to_string()]);
+    }
+
+    /// SUR-190: the project rule gates `AddCrew`, not `RemoveCrew`. A member
+    /// whose chat row is re-assigned to another project after the add must
+    /// still be releasable — otherwise the stale crew entry has no API that
+    /// can clear it.
+    #[test]
+    fn a_crew_member_whose_chat_moved_to_another_project_can_still_be_removed() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+        assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-x".to_string()]);
+        let commits = rig.store.commits();
+
+        // The chat row is re-assigned to another project after the add.
+        let moved = FakeChats::default()
+            .row("cap-a", Some("space-1"), None)
+            .row("chat-x", Some("space-2"), None);
+        let rpc = CaptainsRpc {
+            store: &rig.store,
+            chats: &moved,
+            device_id: DEVICE,
+            deepseek_home: &rig.home,
+        };
+        rpc.call(
+            methods::REMOVE_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("a member whose row moved projects must still be removable");
+        assert!(
+            crew(&rig.roster(), "cap-a").is_empty(),
+            "the roster drops the moved member"
+        );
+        assert_eq!(
+            rig.store.commits(),
+            commits + 1,
+            "the removal is one committed change"
+        );
     }
 
     #[test]
