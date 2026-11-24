@@ -10,6 +10,11 @@
 --   test_sur251_calls   what the actions were sent, in order
 --   test_sur251_refuse  while not "", each action fails in these words
 --
+-- The roster's fields are SUR-94's `RosterEntry` on head `c131526326`:
+-- `chatId`, `name`, `createdAt` (RFC 3339 text), `archived`, `userArchived`,
+-- `crew`, `drivePath` — and nothing else; `archivedCrew` is the registry's
+-- own marker and never reaches the page.
+--
 -- Archive moves the Captain's chat and its crew onto the Archived shelf, as
 -- the host does (SUR-94: the flag and the chats are separate writes, so the
 -- fixture writes both).
@@ -79,7 +84,9 @@ local function roster(): any
 		table.insert(out, {
 			chatId = chat,
 			name = name,
-			createdAt = 0,
+			-- (RFC 3339 text, as `RosterEntry` serialises its `created_at`:
+			-- the host sends a date, not epoch seconds.)
+			createdAt = "2026-11-24T08:00:00Z",
 			archived = false,
 			userArchived = asleep:peek()[chat] == true,
 			crew = crew,
