@@ -525,9 +525,7 @@ impl EngineCore {
         schedules.start();
         // The Captain roster is device-local engine state: cheap to open
         // (one JSON file read), with no worker of its own.
-        let captains = std::sync::Arc::new(
-            captains::CaptainsStore::open(data_dir.to_path_buf()).map_err(EngineError::Other)?,
-        );
+        let captains = std::sync::Arc::new(captains::CaptainsStore::open(data_dir.to_path_buf()));
         Ok(Self {
             sessions,
             doc_host,

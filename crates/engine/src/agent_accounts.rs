@@ -583,7 +583,7 @@ mod tests {
             deepseek_home: temp.path().join("deepseek"),
         };
         let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
-        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone());
 
         // An ordinary chat — nothing on record — runs unstamped, whether the
         // dispatch passes a chat id at all.
@@ -646,7 +646,7 @@ mod tests {
             data_dir: root.path().join("data"),
             deepseek_home: root.path().join("deepseek"),
         };
-        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone());
         store.promote("cap-a", "ada").unwrap();
 
         let env = PinRunEnvironment(AgentAccounts::new(config.clone()));
@@ -714,7 +714,7 @@ mod tests {
             data_dir: root.path().join("data"),
             deepseek_home: root.path().join("deepseek"),
         };
-        let store = crate::captains::CaptainsStore::open(config.data_dir.clone()).unwrap();
+        let store = crate::captains::CaptainsStore::open(config.data_dir.clone());
         store.promote("cap-a", "ada").unwrap();
         std::fs::create_dir_all(&config.deepseek_home).unwrap();
         // A file where the captains root must be makes every drive write fail.
