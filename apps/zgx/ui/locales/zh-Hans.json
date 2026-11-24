@@ -2733,7 +2733,15 @@
         "move_child": "子对话不能加入船员",
         "remove_crew": "移出船员",
         "move_failed": "无法将 {name} 加入 {captain} 的船员",
-        "remove_failed": "无法将 {name} 移出船员"
+        "remove_failed": "无法将 {name} 移出船员",
+        "archive": "归档队长",
+        "unarchive": "取消归档队长",
+        "delete": "删除队长",
+        "delete_title": "删除队长 {name}？它的船员会留在你的对话列表。",
+        "delete_confirm": "删除",
+        "archive_failed": "无法归档 {name}",
+        "unarchive_failed": "无法唤醒 {name}",
+        "delete_failed": "无法删除 {name}"
       },
       "project": {
         "rename_title": "重命名项目",
