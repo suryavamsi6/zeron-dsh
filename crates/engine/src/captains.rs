@@ -18,7 +18,8 @@ const FILE_NAME: &str = "captains.json";
 
 /// One chat promoted to Captain: its display name, when it was promoted,
 /// whether it has since been demoted (its record and crew list are kept as
-/// `archived`), and the chat ids of its crew.
+/// `archived`), whether the user has hidden it (`userArchived`, SUR-94), and
+/// the chat ids of its crew.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Captain {
@@ -26,7 +27,28 @@ pub struct Captain {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub archived: bool,
+    /// The user-archive flag (SUR-94): written only by archive and
+    /// unarchive — `archived` stays promote/demote's own — and either flag
+    /// set is not live. A file written before the cascade has no key and
+    /// loads as `false`.
+    #[serde(default)]
+    pub user_archived: bool,
     pub crew: Vec<String>,
+    /// The crew chats the archive itself moved (SUR-94): exactly the ids
+    /// the unarchive wakes, so a crew chat archived by hand is never the
+    /// cascade's business. Kept off the file while it is empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived_crew: Vec<String>,
+}
+
+impl Captain {
+    /// A live Captain is neither demoted (`archived`) nor hidden by the
+    /// user (`userArchived`): the two flags are written by different
+    /// actions, and a record carrying either is not live for the stamping
+    /// predicates.
+    fn live(&self) -> bool {
+        !self.archived && !self.user_archived
+    }
 }
 
 /// The whole `captains.json` file: every Captain on record, live and
@@ -95,17 +117,18 @@ impl Registry {
         &self.captains
     }
 
-    /// Whether `chat_id` is a live Captain (an archived one is not).
+    /// Whether `chat_id` is a live Captain (an archived or user-archived
+    /// one is not).
     pub fn is_captain(&self, chat_id: &str) -> bool {
         self.captains
             .iter()
-            .any(|captain| captain.chat_id == chat_id && !captain.archived)
+            .any(|captain| captain.chat_id == chat_id && captain.live())
     }
 
-    /// The Captain whose crew lists `chat_id`, if any.
+    /// The live Captain whose crew lists `chat_id`, if any.
     pub fn captain_of_crew(&self, chat_id: &str) -> Option<&Captain> {
         self.captains.iter().find(|captain| {
-            !captain.archived && captain.crew.iter().any(|id| id == chat_id)
+            captain.live() && captain.crew.iter().any(|id| id == chat_id)
         })
     }
 
@@ -155,7 +178,9 @@ impl Registry {
                 name: name.to_string(),
                 created_at: Utc::now(),
                 archived: false,
+                user_archived: false,
                 crew: Vec::new(),
+                archived_crew: Vec::new(),
             }),
         }
         Ok(())
@@ -214,14 +239,89 @@ impl Registry {
         Ok(())
     }
 
+    /// The archive's half of the cascade (SUR-94): `chat_id`'s record is
+    /// flagged `userArchived` and `archivedCrew` keeps exactly the crew ids
+    /// `live` answers — the chats the archive itself is putting to sleep,
+    /// for the unarchive to wake. `live` is the caller's read of the chat
+    /// rows, taken under the store lock on the state being committed: a
+    /// crew id with no live row is skipped, never marked, and does not
+    /// fail the call. A demoted Captain can never be hidden; a record
+    /// already `userArchived` is the retried archive — its kept marker
+    /// comes back with `false` so the caller's chat writes re-run while
+    /// nothing here commits. The pair is (the ids the caller archives,
+    /// whether the registry changed); the marker is set, never appended.
+    pub fn archive(
+        &mut self,
+        chat_id: &str,
+        live: impl Fn(&str) -> bool,
+    ) -> Result<(Vec<String>, bool), String> {
+        let Some(captain) = self
+            .captains
+            .iter_mut()
+            .find(|captain| captain.chat_id == chat_id)
+        else {
+            return Err(format!("{chat_id} is not a Captain on this device"));
+        };
+        if captain.archived {
+            return Err(format!("a demoted Captain can never be hidden: {chat_id}"));
+        }
+        if captain.user_archived {
+            return Ok((captain.archived_crew.clone(), false));
+        }
+        let moved: Vec<String> = captain
+            .crew
+            .iter()
+            .filter(|chat_id| live(chat_id))
+            .cloned()
+            .collect();
+        captain.user_archived = true;
+        captain.archived_crew = moved.clone();
+        Ok((moved, true))
+    }
+
+    /// The unarchive's half: `userArchived` clears and the spent
+    /// `archivedCrew` marker is handed back — the chats the archive moved,
+    /// for the caller to wake. A record that is not hidden and has no
+    /// marker is `Ok((Vec::new(), false))`: nothing to spend, no commit.
+    /// The pair is (the ids the caller wakes, whether the registry changed).
+    pub fn unarchive(&mut self, chat_id: &str) -> Result<(Vec<String>, bool), String> {
+        let Some(captain) = self
+            .captains
+            .iter_mut()
+            .find(|captain| captain.chat_id == chat_id)
+        else {
+            return Err(format!("{chat_id} is not a Captain on this device"));
+        };
+        if !captain.user_archived && captain.archived_crew.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        captain.user_archived = false;
+        Ok((std::mem::take(&mut captain.archived_crew), true))
+    }
+
+    /// Drop `chat_id`'s record entirely. The chats it names keep their
+    /// rows and the Drive folder stays — the record is the registry's only
+    /// reach.
+    pub fn delete(&mut self, chat_id: &str) -> Result<(), String> {
+        let Some(position) = self
+            .captains
+            .iter()
+            .position(|captain| captain.chat_id == chat_id)
+        else {
+            return Err(format!("{chat_id} is not a Captain on this device"));
+        };
+        self.captains.remove(position);
+        Ok(())
+    }
+
     /// The role `chat_id` plays in a run: a live Captain, crew of one, or
-    /// nothing. An archived Captain and every member of its crew are
-    /// `RunRole::None`.
+    /// nothing. A Captain archived either way — demoted or hidden — and
+    /// every member of its crew are `RunRole::None`.
     pub fn run_role(&self, chat_id: &str) -> RunRole {
         if let Some(captain) = self
             .captains
             .iter()
-            .find(|captain| captain.chat_id == chat_id && !captain.archived)
+            .find(|captain| captain.chat_id == chat_id && captain.live())
         {
             return RunRole::Captain {
                 name: captain.name.clone(),
@@ -1248,9 +1348,47 @@ impl CaptainsStore {
             registry.remove_crew(captain_id, chat_id).map(|()| true)
         })
     }
+
+    /// Hide `chat_id`'s Captain without demoting it (see
+    /// `Registry::archive`). `live` decides — under `MUTATION`, on the
+    /// state being committed — which crew chats the archive can move; the
+    /// marker's ids come back for the caller to archive. A retried archive
+    /// returns the kept marker again and commits nothing.
+    pub fn archive(
+        &self,
+        chat_id: &str,
+        live: impl Fn(&str) -> bool,
+    ) -> Result<Vec<String>, String> {
+        let mut moved = Vec::new();
+        self.mutate(|registry| {
+            let (ids, changed) = registry.archive(chat_id, &live)?;
+            moved = ids;
+            Ok(changed)
+        })?;
+        Ok(moved)
+    }
+
+    /// Wake a hidden Captain (see `Registry::unarchive`): the spent
+    /// marker's ids come back for the caller to unarchive. A Captain that
+    /// is not hidden and has no marker wakes nothing and commits nothing.
+    pub fn unarchive(&self, chat_id: &str) -> Result<Vec<String>, String> {
+        let mut woke = Vec::new();
+        self.mutate(|registry| {
+            let (ids, changed) = registry.unarchive(chat_id)?;
+            woke = ids;
+            Ok(changed)
+        })?;
+        Ok(woke)
+    }
+
+    /// Drop `chat_id`'s record (see `Registry::delete`): the chats and the
+    /// Drive folder are the caller's to keep.
+    pub fn delete(&self, chat_id: &str) -> Result<(), String> {
+        self.mutate(|registry| registry.delete(chat_id).map(|()| true))
+    }
 }
 
-// ── the five Captain RPC methods ────────────────────────────────────────────
+// ── the Captain RPC methods ─────────────────────────────────────────────
 
 /// Whether this RPC serves `method`.
 pub fn handles(method: &str) -> bool {
@@ -1261,6 +1399,9 @@ pub fn handles(method: &str) -> bool {
             | methods::DEMOTE_CAPTAIN
             | methods::ADD_CREW
             | methods::REMOVE_CREW
+            | methods::ARCHIVE_CAPTAIN
+            | methods::UNARCHIVE_CAPTAIN
+            | methods::DELETE_CAPTAIN
     )
 }
 
@@ -1272,11 +1413,17 @@ pub struct ChatRow {
     pub device_id: String,
     /// The chat's live turn, from the sessions engine.
     pub turn_in_flight: bool,
+    /// The person's own archival of the chat, which the cascade must
+    /// never overturn.
+    pub archived: bool,
 }
 
 /// The host's chat rows, as the roster rules read them.
 pub trait Chats {
     fn chat(&self, chat_id: &str) -> Option<ChatRow>;
+    /// The cascade's reach into the workspace (SUR-94): archive or
+    /// unarchive a chat's row, with the workspace's error as text.
+    fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<(), String>;
 }
 
 /// The row gate every roster change passes first: the chat exists, lives
@@ -1327,11 +1474,12 @@ struct RosterEntry {
     name: String,
     created_at: DateTime<Utc>,
     archived: bool,
+    user_archived: bool,
     crew: Vec<String>,
     drive_path: String,
 }
 
-/// The five Captain methods, over the store and the host's chat rows.
+/// The Captain methods, over the store and the host's chat rows.
 pub struct CaptainsRpc<'a> {
     pub store: &'a CaptainsStore,
     pub chats: &'a dyn Chats,
@@ -1342,7 +1490,7 @@ pub struct CaptainsRpc<'a> {
 }
 
 impl CaptainsRpc<'_> {
-    /// Answer one of the five methods. Every successful reply is the same
+    /// Answer one of the methods. Every successful reply is the same
     /// roster projection, mutator or not.
     pub fn call(&self, method: &str, params: &Value) -> Result<Value, RpcError> {
         // `captains.json` is device-local engine state: only this device's
@@ -1371,6 +1519,18 @@ impl CaptainsRpc<'_> {
                 let params: CrewParams = zeron_rpc::parse_params(params.clone())?;
                 self.remove_crew(&params)
             }
+            methods::ARCHIVE_CAPTAIN => {
+                let params: DemoteParams = zeron_rpc::parse_params(params.clone())?;
+                self.archive(&params)
+            }
+            methods::UNARCHIVE_CAPTAIN => {
+                let params: DemoteParams = zeron_rpc::parse_params(params.clone())?;
+                self.unarchive(&params)
+            }
+            methods::DELETE_CAPTAIN => {
+                let params: DemoteParams = zeron_rpc::parse_params(params.clone())?;
+                self.delete(&params)
+            }
             other => Err(RpcError::UnknownMethod(other.into())),
         }
     }
@@ -1390,6 +1550,7 @@ impl CaptainsRpc<'_> {
                 name: captain.name.clone(),
                 created_at: captain.created_at,
                 archived: captain.archived,
+                user_archived: captain.user_archived,
                 crew: captain.crew.clone(),
                 drive_path: drive_dir(self.deepseek_home, &captain.chat_id)
                     .to_string_lossy()
@@ -1572,6 +1733,53 @@ impl CaptainsRpc<'_> {
             .map_err(RpcError::BadParams)?;
         Ok(self.roster())
     }
+
+    /// `ArchiveCaptain` (SUR-94): the registry flag and the marker commit
+    /// first — `live`, read under the store lock, names the crew chats the
+    /// workspace can still archive — then each named chat is archived. A
+    /// retry after a partial failure finds `userArchived` already set and
+    /// moves nothing twice; a demoted Captain is refused, never hidden.
+    /// These manage the record, not the row: no row gate stands in front.
+    fn archive(&self, params: &DemoteParams) -> Result<Value, RpcError> {
+        let moved = self
+            .store
+            .archive(&params.chat_id, |chat_id| {
+                self.chats.chat(chat_id).is_some_and(|row| !row.archived)
+            })
+            .map_err(RpcError::BadParams)?;
+        for chat_id in &moved {
+            self.chats
+                .set_chat_archived(chat_id, true)
+                .map_err(RpcError::Failed)?;
+        }
+        Ok(self.roster())
+    }
+
+    /// `UnarchiveCaptain`: the flag clears and the marker is spent in one
+    /// commit, then exactly the chats the archive moved are woken. A
+    /// Captain that is not hidden has no marker to spend: the call commits
+    /// nothing.
+    fn unarchive(&self, params: &DemoteParams) -> Result<Value, RpcError> {
+        let woke = self
+            .store
+            .unarchive(&params.chat_id)
+            .map_err(RpcError::BadParams)?;
+        for chat_id in &woke {
+            self.chats
+                .set_chat_archived(chat_id, false)
+                .map_err(RpcError::Failed)?;
+        }
+        Ok(self.roster())
+    }
+
+    /// `DeleteCaptain`: the record alone drops — the chats it names keep
+    /// their rows and the Drive folder is the caller's to keep.
+    fn delete(&self, params: &DemoteParams) -> Result<Value, RpcError> {
+        self.store
+            .delete(&params.chat_id)
+            .map_err(RpcError::BadParams)?;
+        Ok(self.roster())
+    }
 }
 
 #[cfg(test)]
@@ -1655,6 +1863,8 @@ mod test_seam {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
     use std::sync::Arc;
 
     #[test]
@@ -2211,34 +2421,51 @@ mod tests {
     /// This engine's own device, as the RPC sees it.
     const DEVICE: &str = "device-1";
 
-    /// The host's chat rows the rule checks read, as a plain map.
+    /// The host's chat rows the rule checks read, as a plain map — plus the
+    /// cascade's own writes, recorded in order so a test can assert the exact
+    /// ids a Captain archive moved (SUR-94: "the crew goes to sleep" is the
+    /// ticket's headline, so an unobserved no-op write would pass a test that
+    /// only looked at the registry). `refuse` makes the next N writes fail:
+    /// the partial-failure seam a retry has to survive.
     #[derive(Default)]
-    struct FakeChats(HashMap<String, ChatRow>);
+    struct FakeChats {
+        rows: HashMap<String, ChatRow>,
+        writes: Rc<RefCell<Vec<(String, bool)>>>,
+        refuse: Rc<Cell<usize>>,
+    }
 
     impl FakeChats {
         fn row(mut self, chat_id: &str, space: Option<&str>, parent: Option<&str>) -> Self {
-            self.0.insert(
+            self.rows.insert(
                 chat_id.to_string(),
                 ChatRow {
                     space_id: space.map(str::to_string),
                     parent_chat_id: parent.map(str::to_string),
                     device_id: DEVICE.to_string(),
                     turn_in_flight: false,
+                    archived: false,
                 },
             );
             self
         }
 
         fn other_device(mut self, chat_id: &str) -> Self {
-            if let Some(row) = self.0.get_mut(chat_id) {
+            if let Some(row) = self.rows.get_mut(chat_id) {
                 row.device_id = "device-2".to_string();
             }
             self
         }
 
         fn busy(mut self, chat_id: &str) -> Self {
-            if let Some(row) = self.0.get_mut(chat_id) {
+            if let Some(row) = self.rows.get_mut(chat_id) {
                 row.turn_in_flight = true;
+            }
+            self
+        }
+
+        fn archived(mut self, chat_id: &str) -> Self {
+            if let Some(row) = self.rows.get_mut(chat_id) {
+                row.archived = true;
             }
             self
         }
@@ -2246,7 +2473,19 @@ mod tests {
 
     impl Chats for FakeChats {
         fn chat(&self, chat_id: &str) -> Option<ChatRow> {
-            self.0.get(chat_id).cloned()
+            self.rows.get(chat_id).cloned()
+        }
+
+        fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<(), String> {
+            self.writes
+                .borrow_mut()
+                .push((chat_id.to_string(), archived));
+            let left = self.refuse.get();
+            if left > 0 {
+                self.refuse.set(left - 1);
+                return Err(format!("the workspace refused to write {chat_id}"));
+            }
+            Ok(())
         }
     }
 
@@ -2525,7 +2764,12 @@ mod tests {
                 parent_chat_id: None,
                 device_id: DEVICE.to_string(),
                 turn_in_flight: false,
+                archived: false,
             })
+        }
+
+        fn set_chat_archived(&self, _chat_id: &str, _archived: bool) -> Result<(), String> {
+            Ok(())
         }
     }
 
@@ -2836,21 +3080,27 @@ mod tests {
                     name: "Ada".to_string(),
                     created_at: at,
                     archived: false,
+                    user_archived: false,
                     crew: vec!["crew-x".to_string()],
+                    archived_crew: Vec::new(),
                 },
                 Captain {
                     chat_id: "cap-name".to_string(),
                     name: "x".repeat(81),
                     created_at: at,
                     archived: false,
+                    user_archived: false,
                     crew: Vec::new(),
+                    archived_crew: Vec::new(),
                 },
                 Captain {
                     chat_id: "cap-ok".to_string(),
                     name: "Grace".to_string(),
                     created_at: at,
                     archived: false,
+                    user_archived: false,
                     crew: Vec::new(),
+                    archived_crew: Vec::new(),
                 },
             ],
         }
@@ -2976,7 +3226,9 @@ mod tests {
                 name: "Grace".to_string(),
                 created_at: at,
                 archived: false,
+                user_archived: false,
                 crew: vec!["bad/id".to_string()],
+                archived_crew: Vec::new(),
             }],
         };
         assert!(
@@ -3016,6 +3268,10 @@ mod tests {
             fn chat(&self, _chat_id: &str) -> Option<ChatRow> {
                 self.0.clone()
             }
+
+            fn set_chat_archived(&self, _chat_id: &str, _archived: bool) -> Result<(), String> {
+                Ok(())
+            }
         }
 
         /// Answers the pre-check with a good row and the under-lock re-read with
@@ -3029,11 +3285,16 @@ mod tests {
                 if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
                     Some(ChatRow {
                         device_id: DEVICE.to_string(),
+                        archived: false,
                         ..ChatRow::default()
                     })
                 } else {
                     self.after.clone()
                 }
+            }
+
+            fn set_chat_archived(&self, _chat_id: &str, _archived: bool) -> Result<(), String> {
+                Ok(())
             }
         }
 
@@ -3063,6 +3324,7 @@ mod tests {
                 "cap-a belongs to another device",
                 Some(ChatRow {
                     device_id: "device-2".to_string(),
+                    archived: false,
                     ..ChatRow::default()
                 }),
             ),
@@ -3071,6 +3333,7 @@ mod tests {
                 Some(ChatRow {
                     device_id: DEVICE.to_string(),
                     turn_in_flight: true,
+                    archived: false,
                     ..ChatRow::default()
                 }),
             ),
@@ -3320,7 +3583,9 @@ mod tests {
         let rig = Rig::new(
             FakeChats::default()
                 .row("cap-a", Some("space-1"), None)
-                .row("chat-b", Some("space-1"), None),
+                .row("chat-b", Some("space-1"), None)
+                .row("chat-c", Some("space-1"), None)
+                .archived("chat-c"),
         );
         rig.call(
             methods::PROMOTE_CAPTAIN,
@@ -3332,10 +3597,12 @@ mod tests {
             json!({"captainId": "cap-a", "chatId": "chat-b"}),
         )
         .unwrap();
-        // chat-c crews on record but is not live — the fixture's stand-in
-        // for a chat already archived by hand (the row gate would refuse
-        // AddCrew for it, so it joins straight on the registry). A live crew
-        // chat beside a not-live one is the pair the marker must split.
+        // chat-c crews on record with a row already archived by hand —
+        // live, but the flag is the person's own, which the cascade's
+        // live check must leave alone (it joins straight on the registry,
+        // as crewing it through the RPC is not the fixture's business).
+        // A live crew chat beside a hand-archived one is the pair the
+        // marker must split.
         rig.store.add_crew("cap-a", "chat-c").unwrap();
 
         let answer = rig
@@ -3626,6 +3893,176 @@ mod tests {
         assert!(
             captains_env(&registry, home, "chat-b").is_none(),
             "nor for its crew"
+        );
+    }
+    /// The cascade's whole point — the crew goes to sleep — is a write to the
+    /// chat rows, and this fake records every one in order. Exactly the live
+    /// crew chat is archived: a chat the person had already archived by hand
+    /// is not the cascade's to move, and the Captain's own row is never one of
+    /// them. Unarchive wakes exactly the id the marker kept.
+    #[test]
+    fn the_archive_writes_the_live_crew_chats_and_the_unarchive_wakes_only_them() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None)
+                .row("chat-c", Some("space-1"), None)
+                .archived("chat-c"),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        // chat-c crews on record but was archived by hand on another device, so
+        // the roster rule never let it in through AddCrew — it joins straight on
+        // the registry, the way a pre-existing crew member survives one.
+        rig.store.add_crew("cap-a", "chat-c").unwrap();
+
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        assert_eq!(
+            *rig.chats.writes.borrow(),
+            vec![("chat-b".to_string(), true)],
+            "the live crew chat is archived, the hand-archived one is not, and the Captain never is"
+        );
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        assert_eq!(
+            entry(&saved, "cap-a").unwrap()["archivedCrew"],
+            json!(["chat-b"]),
+            "the marker names exactly the ids the write moved"
+        );
+
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        assert_eq!(
+            *rig.chats.writes.borrow(),
+            vec![
+                ("chat-b".to_string(), true),
+                ("chat-b".to_string(), false),
+            ],
+            "unarchive wakes the id the marker kept, in that order"
+        );
+        assert!(
+            rig.chats
+                .rows
+                .get("chat-c")
+                .is_some_and(|row| row.archived),
+            "a chat archived by hand is still archived after the Captain wakes"
+        );
+    }
+
+    /// A chat write that fails must not strand half a crew: the marker and the
+    /// flag are committed first, so the retry finishes the cascade instead of
+    /// finding nothing to do.
+    #[test]
+    fn a_partly_failed_archive_finishes_on_retry() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+
+        rig.chats.refuse.set(1);
+        match rig.call("ArchiveCaptain", json!({"chatId": "cap-a"})) {
+            Err(RpcError::Failed(_)) => {}
+            other => panic!("a refused chat write must surface as a failure, got {other:?}"),
+        }
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(record["userArchived"], true, "the flag landed before the write");
+        assert_eq!(
+            record["archivedCrew"],
+            json!(["chat-b"]),
+            "and so did the marker, which is what makes the retry possible"
+        );
+
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("the retry is answered");
+        assert_eq!(
+            rig.chats.writes.borrow().last(),
+            Some(&("chat-b".to_string(), true)),
+            "the retry re-applies the marker's id: {:?}",
+            rig.chats.writes.borrow()
+        );
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        assert_eq!(
+            entry(&saved, "cap-a").unwrap()["archivedCrew"],
+            json!(["chat-b"]),
+            "and grows no second marker"
+        );
+    }
+
+    /// The other direction has the same rule: the marker is spent only after
+    /// the chats it names are actually awake, so a failed write leaves the
+    /// record still hidden and still carrying the ids a retry needs. Spending
+    /// the marker first would lose them silently and leave the crew asleep.
+    #[test]
+    fn a_partly_failed_unarchive_finishes_on_retry() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain");
+
+        rig.chats.refuse.set(1);
+        match rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"})) {
+            Err(RpcError::Failed(_)) => {}
+            other => panic!("a refused chat write must surface as a failure, got {other:?}"),
+        }
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(
+            record["userArchived"], true,
+            "a failed wake leaves the Captain hidden, not half-awake"
+        );
+        assert_eq!(
+            record["archivedCrew"],
+            json!(["chat-b"]),
+            "and the marker survives, so the retry knows what to wake"
+        );
+
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("the retry is answered");
+        assert_eq!(
+            rig.chats.writes.borrow().last(),
+            Some(&("chat-b".to_string(), false)),
+            "the retry wakes the marker's id: {:?}",
+            rig.chats.writes.borrow()
+        );
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(record["userArchived"], false, "and the Captain is live again");
+        assert!(
+            record.get("archivedCrew").is_none(),
+            "with the marker spent once the wake actually landed"
         );
     }
 }

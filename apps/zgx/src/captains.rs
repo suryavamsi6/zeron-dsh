@@ -1,11 +1,13 @@
-//! The Captains pages' host actions: the device-local roster, the four calls
+//! The Captains pages' host actions: the device-local roster, the calls
 //! that change it, and the reads of a Captain's Drive — the Digest tab's
 //! summary, and the Drive tab's listing and a file's text.
 //!
 //! `ui.call` is a host action, not an engine RPC — asking it for `Captains`
 //! answers "no host action named 'Captains'" — so each of these is one action
 //! over one RPC method (`crates/rpc/src/lib.rs`: `Captains`, `PromoteCaptain`,
-//! `DemoteCaptain`, `AddCrew`, `RemoveCrew`), under the name the page calls.
+//! `DemoteCaptain`, `AddCrew`, `RemoveCrew`; SUR-94's cascade adds
+//! `ArchiveCaptain`, `UnarchiveCaptain`, `DeleteCaptain` from
+//! `crates/engine/src/captains.rs`), under the name the page calls.
 //! The roster is the engine's (`crates/engine/src/captains.rs`), device-local:
 //! nothing here reads or writes `captains.json`, and no action invents a
 //! second route to it.
@@ -15,9 +17,10 @@
 //! roster's `drivePath` is the only path they read.
 //!
 //! Field names are the engine's, unchanged: promoting takes `{chatId, name}`,
-//! demoting `{chatId}`, and the crew calls `{captainId, chatId}`. An error the
-//! engine answers — a busy chat, a crew member that cannot be promoted, a
-//! refusal because the roster is another device's — reaches the page as the
+//! demoting and each cascade call take `{chatId}`, and the crew calls
+//! `{captainId, chatId}`. An error the engine answers — a busy chat, a crew
+//! member that cannot be promoted, a demoted Captain that cannot be hidden,
+//! a refusal because the roster is another device's — reaches the page as the
 //! host's error, with the engine's own words in `err.message`.
 
 use serde_json::{Value as Json, json};
@@ -34,9 +37,10 @@ pub fn install(host: &ScriptHost) {
     });
 }
 
-/// The five over `call` — the same seam [`crate::providers::install_mcp`]
-/// takes, so a test can drive them against an engine on memory IPC instead of
-/// the process-wide one, and can record which method each action dispatches.
+/// The roster calls over `call` — the same seam
+/// [`crate::providers::install_mcp`] takes, so a test can drive them against
+/// an engine on memory IPC instead of the process-wide one, and can record
+/// which method each action dispatches.
 pub fn install_over<F>(host: &ScriptHost, call: F)
 where
     F: Fn(&'static str, Json) -> McpCall + Clone + 'static,
@@ -92,6 +96,33 @@ where
             async move {
                 answer(call("RemoveCrew", json!({ "captainId": captain_id, "chatId": chat_id })).await)
             }
+        }
+    });
+    // The archive cascade's three (SUR-94): `{ chatId }` -> the roster, the
+    // same thin forwards — an engine refusal (a demoted Captain cannot be
+    // hidden) reaches the page as the host's error.
+    host.async_action("CaptainArchive", {
+        let call = call.clone();
+        move |args| {
+            let call = call.clone();
+            let chat_id = args.field("chatId").map(text).unwrap_or_default();
+            async move { answer(call("ArchiveCaptain", json!({ "chatId": chat_id })).await) }
+        }
+    });
+    host.async_action("CaptainUnarchive", {
+        let call = call.clone();
+        move |args| {
+            let call = call.clone();
+            let chat_id = args.field("chatId").map(text).unwrap_or_default();
+            async move { answer(call("UnarchiveCaptain", json!({ "chatId": chat_id })).await) }
+        }
+    });
+    host.async_action("CaptainDelete", {
+        let call = call.clone();
+        move |args| {
+            let call = call.clone();
+            let chat_id = args.field("chatId").map(text).unwrap_or_default();
+            async move { answer(call("DeleteCaptain", json!({ "chatId": chat_id })).await) }
         }
     });
     // A Captain's Drive, for the Digest and Drive tabs: `{ chatId }` ->
