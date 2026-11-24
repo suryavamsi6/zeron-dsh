@@ -3005,6 +3005,86 @@ mod tests {
         assert!(captain.crew.is_empty(), "the roster kept the move out: {:?}", captain.crew);
     }
 
+    /// The row that answers the operation's reads and is gone immediately
+    /// after: a delete landing between the under-lock re-read and the save,
+    /// the window the chat store's own lock cannot close because it takes no
+    /// part in `MUTATION`. The member answers the two reads a successful add
+    /// makes (its pre-check and the under-lock pair), then reports gone.
+    struct VanishingChat {
+        member: String,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Chats for VanishingChat {
+        fn chat(&self, chat_id: &str) -> Option<ChatRow> {
+            if chat_id == self.member {
+                let seen = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen >= 2 {
+                    return None;
+                }
+            }
+            Some(ChatRow {
+                space_id: Some("space-1".to_string()),
+                parent_chat_id: None,
+                device_id: DEVICE.to_string(),
+                turn_in_flight: false,
+                archived: false,
+            })
+        }
+
+        fn set_chat_archived(&self, _chat_id: &str, _archived: bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// SUR-189: a delete that lands after the under-lock row re-read leaves a
+    /// committed record for a chat that no longer exists — the `committed_row`
+    /// doc's residual, and the roster keeps it until it is repaired. The
+    /// repair path is `RemoveCrew`: a member row that is gone is the dangling
+    /// record this call exists to clear, not a bad argument.
+    #[test]
+    fn a_crew_entry_left_by_a_delete_in_the_commit_window_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
+        store.promote("cap-a", "Ada").unwrap();
+        let chats = VanishingChat {
+            member: "chat-x".to_string(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+
+        rpc.call(
+            methods::ADD_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("the add sees the row: the delete lands after its under-lock re-read");
+        let roster = rpc.call(methods::CAPTAINS, &json!({})).unwrap();
+        assert_eq!(
+            crew(&roster, "cap-a"),
+            vec!["chat-x".to_string()],
+            "the committed record survives the delete: the documented residual"
+        );
+
+        rpc.call(
+            methods::REMOVE_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("a dangling crew entry is repairable without its row");
+        let roster = rpc.call(methods::CAPTAINS, &json!({})).unwrap();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "the roster drops the repaired entry: {:?}",
+            crew(&roster, "cap-a")
+        );
+    }
+
     #[test]
     fn a_busy_chat_is_refused_before_the_registry_is_written() {
         let rig = Rig::new(
