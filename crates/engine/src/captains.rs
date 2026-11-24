@@ -279,11 +279,28 @@ impl Registry {
         Ok((moved, true))
     }
 
-    /// The unarchive's half: `userArchived` clears and the spent
-    /// `archivedCrew` marker is handed back — the chats the archive moved,
-    /// for the caller to wake. A record that is not hidden and has no
-    /// marker is `Ok((Vec::new(), false))`: nothing to spend, no commit.
-    /// The pair is (the ids the caller wakes, whether the registry changed).
+    /// The unarchive's read half: the ids a wake would move — `archivedCrew`
+    /// while the record is `userArchived`, and again when it is not but the
+    /// marker was never spent (a retry finishing a half-done wake). Empty
+    /// when there is nothing to spend. A read only: nothing commits, and the
+    /// same ids come back until `unarchive` takes the marker.
+    pub fn unarchive_pending(&self, chat_id: &str) -> Result<Vec<String>, String> {
+        let Some(captain) = self
+            .captains
+            .iter()
+            .find(|captain| captain.chat_id == chat_id)
+        else {
+            return Err(format!("{chat_id} is not a Captain on this device"));
+        };
+        Ok(captain.archived_crew.clone())
+    }
+
+    /// The unarchive's finish step: `userArchived` clears and the spent
+    /// `archivedCrew` marker is handed back — the chats the caller already
+    /// woke off `unarchive_pending`'s read. A record that is not hidden and
+    /// has no marker is `Ok((Vec::new(), false))`: nothing to spend, no
+    /// commit. The pair is (the ids the caller woke, whether the registry
+    /// changed).
     pub fn unarchive(&mut self, chat_id: &str) -> Result<(Vec<String>, bool), String> {
         let Some(captain) = self
             .captains
@@ -1368,9 +1385,17 @@ impl CaptainsStore {
         Ok(moved)
     }
 
-    /// Wake a hidden Captain (see `Registry::unarchive`): the spent
-    /// marker's ids come back for the caller to unarchive. A Captain that
-    /// is not hidden and has no marker wakes nothing and commits nothing.
+    /// The ids an `UnarchiveCaptain` would wake (see
+    /// `Registry::unarchive_pending`): read off the last committed
+    /// snapshot — a read, so `MUTATION` is never taken for it.
+    pub fn unarchive_pending(&self, chat_id: &str) -> Result<Vec<String>, String> {
+        self.snapshot().unarchive_pending(chat_id)
+    }
+
+    /// Spend a hidden Captain's marker (see `Registry::unarchive`): the
+    /// finish step the caller runs only after the wake writes land — the
+    /// flag clears and the marker's ids come back. A Captain that is not
+    /// hidden and has no marker spends nothing and commits nothing.
     pub fn unarchive(&self, chat_id: &str) -> Result<Vec<String>, String> {
         let mut woke = Vec::new();
         self.mutate(|registry| {
@@ -1755,20 +1780,26 @@ impl CaptainsRpc<'_> {
         Ok(self.roster())
     }
 
-    /// `UnarchiveCaptain`: the flag clears and the marker is spent in one
-    /// commit, then exactly the chats the archive moved are woken. A
-    /// Captain that is not hidden has no marker to spend: the call commits
-    /// nothing.
+    /// `UnarchiveCaptain`: the marker is spent only after the writes land —
+    /// `unarchive_pending` names the crew chats without committing (a
+    /// refused write leaves the flag and the marker for a retry to find),
+    /// each is woken, and only then does the commit clear the flag and take
+    /// the marker. A Captain that is not hidden has nothing pending and
+    /// commits nothing.
     fn unarchive(&self, params: &DemoteParams) -> Result<Value, RpcError> {
-        let woke = self
+        let pending = self
             .store
-            .unarchive(&params.chat_id)
+            .unarchive_pending(&params.chat_id)
             .map_err(RpcError::BadParams)?;
-        for chat_id in &woke {
+        for chat_id in &pending {
             self.chats
                 .set_chat_archived(chat_id, false)
                 .map_err(RpcError::Failed)?;
         }
+        let _ = self
+            .store
+            .unarchive(&params.chat_id)
+            .map_err(RpcError::BadParams)?;
         Ok(self.roster())
     }
 
@@ -3661,6 +3692,57 @@ mod tests {
             snapshot.captain_of_crew("chat-c").unwrap().chat_id,
             "cap-a",
             "chat-c's membership never left; its hand-set flag stays untouched"
+        );
+    }
+
+    /// A crew id with no row at all is not the cascade's business either: it
+    /// is skipped, never written into the marker, and neither archive nor
+    /// unarchive touches it. The row that does exist beside it is the moved
+    /// one, so the marker is `["chat-b"]` and nobody else.
+    #[test]
+    fn captain_archive_skips_a_crew_id_with_no_row_and_never_marks_it() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        // A crew id the host has no row for — the fixture stands in for a
+        // row that is gone entirely, which the cascade can neither archive
+        // nor later wake.
+        rig.store.add_crew("cap-a", "chat-gone").unwrap();
+
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(
+            record["archivedCrew"],
+            json!(["chat-b"]),
+            "only the row that exists is marked: chat-gone is skipped"
+        );
+
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert!(
+            record.get("archivedCrew").is_none(),
+            "the marker spends whole; chat-gone was never in it"
+        );
+        assert_eq!(
+            record["crew"],
+            json!(["chat-b", "chat-gone"]),
+            "and the membership is untouched: skipping a row is not removing it"
         );
     }
 
