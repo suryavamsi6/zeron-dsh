@@ -4,21 +4,23 @@ import { delimiter, join } from 'node:path';
 import { captainPrompt } from './src/prompts.js';
 import { crewRules } from './src/crew.js';
 import { driveToolSpecs } from './src/tools.js';
+import { captainDigestProvider } from './src/skill.js';
 import { normalizeConfig } from './src/config.js';
 
 export { normalizeConfig } from './src/config.js';
 
 export const name = 'zeron-captains';
-export const inject = ['systemPrompt', 'tools', 'agents'];
+export const inject = ['systemPrompt', 'tools', 'agents', 'skills'];
 
-// The dsh-tools peer is the loading runtime's to supply: a properly installed
-// bundle resolves it under its own layout, and a linked checkout (`dsh plugin
-// add <dir>`) leaves it to the runtime resolution, which routes it to the
-// loading installation — outside a live runtime, the dsh package on PATH.
-// The bundle still has to load where no copy is reachable: an inert row must
-// not take the chat down with it.
-function peerTools() {
+// The dsh peers are the loading runtime's to supply: a properly installed
+// bundle resolves them under its own layout, and a linked checkout (`dsh
+// plugin add <dir>`) leaves them to the runtime resolution, which routes them
+// to the loading installation — outside a live runtime, the dsh package on
+// PATH. The bundle still has to load where no copy is reachable: an inert row
+// must not take the chat down with it.
+function peerModule(specifier, onMissing) {
   const anchors = [import.meta.url];
+  if (typeof process.argv[1] === 'string' && process.argv[1] !== '') anchors.push(process.argv[1]);
   for (const dir of (process.env.PATH ?? '').split(delimiter)) {
     for (const exe of ['dsh', 'dsh.exe', 'dsh.cmd']) {
       try { anchors.push(realpathSync(join(dir, exe))); } catch { /* no dsh on this PATH entry */ }
@@ -28,13 +30,20 @@ function peerTools() {
   let missing;
   for (const anchor of anchors) {
     try {
-      return createRequire(anchor)('@deepseek-ai/dsh-tools');
+      return createRequire(anchor)(specifier);
     } catch (error) {
       if (error?.code !== 'MODULE_NOT_FOUND' && error?.code !== 'ERR_REQUIRE_ESM') throw error;
       missing ??= error;
     }
   }
-  return { defineTool: () => { throw missing; } };
+  onMissing?.(missing);
+  return undefined;
+}
+
+function peerTools() {
+  let missing;
+  const tools = peerModule('@deepseek-ai/dsh-tools', error => { missing = error; });
+  return tools ?? { defineTool: () => { throw missing; } };
 }
 
 const defineTool = spec => peerTools().defineTool(spec);
@@ -177,6 +186,30 @@ export function apply(ctx, config) {
       interpolate: false,
     }));
     for (const spec of driveToolSpecs(cfg)) scope.tools.register(defineTool(spec));
+    // SUR-102: the digest skill belongs to this agent's own layer, never the
+    // process-wide one — a provider on the plugin ctx would list for every
+    // chat. The effect ties the provider to the agent's teardown either way.
+    scope.effect(() => {
+      let skills;
+      try {
+        skills = scope.skills;
+      } catch {
+        // Cordis refuses the read on a scope that never declared skills:
+        // register through a scope minted under this row's context instead —
+        // it inherits the plugin's injected skills service and is tagged with
+        // the agent key the catalog reads each row's layer by. No reachable
+        // dsh-scope peer leaves the row inert rather than throwing.
+        const dshScope = peerModule('@deepseek-ai/dsh-scope');
+        if (dshScope === undefined) return;
+        const scoped = dshScope.createScope(ctx, agent);
+        const unregister = scoped.ctx.skills.registerProvider(() => captainDigestProvider());
+        return () => {
+          unregister();
+          return scoped.dispose();
+        };
+      }
+      return skills?.registerProvider?.(() => captainDigestProvider());
+    });
   };
   ctx.on('agent/created', ({ agent }) => register(agent));
   // A root created before this fiber settled never reached the listener above.

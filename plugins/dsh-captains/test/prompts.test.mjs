@@ -82,7 +82,9 @@ test('only a captain registers one role section, under the persona suffix', () =
   assert.equal(typeof section.text, 'function');
   assert.equal(section.text(), captainPrompt(helm, helm.driveRoot));
   assert.deepEqual(orders, ['DEPLOYMENT_PERSONA_SUFFIX']);
-  assert.deepEqual(inject, ['systemPrompt', 'tools', 'agents']);
+  // SUR-102: the Captain row also injects the skills service — the
+  // captain-digest provider registers through it.
+  assert.deepEqual(inject, ['systemPrompt', 'tools', 'agents', 'skills']);
 });
 
 test('the inert role registers nothing', () => {

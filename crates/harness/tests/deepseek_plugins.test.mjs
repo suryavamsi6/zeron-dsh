@@ -863,3 +863,64 @@ test('a restarted runtime sends one current crew-rules block for the resumed ses
     assert.ok(!body.includes('RULE-ALPHA'), 'the resumed turn still carries the retired rule');
   }
 });
+
+// SUR-102: the Captain row registers a runtime skill provider, so the proof
+// is again the serialized model input: the Helm request has to list
+// captain-digest in its skill catalog while crew and ordinary rows list none.
+test('the Helm runtime resolves captain-digest and the other rows do not', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-skill-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-skill-bundle-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const { requests, baseURL } = await mockModel(t);
+  const require_ = createRequire(join(sdkRoot, 'package.json'));
+  const { DeepSeekHarness } = await import(pathToFileURL(require_.resolve('@deepseek-ai/dsh-sdk-client')).href);
+
+  // The harness will override this row from the host-stamped chat role
+  // (SUR-104); until then the test supplies the same invocation patch so the
+  // plugin's half of the contract is pinned end to end.
+  const roles = {
+    helm: { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
+    crew: { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: join(tmpdir(), 'drive', 'helm') },
+    none: { role: 'none' },
+  };
+  const sessions = { helm: 'dsh-session-a', crew: 'dsh-session-b', none: 'dsh-session-c' };
+  const inputs = {};
+  for (const [role, config] of Object.entries(roles)) {
+    const patch = join(checkout, `captains-${role}.yml`);
+    await writeFile(patch, `- ${JSON.stringify({ id: 'zeron-captains', config })}\n`);
+    const start = requests.length;
+    const harness = new DeepSeekHarness({
+      profile: 'sdk', dshHome: home, cwd: checkout, processCwd: checkout, model: 'deepseek-flash',
+      env: { ...env, DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: baseURL },
+      patches: [patch],
+    });
+    harness.client.start();
+    try {
+      await harness.start();
+      const result = await harness.session(sessions[role]).run('Name the role you are running as.');
+      assert.equal(result.finishReason, 'completed', `the ${role} run did not finish: ${result.finishReason ?? result}`);
+    } finally {
+      await harness.client.close();
+    }
+    const messages = requests.slice(start).filter(request => request.path.endsWith('/messages'));
+    assert.equal(messages.length, 1, `the ${role} run sent ${messages.length} model requests`);
+    inputs[role] = JSON.stringify(messages[0].input);
+  }
+
+  assert.match(inputs.helm, /captain-digest/, 'the Captain runtime did not list captain-digest');
+  assert.match(inputs.helm, /keeps DIGEST\.md/, 'the catalog entry is not the digest skill');
+  for (const role of ['crew', 'none']) {
+    assert.doesNotMatch(inputs[role], /captain-digest/, `the ${role} runtime listed captain-digest`);
+  }
+});
