@@ -3860,6 +3860,98 @@ mod tests {
         );
     }
 
+    /// SUR-253: a hidden Captain's crew is not live, so a member can be added
+    /// to a second live crew while it sleeps. Waking the first must reconcile
+    /// like `promote` does — the member ends up in exactly one live crew —
+    /// instead of handing it back to two.
+    #[test]
+    fn an_unarchive_does_not_leave_a_member_in_two_live_crews() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("cap-b", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        for (chat_id, name) in [("cap-a", "Ada"), ("cap-b", "Grace")] {
+            rig.call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": chat_id, "name": name}),
+            )
+            .unwrap();
+        }
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+
+        // cap-a sleeps with chat-x; the member is no longer in a live crew,
+        // so cap-b can take it before cap-a is woken.
+        rig.call(methods::ARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-b", "chatId": "chat-x"}),
+        )
+        .expect("a hidden Captain's crew does not hold the chat");
+
+        rig.call(methods::UNARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let roster = rig.roster();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "the woken Captain keeps only crew that is still free: {:?}",
+            crew(&roster, "cap-a")
+        );
+        assert_eq!(
+            crew(&roster, "cap-b"),
+            vec!["chat-x".to_string()],
+            "the chat stays in the live crew it joined"
+        );
+    }
+
+    /// The same reconcile, other half: a kept member that became a live
+    /// Captain while its Captain slept cannot come back as crew.
+    #[test]
+    fn an_unarchive_drops_a_kept_crew_member_that_became_a_live_captain() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+        rig.call(methods::ARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "chat-x", "name": "Xena"}),
+        )
+        .expect("a hidden Captain's crew is free to become a Captain");
+
+        rig.call(methods::UNARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let roster = rig.roster();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "a live Captain cannot be crew: {:?}",
+            crew(&roster, "cap-a")
+        );
+        assert_eq!(
+            entry(&roster, "chat-x").expect("chat-x is a Captain")["archived"],
+            false,
+            "and stays a Captain"
+        );
+    }
+
     /// A crew id with no row at all is not the cascade's business either: it
     /// is skipped, never written into the marker, and neither archive nor
     /// unarchive touches it. The row that does exist beside it is the moved
