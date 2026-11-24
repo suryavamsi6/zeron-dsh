@@ -201,6 +201,51 @@ pub(crate) async fn descendants(root: u32) -> Vec<Tracked> {
         .collect()
 }
 
+/// Whether `pid` can still execute, given `zombie`'s answer for it. The
+/// process table can be unreadable on a host that hides `/proc` or libproc —
+/// `descendants` falls back to `ps` for that class — so an unreadable answer
+/// must fail open: signal 0 still knows the process is there (SUR-260).
+#[cfg(unix)]
+fn runs_with(pid: i32, zombie: fn(i32) -> bool) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    // SAFETY: signal 0 only checks for existence.
+    (unsafe { libc::kill(pid, 0) }) == 0 && !zombie(pid)
+}
+
+/// Whether `pid` is a process that can still execute. A zombie does not run,
+/// and it still answers signal 0 and holds its process group, so a teardown
+/// that waits on signal 0 waits out its whole grace for a corpse (SUR-260).
+#[cfg(unix)]
+pub(crate) fn runs(pid: i32) -> bool {
+    runs_with(pid, proc_table::zombie)
+}
+
+/// Whether a process group still has a member that runs. An empty process
+/// table means this host cannot say — `descendants` falls back to `ps` for
+/// that class — so the group falls back to the old signal-0 answer rather
+/// than reading "no rows" as "no members" (SUR-260).
+#[cfg(unix)]
+fn group_runs_with(group: i32, table: Vec<ProcEntry>) -> bool {
+    if group <= 0 {
+        return false;
+    }
+    if table.is_empty() {
+        // SAFETY: signal 0 only checks for existence.
+        return (unsafe { libc::kill(-group, 0) }) == 0;
+    }
+    table
+        .iter()
+        .any(|entry| entry.pgid == group && runs(entry.pid))
+}
+
+/// Whether the process group `group` (a pgid) still has a running member.
+#[cfg(unix)]
+pub(crate) fn group_runs(group: i32) -> bool {
+    group_runs_with(group, proc_table::read())
+}
+
 /// One process-table row; `start` identifies the process across pid reuse.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -663,15 +708,15 @@ pub(crate) async fn terminate_tree(tracked: &[Tracked], grace: std::time::Durati
             }
         })
         .collect();
-    // SAFETY: signal 0 only checks for existence.
-    let alive = |target: i32| unsafe { libc::kill(target, 0) } == 0;
-    // The grace can outlast a process; a plain pid is re-verified before
-    // each signal, as it may have been reused in between.
+    // "Current" is still running, not merely present: an unreaped zombie
+    // answers signal 0 and holds its process group (SUR-260). A group
+    // counts while one table read finds a running member; a plain pid is
+    // re-verified before each signal, as it may have been reused in between.
     let current = |&(target, start): &(i32, Option<u64>)| {
         if target < 0 {
-            alive(target)
+            group_runs(-target)
         } else {
-            still_same(target, start)
+            runs(target) && still_same(target, start)
         }
     };
     for target in &targets {
@@ -872,9 +917,103 @@ mod tests {
         // is orphaned, not killed.
         parent.kill().await.unwrap();
         assert_eq!(unsafe { libc::kill(shell, 0) }, 0, "orphan survives");
+        let started = std::time::Instant::now();
         terminate_tree(&tree, std::time::Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        assert_ne!(unsafe { libc::kill(shell, 0) }, 0, "orphan ended");
+        // "Ended" is not `kill(pid, 0)`: on a host whose init does not reap
+        // (this box's PID 1 leaves ten zombies on an idle morning), the orphan
+        // is a corpse the kernel still answers signal 0 for. What the teardown
+        // promises is that the process no longer runs.
+        assert!(!runs(shell), "orphan still runs after the teardown");
+        // The orphan dies to the SIGTERM, so the teardown must not then sit out
+        // its whole grace waiting for a corpse: 2.01 s of a 2 s grace is the
+        // defect this pins.
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "the teardown waited out its grace on a process that had already ended: {elapsed:?}"
+        );
+    }
+
+    /// A host can hide the process table (no `/proc`, no libproc) while `ps`
+    /// still works — `descendants` falls back to `ps` for exactly that.
+    /// `runs` must keep reporting a live process there: the old `kill(0)`
+    /// did, and a teardown that reads an unreadable table as "gone" would
+    /// send no SIGTERM and no SIGKILL at all.
+    #[test]
+    fn a_live_process_keeps_running_when_the_table_cannot_say_otherwise() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        // `zombie` cannot read the table, so it answers "not a zombie"; the
+        // live process must still count as running.
+        assert!(
+            runs_with(pid, |_| false),
+            "a live process runs when the table cannot say otherwise"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            !runs_with(pid, |_| false),
+            "a process that is gone does not run, whatever the table says"
+        );
+        assert!(
+            !proc_table::zombie(i32::MAX),
+            "an unreadable table answers `not a zombie`: the fail-open half of runs()"
+        );
+    }
+
+    /// A hidden process table is the class `descendants` handles with `ps`.
+    /// For a group target the readable path finds no members, so the teardown
+    /// must fall back to the old `kill(-group, 0)` answer rather than read the
+    /// empty table as "the group is gone" — a group leader is the target every
+    /// Zeron-started agent actually is.
+    #[test]
+    fn a_group_still_answers_signal_zero_when_the_table_is_empty() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let leader = child.id() as i32;
+        assert!(
+            group_runs_with(leader, Vec::new()),
+            "an empty table must not read as `the group is gone`"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            !group_runs_with(leader, Vec::new()),
+            "a group that is gone answers signal 0 with an error"
+        );
+    }
+
+    /// A child killed but not yet reaped is a zombie, and a zombie does not
+    /// run: teardown must neither wait the grace out for it nor count it as a
+    /// surviving member of its group.
+    #[tokio::test]
+    async fn a_killed_but_unreaped_child_does_not_run() {
+        let mut child = tokio::process::Command::new("sleep")
+            .arg("30")
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        assert!(runs(pid), "the fixture is running");
+        // SAFETY: SIGKILL to this test's own child.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while runs(pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!runs(pid), "a zombie is not a running process");
+        // Reap it so the fixture leaves nothing behind, then the pid is gone
+        // and still not running.
+        let _ = child.wait().await;
+        assert!(!runs(pid), "the reaped pid is not running");
     }
 
     #[test]
