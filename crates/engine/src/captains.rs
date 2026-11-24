@@ -1415,19 +1415,23 @@ impl CaptainsStore {
 
 // ── the Captain RPC methods ─────────────────────────────────────────────
 
+/// Every method [`CaptainsRpc`] answers. [`handles`] routes from this table and
+/// the engine's tests pin each member to `zeron_rpc::local_only`, so a method
+/// added to the roster surface cannot be relay-reachable by default.
+pub const SURFACE: &[&str] = &[
+    methods::CAPTAINS,
+    methods::PROMOTE_CAPTAIN,
+    methods::DEMOTE_CAPTAIN,
+    methods::ADD_CREW,
+    methods::REMOVE_CREW,
+    methods::ARCHIVE_CAPTAIN,
+    methods::UNARCHIVE_CAPTAIN,
+    methods::DELETE_CAPTAIN,
+];
+
 /// Whether this RPC serves `method`.
 pub fn handles(method: &str) -> bool {
-    matches!(
-        method,
-        methods::CAPTAINS
-            | methods::PROMOTE_CAPTAIN
-            | methods::DEMOTE_CAPTAIN
-            | methods::ADD_CREW
-            | methods::REMOVE_CREW
-            | methods::ARCHIVE_CAPTAIN
-            | methods::UNARCHIVE_CAPTAIN
-            | methods::DELETE_CAPTAIN
-    )
+    SURFACE.contains(&method)
 }
 
 /// One chat row's facts the roster rules read before the registry is touched.
@@ -1903,6 +1907,36 @@ mod tests {
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
     use std::sync::Arc;
+
+    /// SUR-214: [`handles`] routes the roster surface from one table, and the
+    /// relay must refuse every method in it before a peer's call reaches this
+    /// engine. A method added to the table without a `local_only` entry would be
+    /// relay-reachable until a review noticed, so this pins the two together.
+    #[test]
+    fn every_captain_roster_method_is_local_only() {
+        assert!(!SURFACE.is_empty(), "the roster surface is empty");
+        for &method in SURFACE {
+            assert!(handles(method), "{method} is in SURFACE but not routed");
+            assert!(
+                zeron_rpc::local_only(method),
+                "{method} is routed to the Captain roster but is not `zeron_rpc::local_only`: \
+                 a peer device's relay would carry it here"
+            );
+            assert!(
+                zeron_rpc::peer_refused(method, &serde_json::json!({ "chatId": "chat-1" })),
+                "{method} is not refused for a peer device"
+            );
+            assert!(
+                !zeron_rpc::agent_allowed(method),
+                "{method} is agent-allowed; the roster belongs to the person's own window"
+            );
+        }
+        // `handles` is the table and nothing else: a method outside it is never
+        // routed here, so the pin above covers the whole surface.
+        for method in [methods::AUTH_STATUS, methods::ENGINE_INFO] {
+            assert!(!handles(method), "{method} is routed to the Captain roster");
+        }
+    }
 
     #[test]
     fn load_of_a_missing_file_is_an_empty_registry() {
