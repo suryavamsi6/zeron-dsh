@@ -448,14 +448,18 @@ end)
 -- sessions and a Captain's crew (SUR-89), so a crew chat's row says the same
 -- as it would have said in its project.
 local function session_of(c: any): any
-	local asked = asks:peek()
+	-- (Both read, not peeked: a row's approval-vs-question refinement and its
+	-- Activity place are this list's own data, so the list must subscribe to
+	-- them — a `:peek()` here left the row drawing what it had until some
+	-- `sessions.now` event rebuilt the list, SUR-248.)
+	local asked = asks:get()
 	local names = devices()
 	-- (Waiting on you beats working: an approval, then a question.)
 	local status = ASKED[asked[c.id] or ""] or c.status
 	-- (The Activity view's: woken from sleep and not looked at since, the
 	-- alarm, unless it's asking for you or under way. Which shelf it's on,
 	-- and its place.)
-	local act = activity.on:peek()
+	local act = activity.on:get()
 	if act and c.woke and (status == nil or status == "done") then
 		status = "woke"
 	end
