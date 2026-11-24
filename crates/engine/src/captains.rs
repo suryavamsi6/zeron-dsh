@@ -297,10 +297,15 @@ impl Registry {
 
     /// The unarchive's finish step: `userArchived` clears and the spent
     /// `archivedCrew` marker is handed back — the chats the caller already
-    /// woke off `unarchive_pending`'s read. A record that is not hidden and
-    /// has no marker is `Ok((Vec::new(), false))`: nothing to spend, no
-    /// commit. The pair is (the ids the caller woke, whether the registry
-    /// changed).
+    /// woke off `unarchive_pending`'s read. The woken record is reconciled
+    /// the way `promote` reconciles a reactivated one: a kept member that
+    /// became a live Captain or joined another live crew while this one
+    /// slept is dropped, so no chat is left in two live crews. The marker
+    /// is still taken whole — the returned ids are still the ids the
+    /// caller woke, whatever the reconcile kept. A record that is not
+    /// hidden and has no marker is `Ok((Vec::new(), false))`: nothing to
+    /// spend, no commit. The pair is (the ids the caller woke, whether
+    /// the registry changed).
     pub fn unarchive(&mut self, chat_id: &str) -> Result<(Vec<String>, bool), String> {
         let Some(captain) = self
             .captains
@@ -312,7 +317,27 @@ impl Registry {
         if !captain.user_archived && captain.archived_crew.is_empty() {
             return Ok((Vec::new(), false));
         }
+        // Waking the record makes its kept crew live again, so the crew is
+        // reconciled like `promote` reconciles a reactivated record: a
+        // member that became a live Captain, or joined another live crew,
+        // while this one slept is dropped. The record itself is excluded —
+        // on the marker-retry path it is already live, and counting it
+        // would drop the whole crew it is waking with.
+        let unavailable: HashSet<String> = self
+            .captains
+            .iter()
+            .filter(|captain| captain.chat_id != chat_id && captain.live())
+            .flat_map(|captain| {
+                std::iter::once(captain.chat_id.clone()).chain(captain.crew.iter().cloned())
+            })
+            .collect();
+        let captain = self
+            .captains
+            .iter_mut()
+            .find(|captain| captain.chat_id == chat_id)
+            .expect("the lookup above found the record");
         captain.user_archived = false;
+        captain.crew.retain(|member| !unavailable.contains(member));
         Ok((std::mem::take(&mut captain.archived_crew), true))
     }
 
@@ -3857,6 +3882,98 @@ mod tests {
             snapshot.captain_of_crew("chat-c").unwrap().chat_id,
             "cap-a",
             "chat-c's membership never left; its hand-set flag stays untouched"
+        );
+    }
+
+    /// SUR-253: a hidden Captain's crew is not live, so a member can be added
+    /// to a second live crew while it sleeps. Waking the first must reconcile
+    /// like `promote` does — the member ends up in exactly one live crew —
+    /// instead of handing it back to two.
+    #[test]
+    fn an_unarchive_does_not_leave_a_member_in_two_live_crews() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("cap-b", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        for (chat_id, name) in [("cap-a", "Ada"), ("cap-b", "Grace")] {
+            rig.call(
+                methods::PROMOTE_CAPTAIN,
+                json!({"chatId": chat_id, "name": name}),
+            )
+            .unwrap();
+        }
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+
+        // cap-a sleeps with chat-x; the member is no longer in a live crew,
+        // so cap-b can take it before cap-a is woken.
+        rig.call(methods::ARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-b", "chatId": "chat-x"}),
+        )
+        .expect("a hidden Captain's crew does not hold the chat");
+
+        rig.call(methods::UNARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let roster = rig.roster();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "the woken Captain keeps only crew that is still free: {:?}",
+            crew(&roster, "cap-a")
+        );
+        assert_eq!(
+            crew(&roster, "cap-b"),
+            vec!["chat-x".to_string()],
+            "the chat stays in the live crew it joined"
+        );
+    }
+
+    /// The same reconcile, other half: a kept member that became a live
+    /// Captain while its Captain slept cannot come back as crew.
+    #[test]
+    fn an_unarchive_drops_a_kept_crew_member_that_became_a_live_captain() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+        rig.call(methods::ARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "chat-x", "name": "Xena"}),
+        )
+        .expect("a hidden Captain's crew is free to become a Captain");
+
+        rig.call(methods::UNARCHIVE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let roster = rig.roster();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "a live Captain cannot be crew: {:?}",
+            crew(&roster, "cap-a")
+        );
+        assert_eq!(
+            entry(&roster, "chat-x").expect("chat-x is a Captain")["archived"],
+            false,
+            "and stays a Captain"
         );
     }
 
