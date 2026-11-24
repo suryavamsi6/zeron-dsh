@@ -155,7 +155,7 @@ impl Registry {
         let unavailable: HashSet<String> = self
             .captains
             .iter()
-            .filter(|captain| !captain.archived)
+            .filter(|captain| captain.live())
             .flat_map(|captain| {
                 std::iter::once(captain.chat_id.clone()).chain(captain.crew.iter().cloned())
             })
@@ -1683,6 +1683,12 @@ impl CaptainsRpc<'_> {
                 };
                 if captain.archived {
                     return Ok(false);
+                }
+                if captain.user_archived {
+                    return Err(format!(
+                        "a hidden Captain cannot be demoted: {}",
+                        params.chat_id
+                    ));
                 }
                 registry.demote(&params.chat_id).map(|()| true)
             })
