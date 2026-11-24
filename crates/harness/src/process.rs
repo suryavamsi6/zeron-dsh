@@ -222,6 +222,30 @@ pub(crate) fn runs(pid: i32) -> bool {
     runs_with(pid, proc_table::zombie)
 }
 
+/// Whether a process group still has a member that runs. An empty process
+/// table means this host cannot say — `descendants` falls back to `ps` for
+/// that class — so the group falls back to the old signal-0 answer rather
+/// than reading "no rows" as "no members" (SUR-260).
+#[cfg(unix)]
+fn group_runs_with(group: i32, table: Vec<ProcEntry>) -> bool {
+    if group <= 0 {
+        return false;
+    }
+    if table.is_empty() {
+        // SAFETY: signal 0 only checks for existence.
+        return (unsafe { libc::kill(-group, 0) }) == 0;
+    }
+    table
+        .iter()
+        .any(|entry| entry.pgid == group && runs(entry.pid))
+}
+
+/// Whether the process group `group` (a pgid) still has a running member.
+#[cfg(unix)]
+pub(crate) fn group_runs(group: i32) -> bool {
+    group_runs_with(group, proc_table::read())
+}
+
 /// One process-table row; `start` identifies the process across pid reuse.
 #[cfg(unix)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -690,10 +714,7 @@ pub(crate) async fn terminate_tree(tracked: &[Tracked], grace: std::time::Durati
     // re-verified before each signal, as it may have been reused in between.
     let current = |&(target, start): &(i32, Option<u64>)| {
         if target < 0 {
-            let group = -target;
-            proc_table::read()
-                .iter()
-                .any(|entry| entry.pgid == group && runs(entry.pid))
+            group_runs(-target)
         } else {
             runs(target) && still_same(target, start)
         }
@@ -937,6 +958,36 @@ mod tests {
         assert!(
             !runs_with(pid, |_| false),
             "a process that is gone does not run, whatever the table says"
+        );
+        assert!(
+            !proc_table::zombie(i32::MAX),
+            "an unreadable table answers `not a zombie`: the fail-open half of runs()"
+        );
+    }
+
+    /// A hidden process table is the class `descendants` handles with `ps`.
+    /// For a group target the readable path finds no members, so the teardown
+    /// must fall back to the old `kill(-group, 0)` answer rather than read the
+    /// empty table as "the group is gone" — a group leader is the target every
+    /// Zeron-started agent actually is.
+    #[test]
+    fn a_group_still_answers_signal_zero_when_the_table_is_empty() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let leader = child.id() as i32;
+        assert!(
+            group_runs_with(leader, Vec::new()),
+            "an empty table must not read as `the group is gone`"
+        );
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(
+            !group_runs_with(leader, Vec::new()),
+            "a group that is gone answers signal 0 with an error"
         );
     }
 
