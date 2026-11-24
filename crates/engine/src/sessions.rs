@@ -9293,6 +9293,89 @@ mod tests {
         );
     }
 
+    /// SUR-219: a crew turn that ends `error` before any assistant text still
+    /// writes its report. "No report" has to mean the write never ran, not
+    /// that the turn had nothing to say, and SUR-101's own copy promises the
+    /// `- Status:` line for `error`/`aborted` turns.
+    #[tokio::test]
+    async fn an_errored_crew_turn_without_text_still_writes_its_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            sessions.turn_end_writes("crew-b", Some(&crew_stamp), DoneStatus::Errored, None),
+            "a textless errored crew turn still schedules its report"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("# Crew report: crew-b"),
+            "the report exists with its header: {body:?}"
+        );
+        assert!(
+            body.contains("- Status: error"),
+            "the header-only report carries the turn's status: {body:?}"
+        );
+    }
+
+    /// The same for an interrupted turn: `aborted`, not `error`, and still a
+    /// file rather than silence.
+    #[tokio::test]
+    async fn an_interrupted_crew_turn_without_text_still_writes_its_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Interrupted,
+                None
+            ),
+            "a textless interrupted crew turn still schedules its report"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("- Status: aborted"),
+            "the header-only report says aborted, not error: {body:?}"
+        );
+    }
+
     /// SUR-87: a replayed finalization of the same crew turn queues exactly ONE
     /// `Run` for the Captain — the claim is recorded before the enqueue.
     #[tokio::test]
