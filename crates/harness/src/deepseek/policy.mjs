@@ -1,8 +1,8 @@
 export const name = 'zeron-deepseek-policy';
 export const inject = ['tools', 'approval', 'llm'];
 
-const reads = new Set(['read', 'glob', 'grep', 'list', 'ask_user_question']);
-const edits = new Set(['write', 'edit', 'apply_patch']);
+const reads = new Set(['read', 'glob', 'grep', 'list', 'ask_user_question', 'captain_drive_read']);
+const edits = new Set(['write', 'edit', 'apply_patch', 'captain_drive_write']);
 
 export function assertRoute(options) {
   // The official route runs its two models and nothing else. Any other route

@@ -453,7 +453,8 @@ async function sidecar(context, sdkRoot, checkout, home, captains, sessionId, op
         try { frame = JSON.parse(line); } catch { continue; }
         if (frame.type === 'error') { clearTimeout(timer); resolveRun(frame); return; }
         if (frame.type === 'request') {
-          const result = frame.method === 'approval/request' ? { outcome: 'allowed-once' } : { answers: [] };
+          const result = frame.method === 'approval/request'
+            ? { outcome: options.approval ?? 'allowed-once' } : { answers: [] };
           child.stdin.write(`${JSON.stringify({ type: 'answer', id: frame.id, result })}\n`);
         }
         if (frame.type === 'ready' && options.prompt === undefined) { clearTimeout(timer); resolveRun(frame); return; }
@@ -471,7 +472,7 @@ async function sidecar(context, sdkRoot, checkout, home, captains, sessionId, op
     child.stdin.write(`${JSON.stringify({
       type: 'start', sessionId, resume: false, dshHome: home, cwd: checkout,
       model: 'deepseek-flash', provider: 'deepseek-official', sharedHome: false,
-      access: 'supervised', plan: false, sandbox: 'workspace-write', policySource, environmentSource,
+      access: options.access ?? 'supervised', plan: false, sandbox: 'workspace-write', policySource, environmentSource,
       mcp: [], webSearch: false, ...(captains === undefined ? {} : { captains }),
     })}\n`);
   });
@@ -923,4 +924,93 @@ test('the Helm runtime resolves captain-digest and the other rows do not', { tim
   for (const role of ['crew', 'none']) {
     assert.doesNotMatch(inputs[role], /captain-digest/, `the ${role} runtime listed captain-digest`);
   }
+});
+
+// SUR-105: the property, not a prescribed case name — the Captain Drive tools
+// ride the same policy as the built-in read/edit pair. One scripted turn calls
+// captain_drive_read and then captain_drive_write; per access mode the host
+// either asks for the write alone or for nothing, and a dismissed write must
+// never reach the file.
+test('the Captain Drive tools follow the access policy, per access mode', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-policy-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-policy-bundle-'));
+  const driveRoot = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-policy-drive-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  t.after(() => rm(driveRoot, { recursive: true, force: true }));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+  const driveFile = join(driveRoot, 'CREW.md');
+  const role = { role: 'captain', chatId: 'zeron-helm-a', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot };
+
+  // One access mode: fresh file, scripted read→write→text loopback, then the
+  // approval frames the host actually asked and the file the tool actually left.
+  const once = async (access, approval) => {
+    await writeFile(driveFile, 'before');
+    const server = createServer(async (request, response) => {
+      const chunks = [];
+      for await (const chunk of request) chunks.push(chunk);
+      const input = JSON.parse(Buffer.concat(chunks).toString());
+      const results = (JSON.stringify(input.messages ?? []).match(/tool_result/g) ?? []).length;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+      event('message_start', { message: { id: `msg-${access}`, type: 'message', role: 'assistant', model: input.model,
+        content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+      const tool = (id, name, args) => {
+        event('content_block_start', { index: 0, content_block: { type: 'tool_use', id, name, input: {} } });
+        event('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(args) } });
+        event('content_block_stop', { index: 0 });
+        event('message_delta', { delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } });
+      };
+      if (results === 0) tool('toolu_read', 'captain_drive_read', { path: 'CREW.md' });
+      else if (results === 1) tool('toolu_write', 'captain_drive_write', { path: 'CREW.md', content: 'after' });
+      else {
+        event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+        event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'POLICY_OK' } });
+        event('content_block_stop', { index: 0 });
+        event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+      }
+      event('message_stop', {});
+      response.end();
+    });
+    await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+    t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
+    // Each run gets its own session id: a persisted session under the shared
+    // DSH_HOME is reopened only via `resume`, so reusing an id makes the
+    // strict-create path answer "already exists" before any tool call.
+    const result = await sidecar({ here, env }, sdkRoot, checkout, home, role, `dsh-session-policy-${access}-${approval}`, {
+      prompt: 'read CREW.md and then write it', access, approval,
+      env: { DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` },
+    });
+    assert.equal(result.frame.type, 'done',
+      `the ${access} run did not finish: ${JSON.stringify(result.frame).slice(0, 300)}\n${result.lines.slice(-4).join('\n')}`);
+    const approvals = result.lines
+      .map(line => { try { return JSON.parse(line); } catch { return undefined; } })
+      .filter(frame => frame?.type === 'request' && frame.method === 'approval/request')
+      .map(frame => frame.params?.toolName);
+    return { approvals, content: await readFile(driveFile, 'utf8') };
+  };
+
+  const supervised = await once('supervised', 'allowed-once');
+  assert.deepEqual(supervised.approvals, ['captain_drive_write'],
+    `supervised asked for ${JSON.stringify(supervised.approvals)} — the read must not ask and the write must`);
+  assert.equal(supervised.content, 'after', 'an allowed supervised write reached the file');
+
+  for (const access of ['auto-accept-edits', 'full-access']) {
+    const mode = await once(access, 'allowed-once');
+    assert.deepEqual(mode.approvals, [], `${access} asked for ${JSON.stringify(mode.approvals)}`);
+    assert.equal(mode.content, 'after', `${access} wrote without asking`);
+  }
+
+  const dismissed = await once('supervised', 'rejected');
+  assert.deepEqual(dismissed.approvals, ['captain_drive_write'],
+    `the dismissed run asked for ${JSON.stringify(dismissed.approvals)}`);
+  assert.equal(dismissed.content, 'before', 'a dismissed supervised write reached the file');
 });
