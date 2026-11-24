@@ -3689,7 +3689,15 @@ impl crate::captains::Chats for CaptainsChats {
             parent_chat_id: chat.parent_chat_id,
             device_id: chat.device_id,
             turn_in_flight: self.sessions.turn_in_flight(chat_id),
+            archived: chat.archived,
         })
+    }
+
+    fn set_chat_archived(&self, chat_id: &str, archived: bool) -> Result<(), String> {
+        self.workspace
+            .set_chat_archived(chat_id, archived)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
     }
 }
 

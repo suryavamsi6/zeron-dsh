@@ -159,6 +159,12 @@ pub mod methods {
     pub const DEMOTE_CAPTAIN: &str = "DemoteCaptain";
     pub const ADD_CREW: &str = "AddCrew";
     pub const REMOVE_CREW: &str = "RemoveCrew";
+    /// The archive cascade (SUR-94): the Captain hidden without a demotion,
+    /// woken, and its record dropped — each `{chatId}` -> the roster, the same
+    /// device-local registry as the five above.
+    pub const ARCHIVE_CAPTAIN: &str = "ArchiveCaptain";
+    pub const UNARCHIVE_CAPTAIN: &str = "UnarchiveCaptain";
+    pub const DELETE_CAPTAIN: &str = "DeleteCaptain";
     /// Import conversations from a DeepSeek v3 chat export (.zip) that lives on
     /// this device. Device-local only ([`local_only`]): the path is this
     /// machine's, and the import writes this device's own chats.
@@ -912,6 +918,9 @@ pub fn local_only(method: &str) -> bool {
             | methods::DEMOTE_CAPTAIN
             | methods::ADD_CREW
             | methods::REMOVE_CREW
+            | methods::ARCHIVE_CAPTAIN
+            | methods::UNARCHIVE_CAPTAIN
+            | methods::DELETE_CAPTAIN
             // A device-local .zip path read into this device's own chats.
             | methods::IMPORT_DEEPSEEK_CHATS
             // The person's own MCP servers: one file on this device, read
