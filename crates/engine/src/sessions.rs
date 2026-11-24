@@ -499,9 +499,11 @@ const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
 /// The last assistant text of the turn being finalized.
 pub(crate) struct TurnText<'a> {
-    /// The `MessagePart::Text` id — the turn's identity for the de-duplication.
+    /// The run's id — the turn's identity for the de-duplication.
     pub id: &'a str,
-    pub text: &'a str,
+    /// The turn's last assistant text, when it produced any; a turn that
+    /// errored or was interrupted before replying has none.
+    pub text: Option<&'a str>,
 }
 
 #[derive(Clone)]
@@ -3037,13 +3039,15 @@ impl Inner {
     /// queues the report line to that Captain (`Inner::wake_captain`).
     /// `false` — nothing scheduled — for an unstamped turn, a stamp that
     /// fails to parse, a stamp with an empty `driveRoot`, a role that is
-    /// neither captain nor crew, a crew turn with no assistant text to
-    /// report, a crew turn already written (a duplicate finalization), and a
-    /// crew chat id that is not a bare filename; the role is the
-    /// dispatch-time stamp and the roster is never consulted at turn end
-    /// (the wake's own liveness check runs inside the blocking task, right
-    /// before the enqueue). The write itself runs off the event loop; its
-    /// outcome is traced, never propagated.
+    /// neither captain nor crew, a crew turn already written (a duplicate
+    /// finalization), and a crew chat id that is not a bare filename; a
+    /// crew turn that errors or is interrupted before replying writes a
+    /// header-only report carrying its status, while a completed crew
+    /// turn with no assistant text returns `false` as before. The role
+    /// is the dispatch-time stamp and the roster is never consulted at
+    /// turn end (the wake's own liveness check runs inside the blocking
+    /// task, right before the enqueue). The write itself runs off the
+    /// event loop; its outcome is traced, never propagated.
     fn turn_end_writes(
         self: &Arc<Self>,
         chat_id: &str,
@@ -3127,6 +3131,16 @@ impl Inner {
                 let Some(turn_text) = turn_text else {
                     return false;
                 };
+                // A textless turn earns a report only when the ending itself
+                // is the news: an error or an interruption. Decided before the
+                // claim below, so a turn that writes nothing records nothing —
+                // a later text-bearing finalization of the same run still lands.
+                let Some(text) = turn_text.text.or(match status {
+                    DoneStatus::Errored | DoneStatus::Interrupted => Some(""),
+                    _ => None,
+                }) else {
+                    return false;
+                };
                 {
                     let written = lock(&self.crew_reports);
                     if written.get(chat_id).is_some_and(|id| id == turn_text.id) {
@@ -3140,7 +3154,7 @@ impl Inner {
                 lock(&self.crew_reports).insert(chat_id.to_string(), turn_text.id.to_string());
                 let chat_id = chat_id.to_string();
                 let turn_id = turn_text.id.to_string();
-                let text = turn_text.text.to_owned();
+                let text = text.to_owned();
                 let captain_id = stamp["captainId"].as_str().map(str::to_owned);
                 let inner = self.clone();
                 tokio::task::spawn_blocking(move || {
@@ -6775,11 +6789,16 @@ async fn drive_run(
 
         if let AgentEvent::Done { status, .. } = &event {
             let last_text = folded.iter().rev().find_map(|part| match part {
-                MessagePart::Text { id, text } => Some(TurnText { id, text }),
+                MessagePart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
             let stamp = inner.dispatch_captain_stamp(&chat_id, &run_id);
-            inner.turn_end_writes(&chat_id, stamp.as_deref(), *status, last_text);
+            inner.turn_end_writes(
+                &chat_id,
+                stamp.as_deref(),
+                *status,
+                Some(TurnText { id: run_id.as_str(), text: last_text }),
+            );
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -9239,7 +9258,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-1",
-                    text: "first body",
+                    text: Some("first body"),
                 })
             ),
             "a crew turn's end schedules its report"
@@ -9255,7 +9274,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-1",
-                text: "first body",
+                text: Some("first body"),
             })
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -9273,7 +9292,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-2",
-                text: "second body",
+                text: Some("second body"),
             })
         ));
         for _ in 0..60 {
@@ -9290,6 +9309,260 @@ mod tests {
         assert!(
             !body.contains("first body"),
             "the report is replaced, not appended: {body:?}"
+        );
+    }
+
+    /// SUR-219: a crew turn that ends `error` before any assistant text still
+    /// writes its report. "No report" has to mean the write never ran, not
+    /// that the turn had nothing to say, and SUR-101's own copy promises the
+    /// `- Status:` line for `error`/`aborted` turns.
+    #[tokio::test]
+    async fn an_errored_crew_turn_without_text_still_writes_its_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Errored,
+            Some(TurnText {
+                id: "run-err",
+                text: None,
+            })
+        ),
+            "a textless errored crew turn still schedules its report"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("# Crew report: crew-b"),
+            "the report exists with its header: {body:?}"
+        );
+        assert!(
+            body.contains("- Status: error"),
+            "the header-only report carries the turn's status: {body:?}"
+        );
+    }
+
+    /// The same for an interrupted turn: `aborted`, not `error`, and still a
+    /// file rather than silence.
+    #[tokio::test]
+    async fn an_interrupted_crew_turn_without_text_still_writes_its_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Interrupted,
+                Some(TurnText {
+                    id: "run-int",
+                    text: None,
+                })
+            ),
+            "a textless interrupted crew turn still schedules its report"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("- Status: aborted"),
+            "the header-only report says aborted, not error: {body:?}"
+        );
+    }
+
+    /// SUR-219 acceptance 2: a failed write is not silent — the wake says the
+    /// report is pending, so a missing file has one meaning rather than three.
+    #[tokio::test]
+    async fn a_failed_crew_report_write_wakes_with_a_pending_pointer() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        // `reports` exists as a FILE, so the report cannot be written.
+        std::fs::write(drive.join(crate::crew_reports::DIR), "not a directory")
+            .expect("reports blocker");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let wakes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = wakes.clone();
+        sessions.use_crew_wake(Arc::new(move |captain: &str, text: &str| {
+            sink.lock()
+                .unwrap()
+                .push((captain.to_string(), text.to_string()));
+        }));
+
+        assert!(sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "run-fail",
+                text: Some("crew reply"),
+            })
+        ));
+        for _ in 0..200 {
+            if !wakes.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let wakes = wakes.lock().unwrap();
+        assert_eq!(wakes.len(), 1, "one wake for one turn: {wakes:?}");
+        assert_eq!(wakes[0].0, "cap-a");
+        assert!(
+            wakes[0].1.contains("Full report: pending"),
+            "a failed write wakes with a pending pointer: {}",
+            wakes[0].1
+        );
+        assert!(
+            wakes[0].1.contains("reports/crew-b.md"),
+            "…and names the path it could not write: {}",
+            wakes[0].1
+        );
+    }
+
+    /// A completed turn that produced no text is not news: it keeps the old
+    /// silence rather than writing a blank report and waking its Captain with
+    /// an empty reply line. Only `error` and `aborted` earn the header-only
+    /// report SUR-219 added.
+    #[tokio::test]
+    async fn a_textless_completed_crew_turn_writes_nothing() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let wakes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = wakes.clone();
+        sessions.use_crew_wake(Arc::new(move |captain: &str, text: &str| {
+            sink.lock()
+                .unwrap()
+                .push((captain.to_string(), text.to_string()));
+        }));
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            !sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "run-empty",
+                    text: None,
+                })
+            ),
+            "a textless completed turn schedules nothing"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(!path.exists(), "no report is written for it");
+        assert!(wakes.lock().unwrap().is_empty(), "and it wakes nobody");
+    }
+
+    /// SUR-219 r3: a textless `Completed` turn must not record a claim it never
+    /// filled. The claim exists so a *duplicate* finalization of a written turn
+    /// does not rewrite it; a turn that wrote nothing must record nothing, or a
+    /// later text-bearing finalization of the same run is turned away and no
+    /// report ever lands.
+    #[tokio::test]
+    async fn a_textless_completed_crew_turn_does_not_block_a_later_report() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(
+            !sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "run-1",
+                    text: None,
+                })
+            ),
+            "the textless turn schedules nothing"
+        );
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: "run-1",
+                    text: Some("late reply"),
+                })
+            ),
+            "a later text-bearing finalization of the same run must still be accepted"
+        );
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("late reply"),
+            "the report lands once there is something to report: {body:?}"
         );
     }
 
@@ -9334,7 +9607,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-1",
-                    text: "crew reply",
+                    text: Some("crew reply"),
                 })
             ),
             "a crew turn's end schedules its report and wake"
@@ -9347,7 +9620,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-1",
-                text: "crew reply",
+                text: Some("crew reply"),
             })
         ));
         // The wake lands off the event loop: poll for it, then give a stray
@@ -9378,7 +9651,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-2",
-                    text: "next reply",
+                    text: Some("next reply"),
                 })
             ),
             "a different turn schedules again"
