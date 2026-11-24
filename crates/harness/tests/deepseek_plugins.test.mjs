@@ -8,6 +8,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { zstdDecompressSync } from 'node:zlib';
 
 // This test drives the installed `dsh` CLI instead of importing it, so a
 // missing SDK directory or package manager skips rather than failing at import.
@@ -863,6 +864,225 @@ test('a restarted runtime sends one current crew-rules block for the resumed ses
     const body = JSON.stringify(input);
     assert.ok(!body.includes('RULE-ALPHA'), 'the resumed turn still carries the retired rule');
   }
+});
+
+// SUR-255: the crew pre-step declares its request-series rebase on the
+// admitted decision, so the new head lands only after the waterfall returns.
+// The built-in compaction listener prices the step inside that same
+// waterfall — before the flag exists — and builds its summariser input from
+// the durable head, so on a change turn with pressure armed the summariser
+// is sent the retired CREW.md and the checkpoint it writes keeps the rule.
+// The proof is the HTTP body plus the persisted session: no body of the
+// change turn or the next may carry the retired marker anywhere, and the
+// replayed surface — every compact checkpoint included — must not either.
+test('a CREW.md change under armed pressure compaction sends no retired rule to the summariser or any checkpoint', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-compact-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-compact-bundle-'));
+  const drive = await mkdtemp(join(tmpdir(), 'zeron-dsh-captains-compact-drive-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  t.after(() => rm(drive, { recursive: true, force: true }));
+  // pnpm links the checkout it is given, so install a copy and leave the
+  // repository's plugins directory untouched.
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+
+  const contentText = content => typeof content === 'string' ? content
+    : (content ?? []).map(block => block?.text ?? '').join('');
+  // A turn under armed pressure makes two calls — the compaction summariser
+  // and the regular one — so the loopback answers both and tags each capture
+  // with the turn it belongs to. Its summary repeats into Critical Context
+  // any retired crew-rules line it is shown on the change turn, the way a
+  // real summariser preserves still-true context, so its checkpoint keeps
+  // whichever head the listener actually priced.
+  let active;
+  const requests = [];
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const raw = Buffer.concat(chunks).toString('utf8');
+    const input = JSON.parse(raw);
+    const last = contentText(input.messages?.at(-1)?.content);
+    const purpose = last.includes('You are now acting as a compaction engine') ? 'summariser' : 'regular';
+    const turn = active;
+    requests.push({ path: request.url, input, raw, turn, purpose });
+    let reply = 'CAPTAINS_ROLE_OK';
+    if (purpose === 'summariser') {
+      const visible = [contentText(input.system), ...(input.messages ?? []).map(message => contentText(message.content))].join('\n');
+      const copied = turn === 'B' ? [...visible.matchAll(/<crew-rules\b[^>]*>([\s\S]*?)<\/crew-rules>/g)]
+        .flatMap(([, block]) => block.split('\n')).find(line => line.includes('RULE-ALPHA')) : undefined;
+      reply = [
+        '## Primary Request and Intent\n- Acknowledge the sample observations.',
+        '## Key Technical Concepts\n- (none)',
+        '## Files and Code\n- (none)',
+        '## Errors and Fixes\n- (none)',
+        '## Pending Jobs\n- (none)',
+        '## Current Work\n- Recorded the sample observations.',
+        '## Next Step\n- (none)',
+        `## Critical Context\n- ${copied ?? '(none)'}`,
+      ].join('\n\n');
+    }
+    response.writeHead(200, { 'content-type': 'text/event-stream' });
+    const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+    // The meter trusts reported usage over its own estimate, so the answer
+    // that closes the warmup turn prices the session's history honestly
+    // large; pressure is armed at the next turn's pre-step without leaning
+    // on a prompt-bytes-to-tokens guess.
+    const inputTokens = turn === 'warmup' ? 13000 : 10;
+    event('message_start', { message: { id: `msg-${turn}-${requests.length}`, type: 'message', role: 'assistant', model: input.model,
+      content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: inputTokens, output_tokens: 0 } } });
+    event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+    event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: reply } });
+    event('content_block_stop', { index: 0 });
+    event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+    event('message_stop', {});
+    response.end();
+  });
+  await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+  t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
+  const baseURL = `http://127.0.0.1:${server.address().port}/anthropic`;
+
+  // Arm pressure compaction in the profile's own user layer — the same
+  // cordis.patch.yml shape the probe's overrides.yml used — so it binds every
+  // runtime this profile boots, under the invocation patch below.
+  await writeFile(join(home, 'profiles', 'sdk', 'cordis.patch.yml'), `- id: llm-deepseek
+  config:
+    baseURL: ${baseURL}
+    maxTokens: 256
+    thinking: disabled
+    models:
+      - id: deepseek-flash
+        contextWindow: 15000
+        maxTokens: 256
+        inputModalities: [text, image]
+        systemPromptUpdate: in-history
+        toolUpdate: addition-only
+- id: compaction-basic
+  config:
+    thresholdRatio: 0.7
+    headroomTokens: 256
+    retainTokens: 100
+    maxTokens: 256
+    compactionRetries: 0
+    auto: true
+`);
+
+  const require_ = createRequire(join(sdkRoot, 'package.json'));
+  let sdkClient;
+  let sessionModule;
+  try {
+    sdkClient = require_.resolve('@deepseek-ai/dsh-sdk-client');
+    sessionModule = require_.resolve('@deepseek-ai/dsh-session');
+  } catch {
+    return t.skip('the SDK client cannot be resolved');
+  }
+  const { DeepSeekHarness } = await import(pathToFileURL(sdkClient).href);
+  const { Session } = await import(pathToFileURL(sessionModule).href);
+
+  // The bundle declares zeron-captains inert; this row replaces its config
+  // with the crew role pointed at the temp Drive.
+  const row = { role: 'crew', chatId: 'zeron-crew-b', captainId: 'zeron-helm-a', captainName: 'Helm', driveRoot: drive };
+  const patch = join(checkout, 'crew-row.yml');
+  await writeFile(patch, `- ${JSON.stringify({ insert: [{ id: 'zeron-captains', name: 'zeron-dsh-captains', config: row }] })}\n`);
+
+  const harness = new DeepSeekHarness({
+    profile: 'sdk', dshHome: home, dshBin, cwd: checkout, processCwd: checkout, model: 'deepseek-flash',
+    env: { ...env, DEEPSEEK_API_KEY: 'synthetic-not-live', DEEPSEEK_BASE_URL: baseURL },
+    patches: [patch], initializeTimeoutMs: 60000, requestTimeoutMs: 120000,
+  });
+
+  const alpha = 'RULE-ALPHA: file every report under reports/.';
+  const beta = 'RULE-BETA: never file a report; hand the work back to the Captain.';
+  const crew = join(drive, 'CREW.md');
+  const warmup = ['Acknowledge the following sample observations.', '',
+    ...Array.from({ length: 100 }, (_, i) => `Batch 1, observation ${i + 1}. Sample queue is stable. Record arrival rate and processing latency.`)].join('\n');
+  const turns = {};
+  let sessionId;
+  try {
+    await harness.start();
+    const session = harness.session('zeron-crew-compaction');
+    sessionId = session.id;
+    const runTurn = async (label, prompt) => {
+      active = label;
+      const start = requests.length;
+      try {
+        const result = await session.run(prompt);
+        assert.equal(result.sessionId, session.id);
+        assert.equal(result.finishReason, 'completed', `turn ${label} did not finish: ${result.finishReason ?? result}`);
+      } finally {
+        active = undefined;
+      }
+      return requests.slice(start).filter(request => request.path.endsWith('/messages'));
+    };
+    // The warmup turn leaves the session over the pressure threshold, so the
+    // NEXT turn's pre-step is the armed one — exactly the turn where CREW.md
+    // changes underneath the listener ordering this case pins down.
+    await writeFile(crew, alpha);
+    turns.warmup = await runTurn('warmup', warmup);
+    await writeFile(crew, beta);
+    turns.B = await runTurn('B', 'Acknowledge the latest observation.');
+    turns.C = await runTurn('C', 'Acknowledge the next observation.');
+  } finally {
+    await harness.close();
+  }
+  assert.ok(turns.warmup.some(request => request.purpose === 'regular'), 'the warmup turn produced no model request');
+
+  const count = (value, needle) => value.split(needle).length - 1;
+  // Clause 1: every captured body of the change turn and the following turn —
+  // the summariser call included — must carry zero retired-rule text. The
+  // marker is matched bare, so a checkpoint frame or a session-log echo
+  // cannot hide it behind a missing <crew-rules> wrapper.
+  const leaked = [...turns.B, ...turns.C]
+    .map(request => ({ turn: request.turn, purpose: request.purpose, hits: count(request.raw, 'RULE-ALPHA') }))
+    .filter(request => request.hits > 0);
+  assert.deepEqual(leaked, [], 'retired RULE-ALPHA reached model request bodies after the CREW.md change');
+  // The scenario only bites when the armed path actually ran: no summariser
+  // call on the change turn means pressure never priced anything.
+  assert.ok(turns.B.some(request => request.purpose === 'summariser'),
+    'the armed change turn produced no compaction summariser call');
+  for (const label of ['B', 'C']) {
+    const regulars = turns[label].filter(request => request.purpose === 'regular');
+    assert.equal(regulars.length, 1, `turn ${label} produced ${regulars.length} regular requests`);
+    assert.equal(count(regulars[0].raw, 'RULE-BETA'), 1,
+      `turn ${label}'s regular body carried ${count(regulars[0].raw, 'RULE-BETA')} current-rule markers`);
+  }
+
+  // Clause 2: replay the persisted session the way the probe did —
+  // Session.create over the durable log, then deriveMessages(). The effective
+  // surface must show the current block and no retired text, every compact
+  // checkpoint included.
+  const sessionsRoot = join(home, 'sessions');
+  const stored = [];
+  for (const project of await readdir(sessionsRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!project.isDirectory()) continue;
+    const dir = join(sessionsRoot, project.name, sessionId);
+    for (const file of await readdir(dir).catch(() => [])) {
+      if (file.startsWith('session.') && file.endsWith('.zstd')) stored.push(join(dir, file));
+    }
+  }
+  assert.equal(stored.length, 1, `expected one persisted log for ${sessionId} under ${sessionsRoot}, found ${stored.length}`);
+  const decoded = zstdDecompressSync(await readFile(stored[0])).toString('utf8');
+  const [header, ...events] = decoded.trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.equal(header.id, sessionId, 'the persisted log belongs to another session');
+  const checkpoints = events.filter(event => event.type === 'user/message' && event.data?.source?.kind === 'compact-checkpoint');
+  assert.ok(checkpoints.length > 0, 'the persisted session kept no compact checkpoint to audit');
+  const staleCheckpoints = checkpoints.filter(event => JSON.stringify(event.data).includes('RULE-ALPHA'));
+  assert.deepEqual(staleCheckpoints.map(event => event.seq), [],
+    'a persisted compact checkpoint still carries the retired rule');
+  const surface = Session.create(sessionId, events).deriveMessages();
+  assert.ok(surface.some(message => contentText(message.content).includes('<crew-rules')
+    && contentText(message.content).includes('RULE-BETA')),
+    'the replayed session lost the current crew-rules block');
+  const stale = surface.filter(message => count(contentText(message.content), 'RULE-ALPHA') > 0)
+    .map(message => ({ role: message.role, source: message.source?.kind }));
+  assert.deepEqual(stale, [], 'a replayed effective message still carries the retired rule');
 });
 
 // SUR-102: the Captain row registers a runtime skill provider, so the proof
