@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -277,6 +277,9 @@ struct Inner {
     /// while no run was live (between the failed run and its retry) found
     /// nothing to stop, and still ends the turn.
     user_stops: Mutex<HashMap<String, u64>>,
+    /// Chats the person stopped, until a turn starts: a crew report must
+    /// not restart them (SUR-222).
+    stopped: Mutex<HashSet<String>>,
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
@@ -530,6 +533,7 @@ impl SessionsEngine {
                 revivals_starting: Mutex::new(std::collections::HashSet::new()),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
+                stopped: Mutex::new(HashSet::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
                 ipc_ready: tokio::sync::Notify::new(),
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
@@ -1739,6 +1743,7 @@ impl SessionsEngine {
         }
         // A new turn: a Stop's mark belongs to the one before it.
         self.inner.journal.clear_user_stop(chat_id);
+        lock(&self.inner.stopped).remove(chat_id);
         runs.insert(
             chat_id.to_string(),
             RunHandle {
@@ -2204,7 +2209,9 @@ impl SessionsEngine {
     /// run can take seconds to settle and close its journal, and an engine
     /// that dies in between must not read the stopped turn as a crashed one
     /// ([`RunJournal::note_user_stop`]; cleared when the journal closes the
-    /// turn, or the next turn starts).
+    /// turn, or the next turn starts). A Stop that lands on a live turn
+    /// also marks the chat in `Inner::stopped`: until a new turn starts, a
+    /// crew report must not wake a Captain the person stopped (SUR-222).
     fn note_user_stop(&self, chat_id: &str) {
         *lock(&self.inner.user_stops)
             .entry(chat_id.to_string())
@@ -2218,6 +2225,7 @@ impl SessionsEngine {
         };
         if live && self.turn_in_flight(chat_id) {
             self.inner.journal.note_user_stop(chat_id);
+            lock(&self.inner.stopped).insert(chat_id.to_string());
         }
     }
 
@@ -3190,10 +3198,12 @@ impl Inner {
     /// turn, busy steers at the boundary. Runs inside the report's
     /// `spawn_blocking`, never on the event loop.
     ///
-    /// Three gates, in order: only `Completed` wakes; at most once per crew
-    /// turn (the claim lands before the enqueue); and the target must still
-    /// be a live Captain when the enqueue happens. A failure at the enqueue
-    /// itself is a `tracing::warn!`, never a retry.
+    /// Four gates, in order: only `Completed` wakes; a Captain the person
+    /// stopped is not woken (SUR-222 — the report stays on disk for the
+    /// next human-started turn); at most once per crew turn (the claim
+    /// lands before the enqueue); and the target must still be a live
+    /// Captain when the enqueue happens. A failure at the enqueue itself
+    /// is a `tracing::warn!`, never a retry.
     fn wake_captain(
         &self,
         chat_id: &str,
@@ -3214,6 +3224,14 @@ impl Inner {
         let Some(captain_id) = captain_id else {
             return;
         };
+        // The person's Stop is a boundary a report does not cross (SUR-222):
+        // the report is already on disk and the next human-started turn
+        // reads it. No claim is taken here — if the person resumes and the
+        // same crew turn is finalized again, it may wake then.
+        if lock(&self.stopped).contains(captain_id) {
+            tracing::info!(chat = %chat_id, captain = %captain_id, "crew report wake dropped: the Captain was stopped");
+            return;
+        }
         let title = self
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
