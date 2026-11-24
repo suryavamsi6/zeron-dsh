@@ -235,7 +235,7 @@ fn rig(prewarms: bool) -> Rig {
 
 fn assemble(data: &std::path::Path, seen: &Arc<Mutex<Seen>>, options: &Options) -> EngineCore {
     let registry = HarnessRegistry::new();
-    for id in [HarnessId::Mock, HarnessId::Pi, HarnessId::ClaudeCode] {
+    for id in [HarnessId::Mock, HarnessId::DeepSeek] {
         registry.register(Arc::new(WarmFixture {
             id,
             seen: seen.clone(),
@@ -448,8 +448,8 @@ async fn sent_with_another_config_than_warmed_it_is_not_used() {
 async fn sent_with_another_agent_ends_the_warm_start() {
     let rig = rig(true);
     rig.warm(CHAT, "mock-1", false).await;
-    let mut request = ask("pi-1", &rig.cwd());
-    request.harness = Some(HarnessId::Pi);
+    let mut request = ask("deepseek-chat", &rig.cwd());
+    request.harness = Some(HarnessId::DeepSeek);
     request.prompt = "on another agent".into();
     rig.send_with(CHAT, request).await;
     let seen = rig.seen.lock().unwrap();
@@ -459,7 +459,7 @@ async fn sent_with_another_agent_ends_the_warm_start() {
         "the warm one ended"
     );
     assert_eq!(seen.runs[0].0, "", "a run of its own");
-    assert_eq!(seen.runs[0].1.harness, Some(HarnessId::Pi));
+    assert_eq!(seen.runs[0].1.harness, Some(HarnessId::DeepSeek));
 }
 
 /// Enter before the warm start finished launching: the run waits for it and
@@ -850,21 +850,24 @@ async fn warm_starts_are_bounded() {
     assert_eq!(rig.core.sessions.warm_chats().len(), 4);
 }
 
-/// Claude's native subagents switched off after the warm start (side chats
-/// only from then on): the warm runtime, launched with them, is not used.
+/// A retired Claude harness is rejected before the engine launches a runtime.
 #[tokio::test]
-async fn a_switch_of_native_subagents_is_never_run_on_the_old_setting() {
+async fn warm_start_refuses_unsupported_legacy_harness_without_launching() {
     let rig = rig(true);
-    let mut ask_claude = ask("sonnet", &rig.cwd());
-    ask_claude.harness = Some(HarnessId::ClaudeCode);
-    assert_eq!(rig.warm_with(CHAT, ask_claude.clone(), true).await["outcome"], "started");
-    rig.core
-        .registry
-        .set_native_subagents(HarnessId::ClaudeCode, false)
-        .unwrap();
-    ask_claude.prompt = "after the switch".into();
-    rig.send_with(CHAT, ask_claude).await;
-    let seen = rig.seen.lock().unwrap();
-    assert_eq!(seen.discarded, vec![seen.prewarms[0].0.clone()]);
-    assert_eq!(seen.runs[0].0, "", "a runtime of its own");
+    let mut request = ask("sonnet", &rig.cwd());
+    request.harness = Some(HarnessId::ClaudeCode);
+    let error = zeron_rpc::memory_client(rig.core.rpc_service())
+        .call(
+            "WarmStart",
+            serde_json::json!({
+                "chatId": CHAT,
+                "request": request,
+                "typed": true,
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("ClaudeCode is unsupported"));
+    assert!(rig.seen.lock().unwrap().prewarms.is_empty());
+    assert!(rig.core.sessions.warm_chats().is_empty());
 }

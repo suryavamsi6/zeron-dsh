@@ -215,8 +215,9 @@ mod tests {
         let mut xs = 0usize;
         let mut tail = String::new();
         let mut last_seq = 0;
+        let mut flood_done = false;
         tokio::time::timeout(Duration::from_secs(60), async {
-            while !tail.contains("FLOOD-DONE") {
+            while !flood_done {
                 match link
                     .events
                     .recv()
@@ -229,6 +230,7 @@ mod tests {
                         let bytes = BASE64.decode(data).unwrap();
                         xs += bytes.iter().filter(|b| **b == b'x').count();
                         tail.push_str(&String::from_utf8_lossy(&bytes));
+                        flood_done = tail.contains("FLOOD-DONE");
                         if tail.len() > 256 {
                             tail.drain(..tail.len() - 256);
                         }

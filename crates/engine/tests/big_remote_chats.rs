@@ -147,7 +147,7 @@ struct Replies;
 #[async_trait::async_trait]
 impl Harness for Replies {
     fn id(&self) -> HarnessId {
-        HarnessId::Mock
+        HarnessId::DeepSeek
     }
     fn display_name(&self) -> &str {
         "Replies"
@@ -171,7 +171,7 @@ impl Harness for Replies {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         Ok(futures::stream::iter([
             Ok(AgentEvent::SessionStarted {
-                harness: HarnessId::Mock,
+                harness: HarnessId::DeepSeek,
                 model: "m".into(),
                 tools: vec![],
                 cwd: "/tmp".into(),
@@ -197,7 +197,7 @@ fn assemble(dir: &std::path::Path, device: &str) -> EngineCore {
     std::fs::write(dir.join("device-id"), device).unwrap();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(Replies));
-    EngineCore::assemble(dir, Arc::new(registry), HarnessId::Mock, None).expect("engine")
+    EngineCore::assemble(dir, Arc::new(registry), HarnessId::DeepSeek, None).expect("engine")
 }
 
 const CHAT: &str = "whale";
@@ -209,7 +209,7 @@ const MESSAGE_BYTES: usize = 2 * 1024;
 /// needs nothing from its host.
 fn config() -> zeron_proto::ChatConfig {
     serde_json::from_value(
-        json!({"harness": "mock", "model": null, "reasoning": null, "sandbox": "workspace-write"}),
+        json!({"harness": "deepseek", "model": null, "reasoning": null, "sandbox": "workspace-write"}),
     )
     .unwrap()
 }
