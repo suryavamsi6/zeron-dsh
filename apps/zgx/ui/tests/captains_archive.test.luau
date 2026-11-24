@@ -37,6 +37,37 @@ local function shows(app: any, label: string): boolean
 	return app:tree(SIDE):find(` button "{label}`, 1, true) ~= nil
 end
 
+-- A condition waited for up to a ceiling, with how long it waited: the
+-- refusal's toast is shown after the roster re-read that follows the call,
+-- so its tick is the host's, not the page's. A fixed pause cannot tell "the
+-- page never drew it" from "the runner was slower than the pause" — this
+-- case's 600 ms passed on this host and failed on CI's loaded one. (The
+-- harness advances a frame clock, so the wait is counted in frames, the
+-- page's own unit, rather than in wall seconds no test can read.)
+local function until_true(app: any, wanted: () -> boolean, ceiling: number): (boolean, string)
+	local frames = 0
+	while true do
+		if wanted() then
+			return true, `{frames} frames`
+		end
+		if frames >= ceiling then
+			return false, `{frames} frames (the ceiling)`
+		end
+		app:frames(2)
+		frames += 2
+	end
+end
+
+-- Every toast standing, as the state the drawn one is built from: the case
+-- then does not rest on catching one frame of a live toast.
+local function toasts(app: any): string
+	local out = {}
+	for _, t in app:state("ds/toast.luau::ds_toasts") or {} do
+		table.insert(out, `{tostring(t.title)} {tostring(t.body)}`)
+	end
+	return table.concat(out, "\n")
+end
+
 test("SUR-251: a live Captain's menu offers Archive and Delete beside Demote", function()
 	local app = shell()
 	menu(app)
@@ -97,16 +128,24 @@ end)
 
 test("SUR-251: a refused delete leaves the row and says why", function()
 	local app = shell()
-	app:set_state("test_sur251_refuse", "The Captain isn't in the registry")
+	local why = "The Captain isn't in the registry"
+	app:set_state("test_sur251_refuse", why)
 	menu(app)
 	app:click('role:menuitem "Delete Captain"')
 	expect(app:wait('role:button "Delete"', { timeout_ms = 15000 })).to_be(true)
 	pause(app, 300)
 	app:click('role:button "Delete"')
-	pause(app, 600)
+	-- (The toast follows the roster re-read, so it is waited for rather than
+	-- sampled at a fixed tick — and the wait says how long it took.)
+	local drawn, waited = until_true(app, function(): boolean
+		return app:has(`"{why}"`)
+	end, 480)
+	expect(`the refusal's toast after {waited}: {drawn}`).to_be(`the refusal's toast after {waited}: true`)
 	expect(sent(app)).to_be("delete:a1")
 	expect(shows(app, "Billing")).to_be(true)
-	expect(app:tree()).to_contain("The Captain isn't in the registry")
+	expect(app:tree()).to_contain(why)
+	-- (And in the state the toast is built from, not only on screen.)
+	expect(toasts(app):find(why, 1, true) ~= nil).to_be(true)
 end)
 
 test("SUR-251: a Captain's row has one archive and one delete, and the delete is the Captain's", function()
