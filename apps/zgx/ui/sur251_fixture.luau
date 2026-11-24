@@ -15,9 +15,14 @@
 -- `crew`, `drivePath` — and nothing else; `archivedCrew` is the registry's
 -- own marker and never reaches the page.
 --
--- Archive moves the Captain's chat and its crew onto the Archived shelf, as
--- the host does (SUR-94: the flag and the chats are separate writes, so the
--- fixture writes both).
+-- Archive moves the Captain's **crew** onto the Archived shelf and leaves the
+-- Captain's own chat where it is, as the host does: `Registry::archive`
+-- returns the crew chats it moved and `apps/zgx/src/captains.rs` archives
+-- exactly those (`set_chat_archived` over `moved` only), while `DeleteCaptain`
+-- says the record's chats keep their rows. So a put-away Captain keeps an
+-- ordinary row, and its menu — Unarchive Captain, Delete Captain, the chat's
+-- own Archive and Delete suppressed — is reached on that row, not on the
+-- shelf.
 
 local tree = require("@app/shell_fixture")
 local sidebar = require("@app/screens/shell/sidebar")
@@ -115,13 +120,14 @@ end
 sidebar.archive_captain_call = function(chat: string): any
 	return acted("archive", chat, function()
 		asleep:set_key(chat, true)
-		local function one(id: string)
-			sessions.archive(id)
-		end
-		one(chat)
+		-- (The crew goes to the shelf and the Captain's own chat does not:
+		-- `Registry::archive` returns the crew chats it moved and the host
+		-- archives exactly those, while `DeleteCaptain` says the record's
+		-- chats keep their rows. So the Captain keeps an ordinary row, and
+		-- that row — not a shelf row — is where its menu is reached.)
 		for member, captain in members:peek() do
 			if captain == chat then
-				one(member)
+				sessions.archive(member)
 			end
 		end
 	end)
@@ -130,13 +136,10 @@ end
 sidebar.unarchive_captain_call = function(chat: string): any
 	return acted("unarchive", chat, function()
 		asleep:set_key(chat, nil)
-		local function one(id: string)
-			sessions.unarchive(id)
-		end
-		one(chat)
+		-- (The same set, woken: `unarchive_pending` names the crew chats.)
 		for member, captain in members:peek() do
 			if captain == chat then
-				one(member)
+				sessions.unarchive(member)
 			end
 		end
 	end)

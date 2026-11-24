@@ -85,30 +85,36 @@ test("SUR-251: Archive sends CaptainArchive and the Captain leaves the live grou
 	pause(app)
 	expect(sent(app)).to_be("archive:a1")
 	-- (Off the live group: the roster re-read says it is asleep, and its crew
-	-- went to the shelf with it.)
+	-- went to the shelf with it. The Captain's own chat keeps its row — the
+	-- host archives the crew's chats and not its own, so nothing is hidden
+	-- that the person did not hide.)
 	expect(shows(app, "Billing")).to_be(false)
 	expect(shows(app, "Write the docs")).to_be(false)
-	expect(shows(app, "Fix the build")).to_be(false)
+	expect(shows(app, "Fix the build")).to_be(true)
 end)
 
-test("SUR-251: the shelf wakes it with CaptainUnarchive, not the chat's own unarchive", function()
+test("SUR-251: a put-away Captain's own row offers Unarchive and Delete, and wakes it", function()
 	local app = shell()
 	menu(app)
 	app:click('role:menuitem "Archive Captain" [1]')
 	pause(app)
-	-- (Its own chat is on the Archived shelf, as the host archived it.)
-	app:set_state("screens/shell/sidebar.luau::shell_sidebar_show_archived", true)
-	app:frames(30)
-	expect(app:wait(`{SIDE} >> role:button "Fix the build"`, { timeout_ms = 15000 })).to_be(true)
-	app:hover(`{SIDE} >> role:button "Fix the build"`)
-	pause(app)
-	-- (The shelf's corner is the chat rows' own, one label for every row:
-	-- only the row under the pointer shows it, so it is not ambiguous here.)
-	app:click(`{SIDE} >> role:button "Unarchive"`)
+	-- (Its chat keeps an ordinary row, so the asleep menu is reached on that
+	-- row — not on the shelf, which carries the crew's chats. This is the
+	-- surface Chief's clause names: one archive item, one delete item, and
+	-- the chat's own Archive and Delete absent.)
+	menu(app)
+	expect(app:has('role:menuitem "Unarchive Captain"')).to_be(true)
+	expect(app:has('role:menuitem "Delete Captain"')).to_be(true)
+	expect(app:has('role:menuitem "Archive Captain"')).to_be(false)
+	expect(app:has('role:menuitem "Demote to chat"')).to_be(false)
+	expect(app:has('role:menuitem "Archive"')).to_be(false)
+	expect(app:has('role:menuitem "Delete…"')).to_be(false)
+	app:click('role:menuitem "Unarchive Captain"')
 	pause(app, 400)
+	-- (The Captain's own verb, not the chat's: it also brings the crew back.)
 	expect(sent(app)).to_be("archive:a1,unarchive:a1")
-	-- (Back in the live group, and not twice on the shelf.)
 	expect(shows(app, "Billing")).to_be(true)
+	expect(shows(app, "Write the docs")).to_be(true)
 end)
 
 test("SUR-251: Delete asks first in the issue's words, then removes the row and keeps the crew", function()

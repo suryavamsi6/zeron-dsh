@@ -1401,10 +1401,12 @@ local function menu(id: string): { any }?
 		end
 	end
 	local in_crew = crew_of:peek()[id]
-	-- (SUR-251: a Captain the person put away. It is no live row — its own
-	-- chat is on the Archived shelf — so its menu wakes it rather than
-	-- demoting it again, and Demote is not offered on it: the two states are
-	-- different flags and one is not a way to leave the other.)
+	-- (SUR-251: a Captain the person put away. It is no live row — but its own
+	-- chat keeps an ordinary row, because the host archives the crew's chats
+	-- and not the Captain's (`Registry::archive` moves `moved` only) — so the
+	-- menu on that row wakes it rather than demoting it again, and Demote is
+	-- not offered on it: the two states are different flags and one is not a
+	-- way to leave the other.)
 	local asleep = captain_asleep:peek()[id]
 	local entries = {
 		{
@@ -2163,8 +2165,10 @@ M.Sidebar = ui.component(function(props: Props): Node
 		on_unarchive = function(id: string)
 			-- (SUR-251: a Captain the person put away has its own way back —
 			-- the action that also restores the crew it moved. The chat's own
-			-- unarchive would wake the chat and leave the Captain asleep, so
-			-- the shelf's "Unarchive" asks the Captain's.)
+			-- unarchive would wake the chat and leave the Captain asleep. The
+			-- host archives the crew's chats and not the Captain's own, so
+			-- this is a guard kept for a chat that was archived by hand,
+			-- not the path a put-away Captain normally returns by.)
 			if captain_asleep:peek()[id] ~= nil then
 				M.unarchive_captain(id)
 			else
