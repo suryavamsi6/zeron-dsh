@@ -9463,6 +9463,130 @@ mod tests {
         );
     }
 
+    /// A Captain wired for a crew wake: its roster row, its Drive, the wake
+    /// seam, and its own turn ended so the chat is idle when the crew reports.
+    /// With `stopped`, the person's Stop is noted on the live turn first.
+    async fn captain_after_its_turn(
+        stopped: bool,
+    ) -> (
+        WakeRig,
+        std::path::PathBuf,
+        String,
+        Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        let rig = wake_rig("cap-a", false).await;
+        let dir = rig._dir.path();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            dir.join("captains.json"),
+            r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#,
+        )
+        .unwrap();
+        rig.core.sessions.use_captains_home(home.clone());
+        let drive = crate::captains::drive_dir(&home, "cap-a");
+        std::fs::create_dir_all(&drive).unwrap();
+        let wakes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = wakes.clone();
+        rig.core
+            .sessions
+            .use_crew_wake(Arc::new(move |captain: &str, text: &str| {
+                sink.lock()
+                    .unwrap()
+                    .push((captain.to_string(), text.to_string()));
+            }));
+        if stopped {
+            assert!(
+                rig.core.sessions.turn_in_flight("cap-a"),
+                "the Captain's run is live before the Stop"
+            );
+            rig.core.sessions.note_user_stop("cap-a");
+        }
+        let end = if stopped {
+            DoneStatus::Interrupted
+        } else {
+            DoneStatus::Completed
+        };
+        rig.feed.send(done(end)).unwrap();
+        let session = settled(&rig).await;
+        assert_eq!(session.status, SessionStatus::Idle, "the Captain's turn ended");
+        let stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        (rig, drive, stamp, wakes)
+    }
+
+    /// SUR-222: the person's Stop is a boundary a crew report does not cross.
+    /// The Captain's turn is stopped while the crew is still running; the
+    /// crew's finalization still writes its report, but must not wake the
+    /// Captain back into the turn it was stopped out of.
+    #[tokio::test]
+    async fn a_stopped_captain_is_not_woken_by_a_crew_report() {
+        let (rig, drive, stamp, wakes) = captain_after_its_turn(true).await;
+        assert!(rig.core.sessions.turn_end_writes(
+            "crew-b",
+            Some(&stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "run-stopped-wake",
+                text: Some("crew finished"),
+            })
+        ));
+        let report = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+        for _ in 0..200 {
+            if report.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            report.exists(),
+            "the report is written even when the wake is dropped: {}",
+            report.display()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            wakes.lock().unwrap().is_empty(),
+            "a stopped Captain is not woken: {:?}",
+            wakes.lock().unwrap()
+        );
+    }
+
+    /// The other half of SUR-222: without a Stop the same finalization wakes
+    /// the Captain exactly as before, pointer line included.
+    #[tokio::test]
+    async fn an_unstopped_captain_is_still_woken_by_a_crew_report() {
+        let (rig, _drive, stamp, wakes) = captain_after_its_turn(false).await;
+        assert!(rig.core.sessions.turn_end_writes(
+            "crew-b",
+            Some(&stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "run-wake",
+                text: Some("crew finished"),
+            })
+        ));
+        for _ in 0..200 {
+            if !wakes.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let wakes = wakes.lock().unwrap();
+        assert_eq!(wakes.len(), 1, "one wake for one turn: {wakes:?}");
+        assert_eq!(wakes[0].0, "cap-a");
+        assert!(
+            wakes[0].1.contains("reports/crew-b.md"),
+            "the pointer line is unchanged: {}",
+            wakes[0].1
+        );
+    }
+
     /// A completed turn that produced no text is not news: it keeps the old
     /// silence rather than writing a blank report and waking its Captain with
     /// an empty reply line. Only `error` and `aborted` earn the header-only
