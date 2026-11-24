@@ -2832,6 +2832,56 @@ mod tests {
         assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-y".to_string()]);
     }
 
+    /// SUR-190: the project rule gates `AddCrew`, not `RemoveCrew`. A member
+    /// whose chat row is re-assigned to another project after the add must
+    /// still be releasable — otherwise the stale crew entry has no API that
+    /// can clear it.
+    #[test]
+    fn a_crew_member_whose_chat_moved_to_another_project_can_still_be_removed() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-x", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .unwrap();
+        assert_eq!(crew(&rig.roster(), "cap-a"), vec!["chat-x".to_string()]);
+        let commits = rig.store.commits();
+
+        // The chat row is re-assigned to another project after the add.
+        let moved = FakeChats::default()
+            .row("cap-a", Some("space-1"), None)
+            .row("chat-x", Some("space-2"), None);
+        let rpc = CaptainsRpc {
+            store: &rig.store,
+            chats: &moved,
+            device_id: DEVICE,
+            deepseek_home: &rig.home,
+        };
+        rpc.call(
+            methods::REMOVE_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("a member whose row moved projects must still be removable");
+        assert!(
+            crew(&rig.roster(), "cap-a").is_empty(),
+            "the roster drops the moved member"
+        );
+        assert_eq!(
+            rig.store.commits(),
+            commits + 1,
+            "the removal is one committed change"
+        );
+    }
+
     #[test]
     fn add_crew_refuses_another_crews_member_and_a_child_of_an_ordinary_chat() {
         let rig = Rig::new(
