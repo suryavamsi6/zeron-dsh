@@ -499,9 +499,11 @@ const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
 /// The last assistant text of the turn being finalized.
 pub(crate) struct TurnText<'a> {
-    /// The `MessagePart::Text` id — the turn's identity for the de-duplication.
+    /// The run's id — the turn's identity for the de-duplication.
     pub id: &'a str,
-    pub text: &'a str,
+    /// The turn's last assistant text, when it produced any; a turn that
+    /// errored or was interrupted before replying has none.
+    pub text: Option<&'a str>,
 }
 
 #[derive(Clone)]
@@ -3037,13 +3039,14 @@ impl Inner {
     /// queues the report line to that Captain (`Inner::wake_captain`).
     /// `false` — nothing scheduled — for an unstamped turn, a stamp that
     /// fails to parse, a stamp with an empty `driveRoot`, a role that is
-    /// neither captain nor crew, a crew turn with no assistant text to
-    /// report, a crew turn already written (a duplicate finalization), and a
-    /// crew chat id that is not a bare filename; the role is the
-    /// dispatch-time stamp and the roster is never consulted at turn end
-    /// (the wake's own liveness check runs inside the blocking task, right
-    /// before the enqueue). The write itself runs off the event loop; its
-    /// outcome is traced, never propagated.
+    /// neither captain nor crew, a crew turn already written (a duplicate
+    /// finalization), and a crew chat id that is not a bare filename; a
+    /// crew turn with no assistant text still writes — a header-only
+    /// report carrying its status. The role is the dispatch-time stamp
+    /// and the roster is never consulted at turn end (the wake's own
+    /// liveness check runs inside the blocking task, right before the
+    /// enqueue). The write itself runs off the event loop; its outcome is
+    /// traced, never propagated.
     fn turn_end_writes(
         self: &Arc<Self>,
         chat_id: &str,
@@ -3140,7 +3143,7 @@ impl Inner {
                 lock(&self.crew_reports).insert(chat_id.to_string(), turn_text.id.to_string());
                 let chat_id = chat_id.to_string();
                 let turn_id = turn_text.id.to_string();
-                let text = turn_text.text.to_owned();
+                let text = turn_text.text.unwrap_or("").to_owned();
                 let captain_id = stamp["captainId"].as_str().map(str::to_owned);
                 let inner = self.clone();
                 tokio::task::spawn_blocking(move || {
@@ -6775,11 +6778,16 @@ async fn drive_run(
 
         if let AgentEvent::Done { status, .. } = &event {
             let last_text = folded.iter().rev().find_map(|part| match part {
-                MessagePart::Text { id, text } => Some(TurnText { id, text }),
+                MessagePart::Text { text, .. } => Some(text.as_str()),
                 _ => None,
             });
             let stamp = inner.dispatch_captain_stamp(&chat_id, &run_id);
-            inner.turn_end_writes(&chat_id, stamp.as_deref(), *status, last_text);
+            inner.turn_end_writes(
+                &chat_id,
+                stamp.as_deref(),
+                *status,
+                Some(TurnText { id: run_id.as_str(), text: last_text }),
+            );
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -9239,7 +9247,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-1",
-                    text: "first body",
+                    text: Some("first body"),
                 })
             ),
             "a crew turn's end schedules its report"
@@ -9255,7 +9263,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-1",
-                text: "first body",
+                text: Some("first body"),
             })
         ));
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -9273,7 +9281,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-2",
-                text: "second body",
+                text: Some("second body"),
             })
         ));
         for _ in 0..60 {
@@ -9314,7 +9322,15 @@ mod tests {
         let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
 
         assert!(
-            sessions.turn_end_writes("crew-b", Some(&crew_stamp), DoneStatus::Errored, None),
+            sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Errored,
+            Some(TurnText {
+                id: "run-err",
+                text: None,
+            })
+        ),
             "a textless errored crew turn still schedules its report"
         );
         let mut body = String::new();
@@ -9358,7 +9374,10 @@ mod tests {
                 "crew-b",
                 Some(&crew_stamp),
                 DoneStatus::Interrupted,
-                None
+                Some(TurnText {
+                    id: "run-int",
+                    text: None,
+                })
             ),
             "a textless interrupted crew turn still schedules its report"
         );
@@ -9417,7 +9436,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-1",
-                    text: "crew reply",
+                    text: Some("crew reply"),
                 })
             ),
             "a crew turn's end schedules its report and wake"
@@ -9430,7 +9449,7 @@ mod tests {
             DoneStatus::Completed,
             Some(TurnText {
                 id: "t-1",
-                text: "crew reply",
+                text: Some("crew reply"),
             })
         ));
         // The wake lands off the event loop: poll for it, then give a stray
@@ -9461,7 +9480,7 @@ mod tests {
                 DoneStatus::Completed,
                 Some(TurnText {
                     id: "t-2",
-                    text: "next reply",
+                    text: Some("next reply"),
                 })
             ),
             "a different turn schedules again"
