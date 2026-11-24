@@ -1503,16 +1503,27 @@ local function menu(id: string): { any }?
 		sleep,
 		stop_waiting,
 		{ separator = true },
-		{
-			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
-			label = locale.s("common.archive"),
-			icon = "archive-minimalistic",
-			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
-			on_select = function()
-				M.archive(id)
-			end,
-		},
-		{
+		-- (SUR-251: a Captain's row is the Captain, so the chat's own Archive
+		-- and Delete are not offered on it — archiving or deleting the chat
+		-- underneath a live record is the same inconsistency whichever verb
+		-- does it. The row's own Archive Captain / Delete Captain replace
+		-- them, and a demoted-but-not-Captain chat keeps them both.)
+		if captains:peek()[id] or asleep then
+			false
+		else
+			{
+				-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
+				label = locale.s("common.archive"),
+				icon = "archive-minimalistic",
+				disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
+				on_select = function()
+					M.archive(id)
+				end,
+			},
+		if captains:peek()[id] or asleep then
+			false
+		else
+			{
 			label = locale.s("shell.sidebar.menu.delete"),
 			icon = "trash-bin-minimalistic",
 			danger = true,
