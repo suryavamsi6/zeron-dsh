@@ -76,7 +76,15 @@ pub enum RespondInputOutcome {
 /// A parked input request: the questions asked (a `requires_person` one only
 /// the person's own client may answer) beside the run's resolver.
 type PendingInputs = Arc<
-    Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>>,
+    Mutex<
+        HashMap<
+            String,
+            (
+                Vec<UserInputQuestion>,
+                oneshot::Sender<(Vec<UserInputAnswer>, Option<InputActor>)>,
+            ),
+        >,
+    >,
 >;
 
 pub(crate) fn ensure_run_harness(harness: HarnessId) -> Result<(), EngineError> {
@@ -1661,7 +1669,9 @@ impl SessionsEngine {
                 tokio::spawn(async move {
                     tokio::select! {
                         // A dropped resolver stays an error for the harness, as before.
-                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                        answer = answer_rx => if let Ok((answers, by)) = answer {
+                            let _ = tx.send(zeron_harness::InputResponse { answers, by });
+                        },
                         _ = tx.closed() => {
                             lock(&pending).remove(&request_id);
                             // The run stopped waiting: closed unanswered.
@@ -2248,7 +2258,7 @@ impl SessionsEngine {
         // Unpark questions first: the stopped turn can never be answered.
         let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send((Vec::new(), None));
         }
         turn.stop_turn();
         let deadline = tokio::time::Instant::now() + STOP_SETTLE;
@@ -2293,7 +2303,7 @@ impl SessionsEngine {
         // Unpark questions before harness teardown, which can await them.
         let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send((Vec::new(), None));
         }
         // Harness-level interrupt (protocol + child teardown) …
         token.cancel();
@@ -2363,11 +2373,12 @@ impl SessionsEngine {
             return Ok(RespondInputOutcome::NoPending);
         };
         drop(parked);
-        let _ = resolver.send(answers.clone());
+        let by = Some(by.unwrap_or(InputActor::Client));
+        let _ = resolver.send((answers.clone(), by.clone()));
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
             answers: Some(answers),
-            by: Some(by.unwrap_or(InputActor::Client)),
+            by,
         });
         Ok(RespondInputOutcome::Applied)
     }
@@ -6485,7 +6496,7 @@ async fn drive_run(
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
                         if let Some((_, tx)) = resolver {
-                            let _ = tx.send(Vec::new());
+                            let _ = tx.send((Vec::new(), None));
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -6792,7 +6803,7 @@ async fn drive_run(
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
                 for (_, (_, tx)) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                    let _ = tx.send((Vec::new(), None));
                 }
             }
             let message_status = match status {

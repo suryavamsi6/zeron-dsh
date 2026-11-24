@@ -431,7 +431,7 @@ async fn sdk_runtime_round_trip_and_resume() {
             execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(vec![]);
+                let _ = tx.send(crate::InputResponse::default());
                 rx
             }),
             steering,
@@ -597,7 +597,7 @@ fn host_questions_carries_a_detail_field_and_keeps_the_folded_text() {
             "detail": "# Plan\n\n1. Do the thing",
         }]
     });
-    let questions = host_questions(&params).expect("a question");
+    let questions = host_questions(&params, false).expect("a question");
     assert_eq!(questions.len(), 1);
     let q = &questions[0];
     assert_eq!(
@@ -609,6 +609,40 @@ fn host_questions_carries_a_detail_field_and_keeps_the_folded_text() {
         q.question, "Approve this plan?\n\n# Plan\n\n1. Do the thing",
         "a text-only client must still see the plan folded in"
     );
+}
+
+#[test]
+fn only_a_host_stamped_captain_turn_makes_questions_person_only() {
+    let params = json!({"questions": [{"id":"q1", "question":"Proceed?"}]});
+    assert!(!host_questions(&params, false).unwrap()[0].requires_person);
+    assert!(host_questions(&params, true).unwrap()[0].requires_person);
+    let already_person_only = json!({"questions": [{
+        "id":"q1", "question":"Proceed?", "requiresPerson":true
+    }]});
+    assert!(host_questions(&already_person_only, false).unwrap()[0].requires_person);
+}
+
+#[test]
+fn question_tool_result_includes_the_resolver_actor() {
+    let questions = host_questions(
+        &json!({"questions": [{"id":"q1", "question":"Proceed?", "options":[{"label":"yes"}]}]}),
+        true,
+    )
+    .unwrap();
+    let result = question_result(
+        &questions,
+        crate::InputResponse {
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["yes".into()],
+            }],
+            by: Some(zeron_proto::InputActor::Agent {
+                chat_id: Some("agent-chat".into()),
+            }),
+        },
+    );
+    assert_eq!(result["answers"][0]["selected"][0], "yes");
+    assert_eq!(result["by"], json!({"kind":"agent", "chatId":"agent-chat"}));
 }
 
 #[test]

@@ -745,25 +745,20 @@ async fn run_child(
                                     let response = (controls.request_input)(vec![question.clone()]);
                                     answers.push(Box::pin(async move {
                                         let response = response.await.unwrap_or_default();
-                                        (id, json!({"outcome": if crate::approval::approved(&question, &response) {"allowed-once"} else {"rejected"}}))
+                                        (id, json!({"outcome": if crate::approval::approved(&question, &response.answers) {"allowed-once"} else {"rejected"}}))
                                     }));
                                 }
                             } else if method == "user-question/ask" {
-                                let questions = host_questions(params)?;
+                                let captain = request
+                                    .env
+                                    .get("ZERON_DEEPSEEK_CAPTAINS")
+                                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                                    .is_some_and(|stamp| stamp["role"] == "captain");
+                                let questions = host_questions(params, captain)?;
                                 let response = (controls.request_input)(questions.clone());
                                 answers.push(Box::pin(async move {
                                     let response = response.await.unwrap_or_default();
-                                    if response.len() != questions.len() { return (id, json!({"cancelled":true})) }
-                                    let mut encoded = Vec::new();
-                                    for question in questions {
-                                        let Some(answer) = response.iter().find(|a| a.question_id == question.id) else { return (id, json!({"cancelled":true})) };
-                                        let selected: Vec<_> = answer.labels.iter().filter(|s| question.options.contains(s)).collect();
-                                        let custom = answer.labels.iter().filter(|s| !question.options.contains(s)).cloned().collect::<Vec<_>>().join("\n");
-                                        let mut answer = json!({"id":question.id,"selected":selected});
-                                        if !custom.is_empty() { answer["custom"] = custom.into(); }
-                                        encoded.push(answer);
-                                    }
-                                    (id, json!({"answers":encoded}))
+                                    (id, question_result(&questions, response))
                                 }));
                             } else {
                                 write(&mut stdin, json!({"type":"answer","id":id,"result":{"cancelled":true}})).await?;
@@ -810,7 +805,7 @@ async fn run_child(
     result
 }
 
-fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError> {
+fn host_questions(params: &Value, captain: bool) -> Result<Vec<UserInputQuestion>, HarnessError> {
     let source = params["questions"]
         .as_array()
         .filter(|q| !q.is_empty())
@@ -846,10 +841,41 @@ fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError
                 multi_select: q["multiSelect"].as_bool().unwrap_or(false),
                 prefill: None,
                 multiline: false,
-                requires_person: q["requiresPerson"].as_bool().unwrap_or(false),
+                requires_person: captain || q["requiresPerson"].as_bool().unwrap_or(false),
                 note: None,
                 detail: q["detail"].as_str().filter(|d| !d.is_empty()).map(str::to_owned),
             })
         })
         .collect()
+}
+
+fn question_result(questions: &[UserInputQuestion], response: crate::InputResponse) -> Value {
+    if response.answers.len() != questions.len() {
+        return json!({"cancelled":true});
+    }
+    let mut encoded = Vec::new();
+    for question in questions {
+        let Some(answer) = response.answers.iter().find(|a| a.question_id == question.id) else {
+            return json!({"cancelled":true});
+        };
+        let selected: Vec<_> = answer
+            .labels
+            .iter()
+            .filter(|label| question.options.contains(label))
+            .collect();
+        let custom = answer
+            .labels
+            .iter()
+            .filter(|label| !question.options.contains(label))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut encoded_answer = json!({"id":question.id,"selected":selected});
+        if !custom.is_empty() {
+            encoded_answer["custom"] = custom.into();
+        }
+        encoded.push(encoded_answer);
+    }
+    let by = serde_json::to_value(response.by.unwrap_or_default()).unwrap_or(Value::Null);
+    json!({"answers":encoded,"by":by})
 }

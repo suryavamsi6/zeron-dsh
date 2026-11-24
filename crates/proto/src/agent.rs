@@ -1193,7 +1193,7 @@ pub struct ToolDiff {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InputActor {
-    /// No provenance was captured (events written before actors were recorded).
+    /// No resolver identity was captured for this answer.
     #[default]
     Unattributed,
     /// The person's own client: the desktop app's local IPC, the CLI, or their other device.

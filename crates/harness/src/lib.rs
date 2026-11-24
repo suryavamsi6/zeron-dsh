@@ -255,7 +255,7 @@ pub struct RunControls {
     /// the person closed the questions, or the run stopped waiting. Drivers
     /// answer it with their protocol's own decline where it has one.
     pub request_input: Box<
-        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
+        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<InputResponse> + Send + Sync,
     >,
     /// Steer prompts consumed at step/turn boundaries.
     pub steering: mpsc::Receiver<SteerMessage>,
@@ -265,6 +265,14 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
     /// Turn-level stop and background-work reporting (see [`TurnControl`]).
     pub turn: TurnControl,
+}
+
+/// Answers returned to a run, with the identity recorded by the host when
+/// the parked question was resolved.
+#[derive(Debug, Clone, Default)]
+pub struct InputResponse {
+    pub answers: Vec<UserInputAnswer>,
+    pub by: Option<zeron_proto::InputActor>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

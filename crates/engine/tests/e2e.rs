@@ -1631,6 +1631,7 @@ impl Harness for EchoAnswerHarness {
             .await
             .unwrap_or_default();
             let picked = answers
+                .answers
                 .first()
                 .and_then(|a| a.labels.first().cloned())
                 .unwrap_or_else(|| "none".into());
@@ -1967,6 +1968,7 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                 .await
                 .unwrap_or_default();
                 let picked = answers
+                    .answers
                     .first()
                     .and_then(|a| a.labels.first().cloned())
                     .unwrap_or_else(|| "none".into());
@@ -2326,6 +2328,7 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     .await
                     .unwrap_or_default();
                 let picked = answers
+                    .answers
                     .first()
                     .and_then(|a| a.labels.first().cloned())
                     .unwrap_or_else(|| "none".into());
@@ -2788,6 +2791,185 @@ async fn requires_person_card_refuses_an_agent_and_accepts_the_client() {
     assert_eq!(
         events[0]["event"]["by"],
         serde_json::json!({"kind": "client"})
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn agent_can_close_a_person_only_question_without_answering_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: true,
+        }),
+    );
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    core.workspace
+        .rename_chat(CHAT, "Dismiss decision (test)")
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-person-only-close",
+        SessionCommandPayload::Run {
+            request: run_request("ask then close"),
+            message_id: "m-close".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "person-only question to park",
+    )
+    .await;
+    let request_id = entries(&core)
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                resolved: false,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the question request id");
+    let client = zeron_rpc::memory_client(zeron_rpc::agent_service(
+        core.rpc_service(),
+        "agent-chat".into(),
+    ));
+    let reply = client
+        .call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": CHAT,
+                "command": SessionCommandPayload::RespondInput {
+                    request_id,
+                    answers: vec![],
+                    by: None,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let command_id = reply["commandId"].as_str().unwrap().to_string();
+    wait_for(
+        || {
+            command_status(&core, &command_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "empty agent answer command to settle",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, &command_id).map(|(status, _)| status),
+        Some(SessionCommandStatus::Applied),
+        "closing without answers is not an answer to the person-only decision"
+    );
+    wait_for(
+        || entries_now(&core).iter().any(|entry| {
+            entry.status == Some(MessageStatus::Complete)
+                && entry.parts.iter().any(|part| matches!(part, MessagePart::Text { text, .. } if text == "picked none"))
+        }),
+        "closed unanswered turn to complete",
+    )
+    .await;
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::Idle)
+    );
+    core.shutdown().await;
+}
+
+#[tokio::test]
+async fn queue_command_uses_agent_caller_instead_of_claimed_client_actor() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-for-agent-authority",
+        SessionCommandPayload::Run {
+            request: run_request("ask for actor authority"),
+            message_id: "m-actor-authority".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "question to park before the scoped answer",
+    )
+    .await;
+    let request_id = entries(&core)
+        .iter()
+        .flat_map(|entry| &entry.parts)
+        .find_map(|part| match part {
+            MessagePart::Input {
+                request_id,
+                resolved: false,
+                ..
+            } => Some(request_id.clone()),
+            _ => None,
+        })
+        .expect("the question request id");
+    let client = zeron_rpc::memory_client(zeron_rpc::agent_service(
+        core.rpc_service(),
+        "agent-chat".into(),
+    ));
+    let reply = client
+        .call(
+            zeron_rpc::methods::QUEUE_COMMAND,
+            serde_json::json!({
+                "chatId": CHAT,
+                "command": SessionCommandPayload::RespondInput {
+                    request_id,
+                    answers: vec![zeron_proto::UserInputAnswer {
+                        question_id: "q1".into(),
+                        labels: vec!["a".into()],
+                    }],
+                    by: Some(zeron_proto::InputActor::Client),
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    let command_id = reply["commandId"].as_str().unwrap().to_string();
+    wait_for(
+        || {
+            command_status(&core, &command_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "agent answer command to settle",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "answered session to settle",
+    )
+    .await;
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0]["event"]["by"],
+        serde_json::json!({"kind":"agent", "chatId":"agent-chat"}),
+        "the scoped caller, not a client claim in the command, controls provenance"
     );
     core.shutdown().await;
 }
