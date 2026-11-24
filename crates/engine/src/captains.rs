@@ -1661,8 +1661,8 @@ impl CaptainsRpc<'_> {
         row_gate(chat_id, self.chats.chat(chat_id), self.device_id)
     }
 
-    /// Both rows re-read under `MUTATION`, with the project rule applied to the
-    /// state being committed.
+    /// `AddCrew`'s under-lock gate: both rows re-read under `MUTATION`, with
+    /// the add-time project rule applied to the state being committed.
     fn committed_crew_rows(
         &self,
         captain_id: &str,
@@ -1780,13 +1780,17 @@ impl CaptainsRpc<'_> {
     }
 
     /// `RemoveCrew`: removing a member that isn't there is a committed
-    /// no-op; a Captain that isn't live has no crew to change.
+    /// no-op; a Captain that isn't live has no crew to change. The project
+    /// rule gates `AddCrew`, not this call — a member whose chat row moved
+    /// to another project after the add must still be releasable, so under
+    /// the lock both rows pass the row gate only.
     fn remove_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
         self.row(&params.captain_id)?;
         self.row(&params.chat_id)?;
         self.store
             .mutate(|registry| {
-                self.committed_crew_rows(&params.captain_id, &params.chat_id)?;
+                self.committed_row(&params.captain_id)?;
+                self.committed_row(&params.chat_id)?;
                 let Some(captain) = registry
                     .captains()
                     .iter()
