@@ -3300,4 +3300,332 @@ mod tests {
             "with index.js written the same directory resolves"
         );
     }
+
+    // ── SUR-94: the archive cascade ───────────────────────────────────────
+    // The cascade is not on this tree — `Captain` has no `userArchived` or
+    // `archivedCrew` fields and `ArchiveCaptain` / `UnarchiveCaptain` /
+    // `DeleteCaptain` are not methods — so these tests reach the methods by
+    // their RPC names and read `captains.json` as plain JSON. Each fails
+    // where the contract is missing: the unknown method first, then whatever
+    // the file or the predicates still lack.
+
+    /// `ArchiveCaptain` is a cascade: the record gains `userArchived` and
+    /// every crew chat live at that moment is moved with it, the marker
+    /// `archivedCrew` recording exactly those ids. `UnarchiveCaptain` wakes
+    /// only what the archive itself moved: the flag clears, the spent marker
+    /// goes, and the crew is live again — chat-c included, whose hand-set
+    /// archive was never the cascade's business.
+    #[test]
+    fn captain_archive_sleeps_the_whole_crew_and_unarchive_wakes_only_what_it_moved() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        // chat-c crews on record but is not live — the fixture's stand-in
+        // for a chat already archived by hand (the row gate would refuse
+        // AddCrew for it, so it joins straight on the registry). A live crew
+        // chat beside a not-live one is the pair the marker must split.
+        rig.store.add_crew("cap-a", "chat-c").unwrap();
+
+        let answer = rig
+            .call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        assert_eq!(
+            entry(&answer, "cap-a").expect("the record is kept")["userArchived"],
+            true,
+            "the archive answers the roster, flagged"
+        );
+
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(record["userArchived"], true, "the flag is persisted");
+        assert_eq!(
+            record["archived"], false,
+            "`archived` stays promote/demote's own flag — the cascade never writes it"
+        );
+        assert_eq!(
+            record["archivedCrew"],
+            json!(["chat-b"]),
+            "the marker records exactly the chats the archive moved — never chat-c"
+        );
+        assert_eq!(
+            record["crew"],
+            json!(["chat-b", "chat-c"]),
+            "the crew list itself is kept"
+        );
+        let snapshot = rig.store.snapshot();
+        assert!(
+            !snapshot.is_captain("cap-a"),
+            "a userArchived Captain is not live"
+        );
+        assert!(
+            snapshot.captain_of_crew("chat-b").is_none(),
+            "and its crew is not live either"
+        );
+
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let saved: Value = serde_json::from_slice(&rig.file()).unwrap();
+        let record = entry(&saved, "cap-a").unwrap();
+        assert_eq!(record["userArchived"], false, "the flag is cleared");
+        assert!(
+            record.get("archivedCrew").is_none(),
+            "the spent marker is cleared, not kept"
+        );
+        let snapshot = rig.store.snapshot();
+        assert!(snapshot.is_captain("cap-a"), "the Captain is live again");
+        assert_eq!(
+            snapshot.captain_of_crew("chat-b").unwrap().chat_id,
+            "cap-a",
+            "chat-b wakes with it"
+        );
+        assert_eq!(
+            snapshot.captain_of_crew("chat-c").unwrap().chat_id,
+            "cap-a",
+            "chat-c's membership never left; its hand-set flag stays untouched"
+        );
+    }
+
+    /// Both halves of the cascade are safe to retry: an archive of an
+    /// already-`userArchived` Captain moves nothing new — no commit, and no
+    /// second copy in the marker — and an unarchive of a Captain that is not
+    /// `userArchived` commits nothing either.
+    #[test]
+    fn captain_archive_twice_moves_nothing_the_second_time() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("ArchiveCaptain is one of the Captain methods");
+        let committed = rig.store.commits();
+        let saved = rig.file();
+
+        rig.call("ArchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("a retried archive is still answered");
+        assert_eq!(
+            rig.store.commits(),
+            committed,
+            "the second archive moves nothing"
+        );
+        assert_eq!(rig.file(), saved, "and writes nothing");
+        let after: Value = serde_json::from_slice(&rig.file()).unwrap();
+        assert_eq!(
+            entry(&after, "cap-a").unwrap()["archivedCrew"],
+            json!(["chat-b"]),
+            "the retry grew no marker"
+        );
+
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("UnarchiveCaptain is one of the Captain methods");
+        let committed = rig.store.commits();
+        let saved = rig.file();
+
+        // A Captain that is not userArchived has no marker to spend: the
+        // retried unarchive is the live-Captain no-op.
+        rig.call("UnarchiveCaptain", json!({"chatId": "cap-a"}))
+            .expect("a retried unarchive is still answered");
+        assert_eq!(
+            rig.store.commits(),
+            committed,
+            "an unarchive with nothing to spend commits nothing"
+        );
+        assert_eq!(rig.file(), saved, "and writes nothing");
+        let after: Value = serde_json::from_slice(&rig.file()).unwrap();
+        assert!(
+            entry(&after, "cap-a").unwrap().get("archivedCrew").is_none(),
+            "and the marker stays cleared"
+        );
+    }
+
+    /// `DeleteCaptain` drops the registry record and nothing else: the chats
+    /// it names keep their rows — the cascade never touches them — and the
+    /// Drive folder is the caller's to keep. What the registry can pin is
+    /// that the record is gone and its neighbour is whole.
+    #[test]
+    fn captain_delete_drops_the_record_and_keeps_its_chats() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let file = dir.path().join("captains.json");
+        // Two records on file: cap-a's, as archive-then-demote leaves it —
+        // both flags set, its spent marker kept — and a live cap-b with its
+        // crew. Nothing on this tree writes `userArchived`, so the record is
+        // seeded by hand.
+        std::fs::write(
+            &file,
+            r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"userArchived":true,"crew":["chat-b"],"archivedCrew":["chat-b"]},{"chatId":"cap-b","name":"Grace","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["chat-x"]}]}"#,
+        )
+        .unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let chats = FakeChats::default()
+            .row("cap-a", Some("space-1"), None)
+            .row("cap-b", Some("space-1"), None)
+            .row("chat-b", Some("space-1"), None)
+            .row("chat-x", Some("space-1"), None);
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+
+        let answer = rpc
+            .call("DeleteCaptain", &json!({"chatId": "cap-a"}))
+            .expect("DeleteCaptain is one of the Captain methods");
+        assert!(
+            entry(&answer, "cap-a").is_none(),
+            "the answer's roster has no row for it"
+        );
+        assert!(entry(&answer, "cap-b").is_some(), "cap-b's row answers still");
+
+        let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let captains = saved["captains"].as_array().unwrap();
+        assert_eq!(captains.len(), 1, "the one record dropped, the other kept");
+        let cap_b = entry(&saved, "cap-b").expect("cap-b's record is kept");
+        assert_eq!(cap_b["crew"], json!(["chat-x"]), "its crew intact");
+        assert_eq!(cap_b["archived"], false, "and still live");
+
+        let snapshot = store.snapshot();
+        assert!(!snapshot.is_captain("cap-a"));
+        assert!(snapshot.is_captain("cap-b"), "the other Captain stays live");
+        // chat-b was never a registry fact the delete could touch: its row
+        // lives in the workspace doc and the Drive in the caller's hands —
+        // both stay, and there is nothing here to count.
+    }
+
+    /// A `captains.json` written before the cascade has no `userArchived` or
+    /// `archivedCrew` key: it must still load — both fields are
+    /// `#[serde(default)]` — and an unarchive of such a record is a
+    /// committed no-op, not an error: there is no marker to spend.
+    #[test]
+    fn a_registry_file_without_the_marker_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let file = dir.path().join("captains.json");
+        // The pre-SUR-94 record: every key the file has ever had.
+        std::fs::write(
+            &file,
+            r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["chat-b"]}]}"#,
+        )
+        .unwrap();
+        let registry = Registry::load(dir.path()).unwrap();
+        assert!(
+            registry.is_captain("cap-a"),
+            "the old file loads as a live Captain"
+        );
+        assert_eq!(
+            registry.captain_of_crew("chat-b").unwrap().chat_id,
+            "cap-a"
+        );
+
+        let store = CaptainsStore::open(dir.path().to_path_buf()).unwrap();
+        let chats = FakeChats::default().row("cap-a", Some("space-1"), None);
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+        let before = std::fs::read(&file).unwrap();
+        rpc.call("UnarchiveCaptain", &json!({"chatId": "cap-a"}))
+            .expect("an unarchive with no marker to spend is a no-op, not an error");
+        assert_eq!(store.commits(), 0, "nothing moved, nothing committed");
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            before,
+            "and nothing written"
+        );
+    }
+
+    /// The two flags' boundary: `archived` — promote/demote's own — refuses
+    /// the archive, because a demoted Captain can never be hidden; while
+    /// `userArchived` alone is already not-live for the stamping predicates
+    /// (`is_captain`, `captain_of_crew`, `run_role`: the SUR-80/SUR-106
+    /// reads). Neither flag may write the other.
+    #[test]
+    fn a_demoted_captain_cannot_be_hidden_and_a_user_archived_one_is_not_live() {
+        let rig = Rig::new(
+            FakeChats::default()
+                .row("cap-a", Some("space-1"), None)
+                .row("chat-b", Some("space-1"), None),
+        );
+        rig.call(
+            methods::PROMOTE_CAPTAIN,
+            json!({"chatId": "cap-a", "name": "Ada"}),
+        )
+        .unwrap();
+        rig.call(
+            methods::ADD_CREW,
+            json!({"captainId": "cap-a", "chatId": "chat-b"}),
+        )
+        .unwrap();
+        rig.call(methods::DEMOTE_CAPTAIN, json!({"chatId": "cap-a"}))
+            .unwrap();
+        let before = rig.file();
+
+        // Archive is refused on a demoted record — as bad params, the
+        // registry's own refusal kind, not a silent no-op.
+        match rig.call("ArchiveCaptain", json!({"chatId": "cap-a"})) {
+            Err(RpcError::BadParams(_)) => {}
+            other => panic!(
+                "a demoted Captain must refuse the archive as bad params, got {other:?}"
+            ),
+        }
+        assert_eq!(rig.file(), before, "the refused archive writes nothing");
+
+        // A live record carrying `userArchived` alone — the file as an
+        // archive leaves it, seeded by hand because nothing on this tree
+        // produces one yet.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("captains.json"),
+            r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"userArchived":true,"crew":["chat-b"],"archivedCrew":["chat-b"]}]}"#,
+        )
+        .unwrap();
+        let registry = Registry::load(dir.path()).unwrap();
+        assert!(
+            !registry.is_captain("cap-a"),
+            "a userArchived Captain is not live: is_captain reads archived || userArchived"
+        );
+        assert!(
+            registry.captain_of_crew("chat-b").is_none(),
+            "and its crew is not stamped"
+        );
+        assert_eq!(registry.run_role("cap-a"), RunRole::None);
+        assert_eq!(registry.run_role("chat-b"), RunRole::None);
+        let home = Path::new("/deepseek-home");
+        assert!(
+            captains_env(&registry, home, "cap-a").is_none(),
+            "no stamp for a hidden Captain"
+        );
+        assert!(
+            captains_env(&registry, home, "chat-b").is_none(),
+            "nor for its crew"
+        );
+    }
 }

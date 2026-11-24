@@ -1,10 +1,12 @@
 //! SUR-83: the five Captain host actions are thin forwards — one RPC method
 //! each, with the engine's own field names — and a refusal reaches the page as
-//! the host's error instead of a swallowed success.
+//! the host's error instead of a swallowed success. SUR-94 adds the cascade's
+//! three — `CaptainArchive`, `CaptainUnarchive`, `CaptainDelete` — the same
+//! shape.
 //!
-//! The page is inline: it calls all five through `ui.call` and reports each
-//! answer back through `test.record`, so what is asserted is what left the
-//! host, not what a screen drew. `install_over` is the seam taken, so the
+//! The page is inline: it calls each through `ui.call` and reports the answer
+//! or the refusal back through `test.record`, so what is asserted is what left
+//! the host, not what a screen drew. `install_over` is the seam taken, so the
 //! bridge's own forwarding is what runs.
 
 use std::cell::{Cell, RefCell};
@@ -335,5 +337,112 @@ return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "drive sha
             "escape=err".to_owned(),
         ],
         "the action's own answer: a relative name, \"directory\", RFC 3339 mtime text, {{ text, size }}"
+    );
+}
+
+/// SUR-94: the archive cascade's three host actions are the same thin
+/// forwards — `CaptainArchive`, `CaptainUnarchive`, `CaptainDelete` each take
+/// `{ chatId }` and dispatch `ArchiveCaptain`, `UnarchiveCaptain`,
+/// `DeleteCaptain` — and an engine refusal reaches the page as the host's
+/// error, not a null or an empty roster.
+#[test]
+fn the_new_captain_actions_forward_to_their_own_rpc_methods() {
+    let sent: Rc<RefCell<Vec<(String, Json)>>> = Rc::default();
+    let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+    let done = Rc::new(Cell::new(false));
+
+    let recording = Rc::clone(&sent);
+    let call = move |method: &'static str, params: Json| -> crate::providers::McpCall {
+        let sent = Rc::clone(&recording);
+        Box::pin(async move {
+            sent.borrow_mut().push((method.to_owned(), params));
+            // The engine refuses a delete of a chat that is not a Captain, in
+            // its own words. The bridge must not turn that into an empty
+            // roster.
+            if method == "DeleteCaptain" {
+                return Err("bad params: chat-a is not a Captain on this device".to_owned());
+            }
+            Ok(json!({ "captains": [] }))
+        })
+    };
+
+    let page = r#"
+local CALLS = {
+	{ name = "CaptainArchive", arg = { chatId = "chat-a" } },
+	{ name = "CaptainUnarchive", arg = { chatId = "chat-a" } },
+	{ name = "CaptainDelete", arg = { chatId = "chat-a" } },
+}
+
+local function step(i: number)
+	if i > #CALLS then
+		ui.invoke("test.done", nil)
+		return
+	end
+	local call = CALLS[i]
+	local promise = if call.arg then ui.call(call.name, call.arg) else ui.call(call.name)
+	promise:after(function(_answer: any)
+		ui.invoke("test.record", call.name .. "=ok")
+		step(i + 1)
+	end, function(err: any)
+		ui.invoke("test.record", call.name .. "=err:" .. tostring(err.message))
+		step(i + 1)
+	end)
+end
+
+step(1)
+
+return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "captain archive" }) })
+"#;
+
+    let app = {
+        let lines = Rc::clone(&lines);
+        let done = Rc::clone(&done);
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "captain_archive", page);
+            crate::captains::install_over(&host, call);
+            host.action("test.record", move |line| {
+                lines.borrow_mut().push(crate::auth::text(&line));
+            });
+            host.action("test.done", move |_| done.set(true));
+            host
+        })
+    };
+    let mut app = app;
+
+    // Deliver frames and real time until the page's three calls have all come
+    // back (about four seconds at most).
+    for _ in 0..2000 {
+        app.frames(1);
+        if done.get() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+
+    let sent = sent.borrow();
+    let got: Vec<(&str, &Json)> = sent.iter().map(|(method, params)| (method.as_str(), params)).collect();
+    assert_eq!(
+        got,
+        vec![
+            ("ArchiveCaptain", &json!({ "chatId": "chat-a" })),
+            ("UnarchiveCaptain", &json!({ "chatId": "chat-a" })),
+            ("DeleteCaptain", &json!({ "chatId": "chat-a" })),
+        ],
+        "each new action forwards to its own RPC method, with the engine's field names"
+    );
+
+    assert!(
+        done.get(),
+        "the page never finished its three calls; what came back: {:?}",
+        lines.borrow()
+    );
+    assert_eq!(
+        *lines.borrow(),
+        vec![
+            "CaptainArchive=ok".to_owned(),
+            "CaptainUnarchive=ok".to_owned(),
+            "CaptainDelete=err:bad params: chat-a is not a Captain on this device".to_owned(),
+        ],
+        "a refusal reaches the page as the host's error, in the engine's own words"
     );
 }
