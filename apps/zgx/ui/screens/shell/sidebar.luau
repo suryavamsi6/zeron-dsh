@@ -489,6 +489,11 @@ end
 -- a promotion or a demotion).
 local crew_of = ui.state("shell_crew_of", {} :: { [string]: string })
 local captain_rows = ui.state("shell_captain_rows", {} :: { { chatId: string, name: string } })
+-- (SUR-251: the Captains the person put away, `userArchived` — asleep, not
+-- demoted. Kept apart from the live rows above so the Captains group lists
+-- only live ones while the Archived shelf can still reach them and wake
+-- them; `archived` — a demoted record — stays out of both, as SUR-91 ruled.)
+local captain_asleep = ui.state("shell_captain_asleep", {} :: { [string]: string })
 
 local projects = ui.computed(function(): { ds.SidebarProject }
 	local now = sessions.now:get()
@@ -955,12 +960,28 @@ local function read_captains()
 		local names: { [string]: string } = {}
 		local crews: { [string]: string } = {}
 		local rows: { { chatId: string, name: string } } = {}
+		local asleep: { [string]: string } = {}
 		for _, c in (answer and answer.captains) or {} do
+			-- (SUR-251: a Captain the person put away — `userArchived` — is a
+			-- separate record from a demoted one. It is no crew to join and
+			-- no live row, but it must stay reachable: it is listed on the
+			-- Archived shelf and woken from there.)
+			if
+				type(c) == "table"
+				and type(c.chatId) == "string"
+				and c.archived ~= true
+				and c.userArchived == true
+			then
+				local name = if type(c.name) == "string" then c.name else ""
+				asleep[c.chatId] = name
+				names[c.chatId] = name
+				-- (No crew map: an asleep Captain's crew is asleep with it, so
+				-- none of them is a live member of anything.)
 			-- (The roster keeps a demoted Captain as an archived record
 			-- (`captains.rs`'s roster: the live and archived rows alike), so
 			-- it is not one to offer, not a crew to join, and not a chat to
 			-- demote again: skipped here, the read is the live roster.)
-			if type(c) == "table" and type(c.chatId) == "string" and c.archived ~= true then
+			elseif type(c) == "table" and type(c.chatId) == "string" and c.archived ~= true then
 				found[c.chatId] = true
 				names[c.chatId] = if type(c.name) == "string" then c.name else ""
 				table.insert(rows, { chatId = c.chatId, name = names[c.chatId] })
@@ -985,6 +1006,9 @@ local function read_captains()
 			end
 			if captain_rows then
 				captain_rows:set(rows)
+			end
+			if captain_asleep then
+				captain_asleep:set(asleep)
 			end
 		end)
 	end, function()
@@ -1040,6 +1064,21 @@ end
 
 function M.remove_crew_call(captain_id: string, chat_id: string): any
 	return ui.call("RemoveCrew", { captainId = captain_id, chatId = chat_id })
+end
+
+-- Putting a Captain away, waking it, and deleting it (SUR-94's three host
+-- actions, SUR-251's menu). Each takes the Captain's chat id and answers the
+-- new roster; a refusal is a command error, not a null.
+function M.archive_captain_call(chat_id: string): any
+	return ui.call("CaptainArchive", { chatId = chat_id })
+end
+
+function M.unarchive_captain_call(chat_id: string): any
+	return ui.call("CaptainUnarchive", { chatId = chat_id })
+end
+
+function M.delete_captain_call(chat_id: string): any
+	return ui.call("CaptainDelete", { chatId = chat_id })
 end
 
 -- You and settings at a sidebar's foot (this one's, and the settings
@@ -1340,7 +1379,7 @@ local function menu(id: string): { any }?
 	-- stays and says why, rather than disappearing.
 	local crew_into: { any } = {}
 	local crew_reason: string? = nil
-	if captains:peek()[id] then
+	if captains:peek()[id] or captain_asleep:peek()[id] ~= nil then
 		crew_reason = locale.s("shell.sidebar.captains.move_already")
 	elseif side then
 		crew_reason = locale.s("shell.sidebar.captains.move_child")
@@ -1362,6 +1401,13 @@ local function menu(id: string): { any }?
 		end
 	end
 	local in_crew = crew_of:peek()[id]
+	-- (SUR-251: a Captain the person put away. It is no live row — but its own
+	-- chat keeps an ordinary row, because the host archives the crew's chats
+	-- and not the Captain's (`Registry::archive` moves `moved` only) — so the
+	-- menu on that row wakes it rather than demoting it again, and Demote is
+	-- not offered on it: the two states are different flags and one is not a
+	-- way to leave the other.)
+	local asleep = captain_asleep:peek()[id]
 	local entries = {
 		{
 			label = locale.s("common.rename"),
@@ -1374,11 +1420,18 @@ local function menu(id: string): { any }?
 		-- chat's own menu — never a child's, never a side chat's.)
 		if side
 			then false
-			elseif captains:peek()[id] then {
-				label = locale.s("shell.sidebar.captains.demote"),
-				icon = "arrow-down",
+			elseif asleep then {
+				label = locale.s("shell.sidebar.captains.unarchive"),
+				icon = "inbox",
 				on_select = function()
-					M.demote(id)
+					M.unarchive_captain(id)
+				end,
+			}
+			elseif captains:peek()[id] then {
+				label = locale.s("shell.sidebar.captains.archive"),
+				icon = "archive-minimalistic",
+				on_select = function()
+					M.archive_captain(id)
 				end,
 			}
 			else {
@@ -1386,6 +1439,31 @@ local function menu(id: string): { any }?
 				icon = "arrow-up",
 				on_select = function()
 					M.promote(id)
+				end,
+			},
+		-- (Its state's own items: a live Captain still demotes — the flag
+		-- demote writes is the other one, untouched here — and both a live and
+		-- an asleep Captain offer Delete, the destructive one, behind its
+		-- dialog. An asleep Captain never demotes: waking it is its one way
+		-- back, and the shelf's row offers only that and Delete.)
+		if side or not captains:peek()[id] then
+			false
+		else
+			{
+				label = locale.s("shell.sidebar.captains.demote"),
+				icon = "arrow-down",
+				on_select = function()
+					M.demote(id)
+				end,
+			},
+		if side or not (captains:peek()[id] or asleep) then
+			false
+		else
+			{
+				label = locale.s("shell.sidebar.captains.delete"),
+				icon = "trash-bin-minimalistic",
+				on_select = function()
+					M.delete_captain(id)
 				end,
 			},
 		-- (The crew (SUR-91). A member's menu releases it; every other
@@ -1427,16 +1505,27 @@ local function menu(id: string): { any }?
 		sleep,
 		stop_waiting,
 		{ separator = true },
-		{
-			-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
-			label = locale.s("common.archive"),
-			icon = "archive-minimalistic",
-			disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
-			on_select = function()
-				M.archive(id)
-			end,
-		},
-		{
+		-- (SUR-251: a Captain's row is the Captain, so the chat's own Archive
+		-- and Delete are not offered on it — archiving or deleting the chat
+		-- underneath a live record is the same inconsistency whichever verb
+		-- does it. The row's own Archive Captain / Delete Captain replace
+		-- them, and a demoted-but-not-Captain chat keeps them both.)
+		if captains:peek()[id] or asleep then
+			false
+		else
+			{
+				-- (No key: ⌘⌫ is a text field's, deleting to the line's start.)
+				label = locale.s("common.archive"),
+				icon = "archive-minimalistic",
+				disabled = if c.status == "working" or c.status == "waiting" then locale.s("shell.sidebar.menu.archive_working") else nil,
+				on_select = function()
+					M.archive(id)
+				end,
+			},
+		if captains:peek()[id] or asleep then
+			false
+		else
+			{
 			label = locale.s("shell.sidebar.menu.delete"),
 			icon = "trash-bin-minimalistic",
 			danger = true,
@@ -1759,6 +1848,9 @@ local promote_open = ui.state("shell_promote_open", false)
 local promote_name = ui.state("shell_promote_name", "")
 local demoting = ui.state("shell_demoting", nil :: string?)
 local demote_open = ui.state("shell_demote_open", false)
+-- (SUR-251: the Captain the Delete dialog is about, and whether it is open.)
+local deleting_captain = ui.state("shell_deleting_captain", nil :: string?)
+local delete_captain_open = ui.state("shell_delete_captain_open", false)
 
 -- The engine's refusal as the page says it: its own words where it has them.
 local function why_of(err: any): string?
@@ -1816,6 +1908,39 @@ function M.demote(id: string)
 	end
 	demoting:set(id)
 	demote_open:set(true)
+end
+
+-- Putting a Captain away and waking it (SUR-251, the host's CaptainArchive and
+-- CaptainUnarchive). No dialog: neither loses anything — the crew is kept and
+-- the record stays on the roster — so the row's own menu does it, and the
+-- sidebar re-reads the roster rather than patching local state.
+local function captain_settled(ok: () -> (), failed_key: string, id: string): (any, any)
+	return ok, function(err: any)
+		captains_toast(locale.s(failed_key, { name = captain_name_of(id) }), why_of(err))
+	end
+end
+
+function M.archive_captain(id: string)
+	if not chat(id) then
+		return
+	end
+	local ok, failed = captain_settled(read_captains, "shell.sidebar.captains.archive_failed", id)
+	M.archive_captain_call(id):after(ok, failed)
+end
+
+function M.unarchive_captain(id: string)
+	-- (No live-chat guard: an asleep Captain's chat is archived, so `chat`
+	-- has nothing for it — and it is exactly the row this is asked from.)
+	local ok, failed = captain_settled(read_captains, "shell.sidebar.captains.unarchive_failed", id)
+	M.unarchive_captain_call(id):after(ok, failed)
+end
+
+-- Delete shows its dialog first: the one action here that cannot be undone
+-- from the row.
+function M.delete_captain(id: string)
+	-- (The same: an asleep Captain is deleted from its archived row.)
+	deleting_captain:set(id)
+	delete_captain_open:set(true)
 end
 
 -- The engine's rule refusal (a crew member is in the Captain's project, a
@@ -1934,6 +2059,35 @@ local function demote_dialog(): Node
 	}
 end
 
+-- Delete Captain <name>? Its crew stays in your chat list. (The sentence is
+-- the dialog's title so it reads whole, and it is the issue's wording
+-- verbatim: the crew is not deleted with the Captain — only the record is.)
+local function delete_captain_dialog(): Node
+	local function done()
+		local id = deleting_captain:peek()
+		deleting_captain:set(nil)
+		delete_captain_open:set(false)
+		if not id then
+			return
+		end
+		M.delete_captain_call(id):after(read_captains, function(err: any)
+			captains_toast(locale.s("shell.sidebar.captains.delete_failed", { name = captain_name_of(id) }), why_of(err))
+		end)
+	end
+	return ds.Dialog {
+		open = delete_captain_open,
+		-- (A function, not a message once read: the dialog is built with the
+		-- page, so a name taken then would be the one before the row was
+		-- chosen.)
+		title = function(): string
+			return ui.t("shell.sidebar.captains.delete_title", { name = captain_name_of(deleting_captain:get()) }):get()
+		end :: any,
+		tone = "danger",
+		size = "sm",
+		confirm = { label = ui.t("shell.sidebar.captains.delete_confirm") :: any, on_click = done },
+	}
+end
+
 local function rename_dialog(): Node
 	local function done()
 		local id = renaming:peek()
@@ -2009,7 +2163,17 @@ M.Sidebar = ui.component(function(props: Props): Node
 			route.settings("activity")
 		end,
 		on_unarchive = function(id: string)
-			sessions.unarchive(id)
+			-- (SUR-251: a Captain the person put away has its own way back —
+			-- the action that also restores the crew it moved. The chat's own
+			-- unarchive would wake the chat and leave the Captain asleep. The
+			-- host archives the crew's chats and not the Captain's own, so
+			-- this is a guard kept for a chat that was archived by hand,
+			-- not the path a put-away Captain normally returns by.)
+			if captain_asleep:peek()[id] ~= nil then
+				M.unarchive_captain(id)
+			else
+				sessions.unarchive(id)
+			end
 		end,
 		pages = ui.shared("plugins.pages", {} :: { any }),
 		on_page = function(page: any)
@@ -2074,6 +2238,7 @@ M.Sidebar = ui.component(function(props: Props): Node
 		rename_dialog(),
 		promote_dialog(),
 		demote_dialog(),
+		delete_captain_dialog(),
 		delete_dialog(),
 		sleep_dialog(),
 		project_dialogs(),

@@ -2733,7 +2733,15 @@
         "move_child": "A child chat can't join a crew",
         "remove_crew": "Remove from crew",
         "move_failed": "Couldn't add {name} to {captain}'s crew",
-        "remove_failed": "Couldn't remove {name} from the crew"
+        "remove_failed": "Couldn't remove {name} from the crew",
+        "archive": "Archive Captain",
+        "unarchive": "Unarchive Captain",
+        "delete": "Delete Captain",
+        "delete_title": "Delete Captain {name}? Its crew stays in your chat list.",
+        "delete_confirm": "Delete",
+        "archive_failed": "Couldn't archive {name}",
+        "unarchive_failed": "Couldn't wake {name}",
+        "delete_failed": "Couldn't delete {name}"
       },
       "project": {
         "rename_title": "Rename project",
