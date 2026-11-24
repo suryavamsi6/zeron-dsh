@@ -3,6 +3,16 @@
 //! plugin never reads it (it gets its role stamped per run). The Drive
 //! directory is the engine's too: `ensure_drive` creates it, idempotently,
 //! before a Captain or crew chat's first dispatch.
+//!
+//! The file is the roster's authority for which chats exist: a row deleted
+//! after a roster change commits leaves its record in place, because the
+//! chat store takes no part in the Captains lock and a delete can land
+//! between the under-lock row re-read and the save (SUR-189). Such a record
+//! is repaired explicitly rather than guessed at: `DeleteCaptain` drops a
+//! Captain record without needing its row, and `RemoveCrew` drops a crew
+//! entry whose member row is gone. Until then the roster keeps showing it —
+//! the honest report of what was committed, not a claim that the chat still
+//! exists.
 
 use std::collections::HashSet;
 use std::io::Write;
@@ -1679,9 +1689,11 @@ impl CaptainsRpc<'_> {
     /// window. A turn that starts between the under-lock re-read and the
     /// rename samples the previous role and is corrected on its next turn.
     /// A deleted row still leaves its registry record, because the chat
-    /// store does not cascade; what that record means for the roster —
-    /// whether it is pruned or repaired — is SUR-189's decision, not made
-    /// here.
+    /// store does not cascade and this read cannot see a delete that lands
+    /// after it; such a record is repaired explicitly (SUR-189) — the
+    /// roster keeps showing it, `DeleteCaptain` drops a Captain record
+    /// without its row, and `RemoveCrew` drops a crew entry whose member
+    /// row is gone.
     fn committed_row(&self, chat_id: &str) -> Result<ChatRow, String> {
         row_gate(chat_id, self.chats.chat(chat_id), self.device_id)
     }
@@ -1807,15 +1819,23 @@ impl CaptainsRpc<'_> {
     /// `RemoveCrew`: removing a member that isn't there is a committed
     /// no-op; a Captain that isn't live has no crew to change. The project
     /// rule gates `AddCrew`, not this call — a member whose chat row moved
-    /// to another project after the add must still be releasable, so under
-    /// the lock both rows pass the row gate only.
+    /// to another project after the add must still be releasable, so the
+    /// gate here is the row gate only. A member row that is gone is the
+    /// record a delete in the commit window leaves (SUR-189), not a bad
+    /// argument — the roster keeps it and this call is the repair, so only
+    /// a row that still exists must pass the gate; the Captain's own row is
+    /// still required, and `DeleteCaptain` repairs a missing Captain.
     fn remove_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
         self.row(&params.captain_id)?;
-        self.row(&params.chat_id)?;
+        if let Some(row) = self.chats.chat(&params.chat_id) {
+            row_gate(&params.chat_id, Some(row), self.device_id).map_err(RpcError::BadParams)?;
+        }
         self.store
             .mutate(|registry| {
                 self.committed_row(&params.captain_id)?;
-                self.committed_row(&params.chat_id)?;
+                if let Some(row) = self.chats.chat(&params.chat_id) {
+                    row_gate(&params.chat_id, Some(row), self.device_id)?;
+                }
                 let Some(captain) = registry
                     .captains()
                     .iter()
@@ -3028,6 +3048,86 @@ mod tests {
         let registry = store.snapshot();
         let captain = registry.captains().iter().find(|c| c.chat_id == "cap-a").unwrap();
         assert!(captain.crew.is_empty(), "the roster kept the move out: {:?}", captain.crew);
+    }
+
+    /// The row that answers the operation's reads and is gone immediately
+    /// after: a delete landing between the under-lock re-read and the save,
+    /// the window the chat store's own lock cannot close because it takes no
+    /// part in `MUTATION`. The member answers the two reads a successful add
+    /// makes (its pre-check and the under-lock pair), then reports gone.
+    struct VanishingChat {
+        member: String,
+        reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Chats for VanishingChat {
+        fn chat(&self, chat_id: &str) -> Option<ChatRow> {
+            if chat_id == self.member {
+                let seen = self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if seen >= 2 {
+                    return None;
+                }
+            }
+            Some(ChatRow {
+                space_id: Some("space-1".to_string()),
+                parent_chat_id: None,
+                device_id: DEVICE.to_string(),
+                turn_in_flight: false,
+                archived: false,
+            })
+        }
+
+        fn set_chat_archived(&self, _chat_id: &str, _archived: bool) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// SUR-189: a delete that lands after the under-lock row re-read leaves a
+    /// committed record for a chat that no longer exists — the `committed_row`
+    /// doc's residual, and the roster keeps it until it is repaired. The
+    /// repair path is `RemoveCrew`: a member row that is gone is the dangling
+    /// record this call exists to clear, not a bad argument.
+    #[test]
+    fn a_crew_entry_left_by_a_delete_in_the_commit_window_can_be_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("deepseek");
+        std::fs::create_dir(&home).unwrap();
+        let store = CaptainsStore::open(dir.path().to_path_buf());
+        store.promote("cap-a", "Ada").unwrap();
+        let chats = VanishingChat {
+            member: "chat-x".to_string(),
+            reads: std::sync::atomic::AtomicUsize::new(0),
+        };
+        let rpc = CaptainsRpc {
+            store: &store,
+            chats: &chats,
+            device_id: DEVICE,
+            deepseek_home: &home,
+        };
+
+        rpc.call(
+            methods::ADD_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("the add sees the row: the delete lands after its under-lock re-read");
+        let roster = rpc.call(methods::CAPTAINS, &json!({})).unwrap();
+        assert_eq!(
+            crew(&roster, "cap-a"),
+            vec!["chat-x".to_string()],
+            "the committed record survives the delete: the documented residual"
+        );
+
+        rpc.call(
+            methods::REMOVE_CREW,
+            &json!({"captainId": "cap-a", "chatId": "chat-x"}),
+        )
+        .expect("a dangling crew entry is repairable without its row");
+        let roster = rpc.call(methods::CAPTAINS, &json!({})).unwrap();
+        assert!(
+            crew(&roster, "cap-a").is_empty(),
+            "the roster drops the repaired entry: {:?}",
+            crew(&roster, "cap-a")
+        );
     }
 
     #[test]
