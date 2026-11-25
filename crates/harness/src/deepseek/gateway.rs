@@ -57,6 +57,7 @@ struct Session {
     base: String,
     cookie: String,
     child: Child,
+    dotenv: BTreeMap<String, String>,
 }
 
 /// The gateway over one DSH home. Its settings and credentials are the same
@@ -107,6 +108,22 @@ impl Gateway {
             .await
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
         interpret(status.as_u16(), &text)
+    }
+
+    /// A credential value from the `.env` snapshot this gateway launched
+    /// with. DSH reads those files once while booting, so a later edit must
+    /// not make the account read answer for a different key than the running
+    /// gateway reports configured.
+    pub async fn dotenv_key(&self, reference: &str) -> Option<String> {
+        self.endpoint().await.ok()?;
+        self.session
+            .lock()
+            .await
+            .as_ref()?
+            .dotenv
+            .get(reference)
+            .filter(|value| !value.is_empty())
+            .cloned()
     }
 
     /// Stop the service if it is running; the next call starts a fresh one.
@@ -185,6 +202,7 @@ impl Gateway {
             crate::executable::Platform::current(),
         )
         .ok_or_else(|| GatewayError::NotInstalled("Node >=24.9".into()))?;
+        let dotenv = dotenv_snapshot(&self.home);
         let mut command = Command::new(&node);
         command
             .arg(&bin)
@@ -252,6 +270,7 @@ impl Gateway {
             base: launched.base,
             cookie,
             child,
+            dotenv,
         })
     }
 }
@@ -322,6 +341,85 @@ fn interpret(status: u16, body: &str) -> Result<Value, GatewayError> {
             .unwrap_or("the settings service refused the call")
             .to_owned(),
     })
+}
+
+/// The invoking project's `.env` backed by the Harness home's, in the
+/// precedence order DSH's launch environment gives them. Values are captured
+/// beside the spawn because the child snapshots both files once at boot;
+/// within one file a repeated assignment parses the same way Node's object
+/// materialization does, with the last value winning.
+fn dotenv_snapshot(home: &Path) -> BTreeMap<String, String> {
+    let project = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
+    dotenv_snapshot_at(home, &project)
+}
+
+fn dotenv_snapshot_at(home: &Path, project: &Path) -> BTreeMap<String, String> {
+    let mut values = dotenv_file(&project.join(".env"));
+    if project != home {
+        for (key, value) in dotenv_file(&home.join(".env")) {
+            values.entry(key).or_insert(value);
+        }
+    }
+    values
+}
+
+fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let Ok(body) = std::fs::read_to_string(path) else {
+        return values;
+    };
+    let lines: Vec<&str> = body.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        index += 1;
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export").map(str::trim_start).unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let mut value = value.trim().to_string();
+        if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))
+            && !value[1..].contains(quote)
+        {
+            let mut end = index;
+            let mut closed = false;
+            while end < lines.len() {
+                if lines[end].contains(quote) {
+                    closed = true;
+                    break;
+                }
+                end += 1;
+            }
+            if closed {
+                while index <= end {
+                    value.push('\n');
+                    value.push_str(lines[index]);
+                    index += 1;
+                }
+            }
+        }
+        values.insert(key.to_string(), dotenv_value(&value));
+    }
+    values
+}
+
+/// A value in Node `parseEnv`'s line grammar: a quoted value ends at its
+/// closing quote; an unquoted value ends at `#`; both trim outer space.
+fn dotenv_value(value: &str) -> String {
+    if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) {
+        if let Some(end) = value[1..].find(quote) {
+            return value[1..1 + end].to_string();
+        }
+        return value.to_string();
+    }
+    value.split('#').next().unwrap_or("").trim().to_string()
 }
 
 /// What a service process inherits: enough to find its stores and its own
@@ -425,6 +523,72 @@ mod tests {
         assert!(error.contains("gateway/arguments-invalid"), "{error}");
         assert!(error.contains("missing refs"), "{error}");
         assert!(interpret(500, "<html>nope</html>").is_err());
+    }
+
+    #[test]
+    fn the_dotenv_snapshot_is_project_then_home_last_duplicate_and_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".env"),
+            "MULTILINE=\"one\nMARKER_ACCOUNT_API_KEY=embedded\nend\"\nMARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".env"),
+            "MARKER_ACCOUNT_API_KEY=home\nHOME_ONLY_KEY=home-only\n",
+        )
+        .unwrap();
+
+        let snapshot = dotenv_snapshot_at(&home, &project);
+        assert_eq!(
+            snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a repeated assignment resolves to Node parseEnv's last value"
+        );
+        std::fs::write(
+            project.join(".env"),
+            "UNCLOSED=\"missing\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+        )
+        .unwrap();
+        let unclosed = dotenv_snapshot_at(&home, &project);
+        assert_eq!(
+            unclosed.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a quote that never closes does not swallow later assignments"
+        );
+
+        std::fs::write(
+            project.join(".env"),
+            "MULTILINE=\"one\nMARKER_ACCOUNT_API_KEY=embedded\nend\"\nMARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+        )
+        .unwrap();
+        let snapshot = dotenv_snapshot_at(&home, &project);
+        assert_eq!(
+            snapshot.get("MULTILINE").map(String::as_str),
+            Some("one\nMARKER_ACCOUNT_API_KEY=embedded\nend"),
+            "an assignment inside a quoted multiline value is text"
+        );
+        assert_eq!(
+            snapshot.get("SPACED_KEY").map(String::as_str),
+            Some("some words"),
+            "an unquoted value keeps its spaces as Node parseEnv reads it"
+        );
+        assert_eq!(
+            snapshot.get("HOME_ONLY_KEY").map(String::as_str),
+            Some("home-only"),
+            "the Harness home backs keys the project does not set"
+        );
+
+        std::fs::write(project.join(".env"), "MARKER_ACCOUNT_API_KEY=edited\n").unwrap();
+        assert_eq!(
+            snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a launch snapshot does not follow later dotenv edits"
+        );
     }
 
     #[test]

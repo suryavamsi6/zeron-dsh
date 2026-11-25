@@ -51,7 +51,7 @@ impl GatewayProvider {
 #[async_trait::async_trait]
 pub trait AccountModels: Send + Sync {
     /// The account's models for a route, or why they could not be read
-    /// (no key stored, refused, unreachable, a body that is not a list).
+    /// (no resolvable key, refused, unreachable, a body that is not a list).
     async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String>;
 }
 
@@ -193,10 +193,15 @@ impl GatewayAccountModels {
 #[async_trait::async_trait]
 impl AccountModels for GatewayAccountModels {
     async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String> {
-        let key = route
-            .credential_ref()
-            .and_then(|reference| stored_key(&self.home, reference))
-            .ok_or_else(|| "no key".to_string())?;
+        let reference = route.credential_ref().ok_or_else(|| "no key".to_string())?;
+        let key = match stored_key(&self.home, reference) {
+            Some(key) => key,
+            None => self
+                .gateway
+                .dotenv_key(reference)
+                .await
+                .ok_or_else(|| "no key".to_string())?,
+        };
         // A declared route's profile baseURL wins; a catalog route answers
         // on its `defaultBaseURL`.
         let base = self
@@ -2132,4 +2137,5 @@ mod tests {
             "a cold start with no store file is no key, not an error"
         );
     }
+
 }
