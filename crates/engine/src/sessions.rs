@@ -360,17 +360,20 @@ struct Inner {
     warm: Mutex<HashMap<String, warm_start::WarmStart>>,
     /// Their leases (open, typed) when a test sets them.
     warm_leases: Mutex<Option<(std::time::Duration, std::time::Duration)>>,
-    /// Per crew chat: the last report text id `turn_end_writes` scheduled, so
-    /// a duplicate finalization of the same turn does not rewrite the file.
-    /// Part ids are positional per segment (`t0`), so the entry is dropped
-    /// when a new turn opens (`Inner::crew_turn_opened`).
-    crew_reports: Mutex<HashMap<String, String>>,
-    /// Per crew chat: the turn text id the Captain wake was claimed for. The
-    /// claim is recorded inside the report's blocking task, right before the
-    /// enqueue, so a replayed finalization queues at most one wake — a
-    /// duplicate wake is worse than a lost one. Same lifecycle as
-    /// `crew_reports`: dropped when a new turn opens.
-    crew_wakes: Mutex<HashMap<String, String>>,
+    /// Crew report claims by their stable source key `(chat_id, turn_id)`.
+    /// A claim is taken before the blocking write starts, kept only while it
+    /// succeeds or remains in flight, and removed when that write fails so a
+    /// duplicate finalization can retry it.
+    crew_reports: Mutex<HashSet<(String, String)>>,
+    /// Captain wake claims by the same `(chat_id, turn_id)` source key. The
+    /// claim is recorded before the report task is spawned: a task delayed
+    /// past a newer turn can never take or overwrite the newer turn's claim.
+    crew_wakes: Mutex<HashSet<(String, String)>>,
+    /// Delays a named turn between its report write and its wake in unit
+    /// tests, making the task-ordering regression deterministic. Compiled out
+    /// of production.
+    #[cfg(test)]
+    crew_wake_delay: OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
     /// Test seam for the Captain wake (SUR-87): when set, the wake line goes
     /// to this closure `(captain_id, text)` instead of
     /// `doc_host.queue_command`. Production never sets it, so the real path
@@ -497,7 +500,8 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 /// The last assistant text of the turn being finalized.
 pub(crate) struct TurnText<'a> {
-    /// The run's id — the turn's identity for the de-duplication.
+    /// The source turn's stable identity: the unique assistant entry opened
+    /// for this response, not a positional folded text-part id.
     pub id: &'a str,
     /// The turn's last assistant text, when it produced any; a turn that
     /// errored or was interrupted before replying has none.
@@ -559,8 +563,10 @@ impl SessionsEngine {
                 plugins: OnceLock::new(),
                 warm: Mutex::new(HashMap::new()),
                 warm_leases: Mutex::new(None),
-                crew_reports: Mutex::new(HashMap::new()),
-                crew_wakes: Mutex::new(HashMap::new()),
+                crew_reports: Mutex::new(HashSet::new()),
+                crew_wakes: Mutex::new(HashSet::new()),
+                #[cfg(test)]
+                crew_wake_delay: OnceLock::new(),
                 crew_wake: OnceLock::new(),
             }),
         }
@@ -3050,23 +3056,14 @@ impl Inner {
             .and_then(|handle| handle.runtime_config.request.env.get(CAPTAINS_ENV).cloned())
     }
 
-    /// A new turn for `chat_id` opens (a fresh run, a steer boundary, an
-    /// agent-continued turn): the stored crew-report and crew-wake ids belong
-    /// to the turn that ended and must not suppress this one's write or wake
-    /// — folded part ids are positional (`t0`), so the last text of a new
-    /// turn repeats them.
-    fn crew_turn_opened(&self, chat_id: &str) {
-        lock(&self.crew_reports).remove(chat_id);
-        lock(&self.crew_wakes).remove(chat_id);
-    }
-
     /// The per-run turn end the turn-finalization writes hang off: a turn
     /// whose dispatch-time `stamp` says Captain snapshots its Digest on
     /// completion, a failed or interrupted turn keeps the last good list
     /// ([`crate::needs_you::record_turn_end`]); a turn stamped crew writes
     /// its report into the Captain's Drive
-    /// ([`crate::crew_reports::write_report`]), then — on `Completed` alone —
-    /// queues the report line to that Captain (`Inner::wake_captain`).
+    /// ([`crate::crew_reports::write_report`]), then — when the turn finished
+    /// cleanly — queues the report line to that Captain
+    /// (`Inner::wake_captain`).
     /// `false` — nothing scheduled — for an unstamped turn, a stamp that
     /// fails to parse, a stamp with an empty `driveRoot`, a role that is
     /// neither captain nor crew, a crew turn already written (a duplicate
@@ -3162,30 +3159,40 @@ impl Inner {
                     return false;
                 };
                 // A textless turn earns a report only when the ending itself
-                // is the news: an error or an interruption. Decided before the
-                // claim below, so a turn that writes nothing records nothing —
-                // a later text-bearing finalization of the same run still lands.
+                // is the news: an error, an interruption, or a token ceiling
+                // hit before any reply text. Decided before the claim below,
+                // so a turn that writes nothing records nothing — a later
+                // text-bearing finalization of the same run still lands.
                 let Some(text) = turn_text.text.or(match status {
-                    DoneStatus::Errored | DoneStatus::Interrupted => Some(""),
+                    DoneStatus::Errored | DoneStatus::Interrupted | DoneStatus::MaxTokens => Some(""),
                     _ => None,
                 }) else {
                     return false;
                 };
-                {
-                    let written = lock(&self.crew_reports);
-                    if written.get(chat_id).is_some_and(|id| id == turn_text.id) {
-                        return false;
-                    }
-                }
                 if crate::crew_reports::report_path(&drive, chat_id).is_none() {
                     tracing::warn!(chat = %chat_id, "crew report skipped: chat id is not a bare filename");
                     return false;
                 }
-                lock(&self.crew_reports).insert(chat_id.to_string(), turn_text.id.to_string());
                 let chat_id = chat_id.to_string();
-                let turn_id = turn_text.id.to_string();
+                let report_key = (chat_id.clone(), turn_text.id.to_string());
+                // Claim the write before the task starts. A duplicate is
+                // suppressed while the first write is in flight and after it
+                // succeeds; the task below releases the claim only when the
+                // write fails, so that duplicate can retry it (SUR-218).
+                if !lock(&self.crew_reports).insert(report_key.clone()) {
+                    return false;
+                }
                 let text = text.to_owned();
                 let captain_id = stamp["captainId"].as_str().map(str::to_owned);
+                // Claim the wake on the event that created it, not inside a
+                // blocking task that may outlive a newer turn (SUR-221). The
+                // stopped check inside `wake_captain` remains authoritative
+                // because the person may stop the Captain after this point.
+                let wake_claimed = status.finished_cleanly()
+                    && captain_id
+                        .as_deref()
+                        .is_some_and(|captain| !lock(&self.stopped).contains(captain))
+                    && lock(&self.crew_wakes).insert(report_key.clone());
                 let inner = self.clone();
                 tokio::task::spawn_blocking(move || {
                     let outcome = crate::crew_reports::write_report(
@@ -3197,16 +3204,21 @@ impl Inner {
                     );
                     if let Err(error) = &outcome {
                         tracing::warn!(chat = %chat_id, error = %error, "crew report write failed");
+                        lock(&inner.crew_reports).remove(&report_key);
+                    }
+                    #[cfg(test)]
+                    if let Some(delay) = inner.crew_wake_delay.get() {
+                        delay(&report_key.1);
                     }
                     // The report is on disk (or definitively failed) before
                     // the wake's pointer line is built.
                     inner.wake_captain(
                         &chat_id,
-                        &turn_id,
                         captain_id.as_deref(),
                         status,
                         &text,
                         outcome.is_ok(),
+                        wake_claimed,
                     );
                 });
                 true
@@ -3220,27 +3232,30 @@ impl Inner {
     /// turn, busy steers at the boundary. Runs inside the report's
     /// `spawn_blocking`, never on the event loop.
     ///
-    /// Four gates, in order: only `Completed` wakes; a Captain the person
-    /// stopped is not woken (SUR-222 — the report stays on disk for the
-    /// next human-started turn); at most once per crew turn (the claim
-    /// lands before the enqueue); and the target must still be a live
-    /// Captain when the enqueue happens. A failure at the enqueue itself
-    /// is a `tracing::warn!`, never a retry.
+    /// Four gates, in order: the turn finished cleanly (`Completed` or
+    /// token-capped); its wake claim was taken before this report task
+    /// started; a Captain the person stopped is not woken (SUR-222 — the
+    /// report stays on disk for the next human-started turn); and the target
+    /// must still be a live Captain when the enqueue happens. A failure at
+    /// the enqueue itself is a `tracing::warn!`, never a retry.
     fn wake_captain(
         &self,
         chat_id: &str,
-        turn_id: &str,
         captain_id: Option<&str>,
         status: DoneStatus,
         text: &str,
         written: bool,
+        claimed: bool,
     ) {
+        if !claimed {
+            return;
+        }
         match status {
-            DoneStatus::Completed => {}
-            // Only a completed crew turn wakes its Captain. The harness
-            // cannot produce `Errored`, so the exclusion is structural — the
-            // match itself, not a test case, keeps every other status
-            // (including any variant added later) from waking.
+            DoneStatus::Completed | DoneStatus::MaxTokens => {}
+            // Only a cleanly finished crew turn wakes its Captain. The
+            // exclusion is structural — the match itself, not a test case,
+            // keeps every other status (including any variant added later)
+            // from waking.
             _ => return,
         }
         let Some(captain_id) = captain_id else {
@@ -3248,8 +3263,9 @@ impl Inner {
         };
         // The person's Stop is a boundary a report does not cross (SUR-222):
         // the report is already on disk and the next human-started turn
-        // reads it. No claim is taken here — if the person resumes and the
-        // same crew turn is finalized again, it may wake then.
+        // reads it. The turn's claim was already taken before this task
+        // started; it is not refunded here, because a replay must never wake
+        // the Captain twice.
         if lock(&self.stopped).contains(captain_id) {
             tracing::info!(chat = %chat_id, captain = %captain_id, "crew report wake dropped: the Captain was stopped");
             return;
@@ -3260,16 +3276,6 @@ impl Inner {
             .and_then(|chat| chat.title)
             .unwrap_or_default();
         let line = crate::crew_reports::report_text(&title, chat_id, status, text, written);
-        // At most once per crew turn: a replayed finalization of this turn
-        // already holds the claim and returns here — a duplicate wake is
-        // worse than a lost one.
-        {
-            let mut wakes = lock(&self.crew_wakes);
-            if wakes.get(chat_id).is_some_and(|id| id == turn_id) {
-                return;
-            }
-            wakes.insert(chat_id.to_string(), turn_id.to_string());
-        }
         // The target must be a live Captain NOW: no roster row (deleted) or
         // an archived row (demoted) — or a stamp role that is not crew — no
         // wake. The workspace chat row is never the fallback:
@@ -5264,9 +5270,6 @@ async fn drive_run(
     // a fresh session needs all prior user text, not just the latest tail.
     let doc_ref: &SessionDoc = &doc;
     let mut folded: Vec<MessagePart> = Vec::new();
-    // A run is at least one new turn: the stored crew-report id belongs to
-    // the previous turn — it must not suppress this one's end write.
-    inner.crew_turn_opened(&chat_id);
     // Every tool id this run has folded, across segment resets. Adapters
     // re-emit shape-bearing `tool_call_update`s (title/rawInput refreshes,
     // long-running completions) as full ToolCall events; once the fold has
@@ -5321,6 +5324,14 @@ async fn drive_run(
         });
     }
     let mut entry_id = new_id();
+    // The source turn's stable identity for turn-end dedupe: the assistant
+    // entry opened for this response. It rotates at every steer or
+    // self-continued boundary, so one long-lived runtime cannot fold two
+    // prompts under its process run id; unlike the old folded text-part ids,
+    // these entries are unique rather than positional. Parking does not
+    // rotate it: the fresh parked entry is empty, and a replayed Done must
+    // still key the turn that just ended.
+    let mut turn_id = entry_id.clone();
     let mut segment_started = now_ms();
     let mut writer: Option<SegmentWriter<'_>> = None;
     // A Cloud session machine's own setup (started or woke, cloning,
@@ -5332,6 +5343,7 @@ async fn drive_run(
     if crate::runner::setup_pending() {
         let user_id = resume_state.user_message_id.clone();
         entry_id = zeron_proto::cloud_setup_entry_id(&user_id);
+        turn_id = entry_id.clone();
         let sent_at = doc_ref.read_entries().ok().and_then(|entries| {
             entries
                 .iter()
@@ -5921,8 +5933,8 @@ async fn drive_run(
                         self_continued_turn = true;
                         last_stream_activity = tokio::time::Instant::now();
                         entry_id = new_id();
+                        turn_id = entry_id.clone();
                         segment_started = now_ms();
-                        inner.crew_turn_opened(&chat_id);
                         inner.set_status(&chat_id, SessionStatus::Working, true);
                     }
                     continue;
@@ -6503,8 +6515,8 @@ async fn drive_run(
                 // The park cleared the fold; rotate to a fresh entry and
                 // fall through — this event is the new segment's first part.
                 entry_id = new_id();
+                turn_id = entry_id.clone();
                 segment_started = now_ms();
-                inner.crew_turn_opened(&chat_id);
                 inner.set_status(&chat_id, SessionStatus::Working, true);
             } else {
                 match &event {
@@ -6746,8 +6758,8 @@ async fn drive_run(
             folded.clear();
             dirty = false;
             entry_id = next_assistant_message_id.clone().unwrap_or_else(new_id);
+            turn_id = entry_id.clone();
             segment_started = now_ms();
-            inner.crew_turn_opened(&chat_id);
             // The elapsed timer is per user message, not per child process: a
             // steer boundary restarts it (matches the parked-resume path and
             // the composer's optimistic overlay, which already reads 0:00).
@@ -6837,7 +6849,7 @@ async fn drive_run(
                 &chat_id,
                 stamp.as_deref(),
                 *status,
-                Some(TurnText { id: run_id.as_str(), text: last_text }),
+                Some(TurnText { id: turn_id.as_str(), text: last_text }),
             );
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
@@ -6856,7 +6868,7 @@ async fn drive_run(
             }
             let message_status = match status {
                 DoneStatus::Interrupted => MessageStatus::Aborted,
-                DoneStatus::Completed | DoneStatus::Errored => MessageStatus::Complete,
+                DoneStatus::Completed | DoneStatus::MaxTokens | DoneStatus::Errored => MessageStatus::Complete,
             };
             // No dangling chips: a run that ends for ANY reason (completed,
             // errored, interrupted) terminally resolves its input parts — an
@@ -6896,7 +6908,7 @@ async fn drive_run(
             if let Some((session_id, cwd)) = &run_session {
                 Inner::note_provider_session(&doc, harness_id, session_id, cwd, None);
             }
-            if *status == DoneStatus::Completed {
+            if status.finished_cleanly() {
                 // A cleanly completed turn resets the auto-resume revival
                 // budget: only consecutive crash-revive-crash cycles spend it.
                 inner.journal.clear_resume_attempts(&chat_id);
@@ -6941,7 +6953,7 @@ async fn drive_run(
             // way (see `continues_with_sent_message`); rows the user queued
             // themselves still notify.
             let pending_steer = inner.has_pending_steers(&chat_id, &run_id);
-            let completed_turn = (*status == DoneStatus::Completed
+            let completed_turn = (status.finished_cleanly()
                 && !interrupted
                 && turn_was_active
                 && !pending_steer
@@ -6950,7 +6962,7 @@ async fn drive_run(
             // PERSISTENT SESSION: a cleanly completed turn on a steerable
             // harness PARKS instead of ending — child + mailbox stay warm for
             // the next routed dispatch; per-turn state resets for it.
-            if (*status == DoneStatus::Completed || stopped_in_place)
+            if (status.finished_cleanly() || stopped_in_place)
                 && steerable
                 && !interrupted
                 && !inner.registry.update_pending(harness_id)
@@ -9730,6 +9742,216 @@ mod tests {
         );
     }
 
+    /// SUR-216: the token ceiling is not a clean completion in the report the
+    /// Captain reads, even when the cap hit before any reply text; the
+    /// session lifecycle itself still closes cleanly.
+    #[tokio::test]
+    async fn a_textless_token_capped_crew_turn_reports_token_capped() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+
+        assert!(sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::MaxTokens,
+            Some(TurnText {
+                id: "turn-max-tokens",
+                text: None,
+            })
+        ));
+        let mut body = String::new();
+        for _ in 0..200 {
+            if let Ok(read) = std::fs::read_to_string(&path) {
+                body = read;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            body.contains("- Status: token-capped"),
+            "the report names the token ceiling, not a clean completion: {body:?}"
+        );
+    }
+
+    /// SUR-218: a write failure releases only the write claim, so the duplicate
+    /// finalization can retry; once that retry lands, the same duplicate is
+    /// suppressed again.
+    #[tokio::test]
+    async fn a_failed_crew_report_write_is_retried_by_a_duplicate_finalization() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let blocker = drive.join(crate::crew_reports::DIR);
+        std::fs::write(&blocker, "not a directory").expect("reports blocker");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let turn = || {
+            Some(TurnText {
+                id: "turn-retry",
+                text: Some("crew reply"),
+            })
+        };
+        let key = ("crew-b".to_string(), "turn-retry".to_string());
+
+        assert!(sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Completed,
+            turn()
+        ));
+        let mut released = false;
+        for _ in 0..200 {
+            if !lock(&sessions.inner.crew_reports).contains(&key) {
+                released = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(released, "the failed write released its claim");
+
+        std::fs::remove_file(&blocker).expect("unblock reports");
+        assert!(
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                turn()
+            ),
+            "the duplicate finalization retries after the write failure"
+        );
+        let path = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+        assert!(wait_for(&path).await, "the retried report is written");
+        assert!(
+            std::fs::read_to_string(&path).expect("report").contains("crew reply"),
+            "the retried write carries the turn body"
+        );
+        assert!(
+            !sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                turn()
+            ),
+            "a successful write still suppresses the duplicate"
+        );
+    }
+
+    /// SUR-221: the wake claim exists before the report task can be delayed,
+    /// and it keys the exact turn. A first task stuck between write and wake
+    /// cannot suppress the newer turn's wake; both are queued.
+    #[tokio::test]
+    async fn a_delayed_crew_report_task_cannot_suppress_a_newer_wake() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        let wakes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = wakes.clone();
+        sessions.use_crew_wake(Arc::new(move |captain: &str, text: &str| {
+            sink.lock().unwrap().push((captain.to_string(), text.to_string()));
+        }));
+        let entered = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let release = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let entered_hook = entered.clone();
+        let release_hook = release.clone();
+        let _ = sessions.inner.crew_wake_delay.set(Arc::new(move |turn_id: &str| {
+            if turn_id != "turn-old" {
+                return;
+            }
+            *entered_hook.0.lock().unwrap() = true;
+            entered_hook.1.notify_one();
+            let mut released = release_hook.0.lock().unwrap();
+            while !*released {
+                released = release_hook.1.wait(released).unwrap();
+            }
+        }));
+
+        let finalize = |turn_id, text| {
+            sessions.turn_end_writes(
+                "crew-b",
+                Some(&crew_stamp),
+                DoneStatus::Completed,
+                Some(TurnText {
+                    id: turn_id,
+                    text: Some(text),
+                }),
+            )
+        };
+        assert!(finalize("turn-old", "old reply"));
+        assert!(
+            lock(&sessions.inner.crew_wakes).contains(&("crew-b".to_string(), "turn-old".to_string())),
+            "the first turn's wake claim exists before its blocking task runs"
+        );
+        let mut task_entered = false;
+        for _ in 0..200 {
+            if *entered.0.lock().unwrap() {
+                task_entered = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(task_entered, "the first report task is deliberately delayed");
+
+        assert!(finalize("turn-new", "new reply"));
+        for _ in 0..200 {
+            if !wakes.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            wakes.lock().unwrap().len(),
+            1,
+            "the newer wake is queued while the first task is still delayed"
+        );
+        assert!(
+            wakes.lock().unwrap()[0].1.contains("new reply"),
+            "the newer turn's wake is the one that landed first: {:?}",
+            wakes.lock().unwrap()
+        );
+
+        *release.0.lock().unwrap() = true;
+        release.1.notify_one();
+        for _ in 0..200 {
+            if wakes.lock().unwrap().len() >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            wakes.lock().unwrap().len(),
+            2,
+            "the delayed first turn still queues its own wake: {:?}",
+            wakes.lock().unwrap()
+        );
+    }
+
     /// SUR-87: a replayed finalization of the same crew turn queues exactly ONE
     /// `Run` for the Captain — the claim is recorded before the enqueue.
     #[tokio::test]
@@ -9754,7 +9976,7 @@ mod tests {
                 // Second pin, same observation: the turn's claim is already
                 // recorded when the wake fires — the enqueue cannot precede it.
                 assert!(
-                    lock(&claims.crew_wakes).contains_key("crew-b"),
+                    lock(&claims.crew_wakes).contains(&("crew-b".to_string(), "t-1".to_string())),
                     "the wake fires only after the turn's claim is recorded"
                 );
                 wakes

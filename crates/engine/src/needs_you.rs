@@ -212,7 +212,7 @@ pub fn record_turn_end(
     now: DateTime<Utc>,
 ) -> Result<Recorded, String> {
     match status {
-        DoneStatus::Completed => record_needs_you(drive, now),
+        DoneStatus::Completed | DoneStatus::MaxTokens => record_needs_you(drive, now),
         // The digest mid-turn is not a good list: nothing is written and the
         // file already there — the last good list — is reported, not touched.
         DoneStatus::Errored | DoneStatus::Interrupted => Ok(Recorded {

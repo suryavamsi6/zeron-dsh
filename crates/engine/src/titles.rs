@@ -9,7 +9,7 @@ use futures::StreamExt;
 
 use zeron_harness::{CancellationToken, InputResponse, RunControls, SteerMessage};
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
+    AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SandboxLevel,
     UserInputQuestion,
 };
 
@@ -357,7 +357,7 @@ async fn collect_text(
                 return Err(EngineError::Other(format!("titling run error: {message}")));
             }
             AgentEvent::Done { status, error, .. } => {
-                if status == DoneStatus::Completed {
+                if status.finished_cleanly() {
                     completed = true;
                     break;
                 }
@@ -382,7 +382,7 @@ async fn collect_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zeron_proto::Model;
+    use zeron_proto::{DoneStatus, Model};
 
     fn model(id: &str, label: &str) -> Model {
         Model {

@@ -1250,6 +1250,19 @@ pub enum DoneStatus {
     Completed,
     Interrupted,
     Errored,
+    /// The provider stopped the reply at its token ceiling: the turn ended
+    /// normally enough to close, but the answer is incomplete and must not be
+    /// reported as a clean completion.
+    MaxTokens,
+}
+
+impl DoneStatus {
+    /// Whether the turn ended without an error or interruption. A token-capped
+    /// reply still closes and parks its session cleanly; only its report has
+    /// to distinguish the incomplete answer.
+    pub fn finished_cleanly(self) -> bool {
+        matches!(self, DoneStatus::Completed | DoneStatus::MaxTokens)
+    }
 }
 
 /// The normalized streaming event every harness emits.

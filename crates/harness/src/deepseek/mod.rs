@@ -47,6 +47,18 @@ const EFFORTS: &[ReasoningLevel] = &[
     ReasoningLevel::Max,
 ];
 
+/// DSH's finish reason at the shared status seam. `max-tokens` is a clean
+/// process ending with an incomplete answer, neither a successful full reply
+/// nor an error.
+fn done_status(reason: &str) -> DoneStatus {
+    match reason {
+        "completed" => DoneStatus::Completed,
+        "max-tokens" => DoneStatus::MaxTokens,
+        "aborted" => DoneStatus::Interrupted,
+        _ => DoneStatus::Errored,
+    }
+}
+
 pub struct DeepSeekHarness {
     sdk_root: PathBuf,
     home: PathBuf,
@@ -774,7 +786,7 @@ async fn run_child(
                         }
                         Some("done") => {
                             let reason = frame["finishReason"].as_str().unwrap_or("error");
-                            let status = match reason { "completed" | "max-tokens" => DoneStatus::Completed, "aborted" => DoneStatus::Interrupted, _ => DoneStatus::Errored };
+                            let status = done_status(reason);
                             let error = (status == DoneStatus::Errored).then(|| normalizer.error.clone().unwrap_or_else(|| format!("DeepSeek activity ended: {reason}")));
                             let _ = tx.send(Ok(AgentEvent::Done { status, result: frame["finalResponse"].as_str().map(str::to_owned), error, session_id: Some(session.into()) })).await;
                             active = false;
