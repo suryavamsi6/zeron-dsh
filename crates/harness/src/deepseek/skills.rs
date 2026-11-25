@@ -157,7 +157,8 @@ enum YamlScalar {
     String(String),
     Boolean(bool),
     Null,
-    Number(String),
+    Number(u64),
+    Nan(usize),
     Tagged(String, TScalarStyle, Option<Tag>),
 }
 
@@ -169,9 +170,77 @@ enum YamlNode {
     Mapping(Vec<(YamlNode, YamlNode)>),
 }
 
-fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> YamlScalar {
-    if tag.is_some() {
-        return YamlScalar::Tagged(value.to_string(), style, tag.clone());
+fn number_key(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn yaml_number(value: &str, position: usize) -> Option<YamlScalar> {
+    if !plain_is_number(value) {
+        return None;
+    }
+    if let Some(hex) = value.strip_prefix("0x") {
+        return u128::from_str_radix(hex, 16)
+            .ok()
+            .map(|number| YamlScalar::Number(number_key(number as f64)));
+    }
+    if let Some(oct) = value.strip_prefix("0o") {
+        return u128::from_str_radix(oct, 8)
+            .ok()
+            .map(|number| YamlScalar::Number(number_key(number as f64)));
+    }
+    let negative = value.starts_with('-');
+    let unsigned = value
+        .strip_prefix('+')
+        .or_else(|| value.strip_prefix('-'))
+        .unwrap_or(value);
+    if unsigned.eq_ignore_ascii_case(".nan") {
+        return Some(YamlScalar::Nan(position));
+    }
+    if unsigned.eq_ignore_ascii_case(".inf") {
+        let number = if negative {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        return Some(YamlScalar::Number(number_key(number)));
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .map(|number| YamlScalar::Number(number_key(number)))
+}
+
+fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>, position: usize) -> YamlScalar {
+    if let Some(tag) = tag {
+        if tag.handle == "tag:yaml.org,2002:" {
+            match tag.suffix.as_str() {
+                "str" => return YamlScalar::String(value.to_string()),
+                "int" | "float" => {
+                    if let Some(number) = yaml_number(value, position) {
+                        return number;
+                    }
+                }
+                "bool" => {
+                    if matches!(value, "true" | "True" | "TRUE") {
+                        return YamlScalar::Boolean(true);
+                    }
+                    if matches!(value, "false" | "False" | "FALSE") {
+                        return YamlScalar::Boolean(false);
+                    }
+                }
+                "null" => {
+                    if matches!(value, "~" | "null") {
+                        return YamlScalar::Null;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return YamlScalar::Tagged(value.to_string(), style, Some(tag.clone()));
     }
     if style == TScalarStyle::Plain {
         if matches!(value, "~" | "null" | "Null" | "NULL") {
@@ -183,8 +252,8 @@ fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> YamlScala
         if matches!(value, "false" | "False" | "FALSE") {
             return YamlScalar::Boolean(false);
         }
-        if plain_is_number(value) {
-            return YamlScalar::Number(value.to_string());
+        if let Some(number) = yaml_number(value, position) {
+            return number;
         }
     }
     YamlScalar::String(value.to_string())
@@ -202,7 +271,7 @@ fn yaml_node(events: &[Event], index: &mut usize) -> Option<YamlNode> {
     match events.get(*index)? {
         Event::Scalar(value, style, _, tag) => {
             *index += 1;
-            Some(YamlNode::Scalar(yaml_scalar(value, *style, tag)))
+            Some(YamlNode::Scalar(yaml_scalar(value, *style, tag, *index)))
         }
         Event::Alias(anchor) => {
             *index += 1;
@@ -914,6 +983,16 @@ mod tests {
                 "plain boolean and quoted string keys",
                 "name: review\ndescription: Review\ntrue: one\n\"true\": two\n",
                 true,
+            ),
+            (
+                "numeric spellings of one integer key",
+                "name: review\ndescription: Review\n16: one\n0x10: two\n",
+                false,
+            ),
+            (
+                "explicit string tag on a duplicate key",
+                "name: review\ndescription: Review\nfoo: one\n!!str foo: two\n",
+                false,
             ),
             (
                 "duplicate nested keys",
