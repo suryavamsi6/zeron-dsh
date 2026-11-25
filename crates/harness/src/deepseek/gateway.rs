@@ -368,7 +368,8 @@ fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
     let Ok(body) = std::fs::read_to_string(path) else {
         return values;
     };
-    for line in body.lines() {
+    let mut lines = body.lines();
+    while let Some(line) = lines.next() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -381,7 +382,19 @@ fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
         if key.is_empty() {
             continue;
         }
-        values.insert(key.to_string(), dotenv_value(value.trim()));
+        let mut value = value.trim().to_string();
+        if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))
+            && !value[1..].contains(quote)
+        {
+            while let Some(next) = lines.next() {
+                value.push('\n');
+                value.push_str(next);
+                if next.contains(quote) {
+                    break;
+                }
+            }
+        }
+        values.insert(key.to_string(), dotenv_value(&value));
     }
     values
 }
@@ -510,7 +523,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             project.join(".env"),
-            "MARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+            "MULTILINE=\"one\nMARKER_ACCOUNT_API_KEY=embedded\nend\"\nMARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
         )
         .unwrap();
         std::fs::write(
@@ -524,6 +537,11 @@ mod tests {
             snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
             Some("last"),
             "a repeated assignment resolves to Node parseEnv's last value"
+        );
+        assert_eq!(
+            snapshot.get("MULTILINE").map(String::as_str),
+            Some("one\nMARKER_ACCOUNT_API_KEY=embedded\nend"),
+            "an assignment inside a quoted multiline value is text"
         );
         assert_eq!(
             snapshot.get("SPACED_KEY").map(String::as_str),
