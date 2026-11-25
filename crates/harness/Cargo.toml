@@ -23,6 +23,9 @@ tracing.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 reqwest.workspace = true
+# The `.env` snapshot a gateway launches with (deepseek/gateway.rs),
+# parsed in the same dotenv shape DSH's own launcher accepts.
+dotenvy = "0.15"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

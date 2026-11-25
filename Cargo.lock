@@ -8823,7 +8823,6 @@ dependencies = [
  "bytes",
  "chrono",
  "core-foundation 0.10.1",
- "dotenvy",
  "dunce",
  "fff-search",
  "futures",
@@ -8875,6 +8874,7 @@ version = "0.3.13"
 dependencies = [
  "async-trait",
  "chrono",
+ "dotenvy",
  "futures",
  "libc",
  "reqwest",

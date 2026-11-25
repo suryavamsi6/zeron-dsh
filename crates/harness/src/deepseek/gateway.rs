@@ -57,6 +57,7 @@ struct Session {
     base: String,
     cookie: String,
     child: Child,
+    dotenv: BTreeMap<String, String>,
 }
 
 /// The gateway over one DSH home. Its settings and credentials are the same
@@ -107,6 +108,22 @@ impl Gateway {
             .await
             .map_err(|error| GatewayError::Transport(error.to_string()))?;
         interpret(status.as_u16(), &text)
+    }
+
+    /// A credential value from the `.env` snapshot this gateway launched
+    /// with. DSH reads those files once while booting, so a later edit must
+    /// not make the account read answer for a different key than the running
+    /// gateway reports configured.
+    pub async fn dotenv_key(&self, reference: &str) -> Option<String> {
+        self.endpoint().await.ok()?;
+        self.session
+            .lock()
+            .await
+            .as_ref()?
+            .dotenv
+            .get(reference)
+            .filter(|value| !value.is_empty())
+            .cloned()
     }
 
     /// Stop the service if it is running; the next call starts a fresh one.
@@ -185,6 +202,7 @@ impl Gateway {
             crate::executable::Platform::current(),
         )
         .ok_or_else(|| GatewayError::NotInstalled("Node >=24.9".into()))?;
+        let dotenv = dotenv_snapshot(&self.home);
         let mut command = Command::new(&node);
         command
             .arg(&bin)
@@ -252,6 +270,7 @@ impl Gateway {
             base: launched.base,
             cookie,
             child,
+            dotenv,
         })
     }
 }
@@ -322,6 +341,40 @@ fn interpret(status: u16, body: &str) -> Result<Value, GatewayError> {
             .unwrap_or("the settings service refused the call")
             .to_owned(),
     })
+}
+
+/// The invoking project's `.env` backed by the Harness home's, in the
+/// precedence order DSH's launch environment gives them. Values are captured
+/// beside the spawn because the child snapshots both files once at boot;
+/// within one file a repeated assignment parses the same way Node's object
+/// materialization does, with the last value winning.
+fn dotenv_snapshot(home: &Path) -> BTreeMap<String, String> {
+    let project = std::env::current_dir().unwrap_or_else(|_| home.to_path_buf());
+    dotenv_snapshot_at(home, &project)
+}
+
+fn dotenv_snapshot_at(home: &Path, project: &Path) -> BTreeMap<String, String> {
+    let mut values = dotenv_file(&project.join(".env"));
+    if project != home {
+        for (key, value) in dotenv_file(&home.join(".env")) {
+            values.entry(key).or_insert(value);
+        }
+    }
+    values
+}
+
+fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+    let Ok(entries) = dotenvy::from_path_iter(path) else {
+        return values;
+    };
+    for entry in entries {
+        let Ok((key, value)) = entry else {
+            return BTreeMap::new();
+        };
+        values.insert(key, value);
+    }
+    values
 }
 
 /// What a service process inherits: enough to find its stores and its own
@@ -425,6 +478,44 @@ mod tests {
         assert!(error.contains("gateway/arguments-invalid"), "{error}");
         assert!(error.contains("missing refs"), "{error}");
         assert!(interpret(500, "<html>nope</html>").is_err());
+    }
+
+    #[test]
+    fn the_dotenv_snapshot_is_project_then_home_last_duplicate_and_frozen() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let project = dir.path().join("project");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join(".env"),
+            "MARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\n",
+        )
+        .unwrap();
+        std::fs::write(
+            home.join(".env"),
+            "MARKER_ACCOUNT_API_KEY=home\nHOME_ONLY_KEY=home-only\n",
+        )
+        .unwrap();
+
+        let snapshot = dotenv_snapshot_at(&home, &project);
+        assert_eq!(
+            snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a repeated assignment resolves to Node parseEnv's last value"
+        );
+        assert_eq!(
+            snapshot.get("HOME_ONLY_KEY").map(String::as_str),
+            Some("home-only"),
+            "the Harness home backs keys the project does not set"
+        );
+
+        std::fs::write(project.join(".env"), "MARKER_ACCOUNT_API_KEY=edited\n").unwrap();
+        assert_eq!(
+            snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a launch snapshot does not follow later dotenv edits"
+        );
     }
 
     #[test]
