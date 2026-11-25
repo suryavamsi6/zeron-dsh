@@ -159,7 +159,6 @@ enum YamlScalar {
     Null,
     Number(u64),
     Nan(usize),
-    Tagged(String, TScalarStyle, Option<Tag>),
 }
 
 #[derive(PartialEq, Eq)]
@@ -183,25 +182,28 @@ fn yaml_number(value: &str, position: usize) -> Option<YamlScalar> {
         return None;
     }
     if let Some(hex) = value.strip_prefix("0x") {
-        return u128::from_str_radix(hex, 16)
-            .ok()
-            .map(|number| YamlScalar::Number(number_key(number as f64)));
+        let mut number = 0.0;
+        for byte in hex.bytes() {
+            number = number * 16.0 + char::from(byte).to_digit(16)? as f64;
+        }
+        return Some(YamlScalar::Number(number_key(number)));
     }
     if let Some(oct) = value.strip_prefix("0o") {
-        return u128::from_str_radix(oct, 8)
-            .ok()
-            .map(|number| YamlScalar::Number(number_key(number as f64)));
+        let mut number = 0.0;
+        for byte in oct.bytes() {
+            number = number * 8.0 + char::from(byte).to_digit(8)? as f64;
+        }
+        return Some(YamlScalar::Number(number_key(number)));
     }
-    let negative = value.starts_with('-');
+    if matches!(value, ".nan" | ".NaN" | ".NAN") {
+        return Some(YamlScalar::Nan(position));
+    }
     let unsigned = value
         .strip_prefix('+')
         .or_else(|| value.strip_prefix('-'))
         .unwrap_or(value);
-    if unsigned.eq_ignore_ascii_case(".nan") {
-        return Some(YamlScalar::Nan(position));
-    }
-    if unsigned.eq_ignore_ascii_case(".inf") {
-        let number = if negative {
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
+        let number = if value.starts_with('-') {
             f64::NEG_INFINITY
         } else {
             f64::INFINITY
@@ -219,7 +221,12 @@ fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>, position: us
         if tag.handle == "tag:yaml.org,2002:" {
             match tag.suffix.as_str() {
                 "str" => return YamlScalar::String(value.to_string()),
-                "int" | "float" => {
+                "int" if core_int(value) => {
+                    if let Some(number) = yaml_number(value, position) {
+                        return number;
+                    }
+                }
+                "float" if core_float(value) => {
                     if let Some(number) = yaml_number(value, position) {
                         return number;
                     }
@@ -233,14 +240,14 @@ fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>, position: us
                     }
                 }
                 "null" => {
-                    if matches!(value, "~" | "null") {
+                    if matches!(value, "" | "~" | "null" | "Null" | "NULL") {
                         return YamlScalar::Null;
                     }
                 }
                 _ => {}
             }
         }
-        return YamlScalar::Tagged(value.to_string(), style, Some(tag.clone()));
+        return YamlScalar::String(value.to_string());
     }
     if style == TScalarStyle::Plain {
         if matches!(value, "~" | "null" | "Null" | "NULL") {
@@ -515,49 +522,64 @@ fn plain_is_string(text: &str) -> bool {
     !plain_is_number(text)
 }
 
-/// The YAML number spellings: unsigned `0x` hex and `0o` octal, and an
-/// optional sign then digits with an optional fraction or exponent, or the
-/// `.inf`/`.nan` spellings.
-fn plain_is_number(text: &str) -> bool {
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn unsigned(text: &str) -> &str {
+    text.strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text)
+}
+
+fn core_int(text: &str) -> bool {
     if let Some(hex) = text.strip_prefix("0x") {
-        return !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+        return !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
     }
     if let Some(oct) = text.strip_prefix("0o") {
-        return !oct.is_empty() && oct.bytes().all(|b| matches!(b, b'0'..=b'7'));
+        return !oct.is_empty() && oct.bytes().all(|byte| matches!(byte, b'0'..=b'7'));
     }
-    let body = text
-        .strip_prefix('+')
-        .or_else(|| text.strip_prefix('-'))
-        .unwrap_or(text);
-    if body.eq_ignore_ascii_case(".inf") || body.eq_ignore_ascii_case(".nan") {
+    digits(unsigned(text))
+}
+
+fn core_mantissa(text: &str) -> bool {
+    if let Some(fraction) = text.strip_prefix('.') {
+        return digits(fraction);
+    }
+    if let Some(dot) = text.find('.') {
+        return digits(&text[..dot]) && text[dot + 1..].bytes().all(|byte| byte.is_ascii_digit());
+    }
+    digits(text)
+}
+
+fn core_float(text: &str) -> bool {
+    if matches!(
+        text,
+        ".inf"
+            | ".Inf"
+            | ".INF"
+            | "+.inf"
+            | "+.Inf"
+            | "+.INF"
+            | "-.inf"
+            | "-.Inf"
+            | "-.INF"
+            | ".nan"
+            | ".NaN"
+            | ".NAN"
+    ) {
         return true;
     }
-    let (mantissa, exponent) = match body.find(|c| c == 'e' || c == 'E') {
-        Some(i) => (&body[..i], Some(&body[i + 1..])),
-        None => (body, None),
-    };
-    let mut digits = 0;
-    let mut dots = 0;
-    for byte in mantissa.bytes() {
-        match byte {
-            b'0'..=b'9' => digits += 1,
-            b'.' => dots += 1,
-            _ => return false,
-        }
+    let body = unsigned(text);
+    if let Some(exponent) = body.find(|c| c == 'e' || c == 'E') {
+        return core_mantissa(&body[..exponent]) && digits(unsigned(&body[exponent + 1..]));
     }
-    if digits == 0 || dots > 1 {
-        return false;
-    }
-    match exponent {
-        None => true,
-        Some(exp) => {
-            let exp = exp
-                .strip_prefix('+')
-                .or_else(|| exp.strip_prefix('-'))
-                .unwrap_or(exp);
-            !exp.is_empty() && exp.bytes().all(|b| b.is_ascii_digit())
-        }
-    }
+    body.contains('.') && core_mantissa(body)
+}
+
+/// The core-schema number spellings the SDK's `yaml@2.9.1` resolver uses.
+fn plain_is_number(text: &str) -> bool {
+    core_int(text) || core_float(text)
 }
 
 /// `user-invocable` in dsh's boolean grammar: omitted permits the surface,
@@ -992,6 +1014,26 @@ mod tests {
             (
                 "explicit string tag on a duplicate key",
                 "name: review\ndescription: Review\nfoo: one\n!!str foo: two\n",
+                false,
+            ),
+            (
+                "signed nan spellings are string keys",
+                "name: review\ndescription: Review\n+.nan: one\n+.nan: two\n",
+                false,
+            ),
+            (
+                "mixed-case inf is a string beside numeric inf",
+                "name: review\ndescription: Review\n.iNF: one\n.inf: two\n",
+                true,
+            ),
+            (
+                "invalid float tag stays a string key",
+                "name: review\ndescription: Review\n!!float 01: one\n1: two\n",
+                true,
+            ),
+            (
+                "invalid int tags duplicate as strings",
+                "name: review\ndescription: Review\n!!int .nan: one\n!!int .nan: two\n",
                 false,
             ),
             (
