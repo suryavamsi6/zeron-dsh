@@ -64,7 +64,7 @@ test("captains_crew: a chat moves into a Captain's crew from the Digest, the ros
 	app:frames(10)
 	app:click('#captain-needs-you >> role:link "Open digest"')
 	expect(app:wait("#captain-digest", { timeout_ms = 15000 })).to_be(true)
-	expect(until_text(app, "#captain-digest", "What the crew filed.")).to_be(true)
+	expect(until_text(app, "#captain-digest", "Two things are waiting on you.")).to_be(true)
 	-- No crew yet, so no crew report.
 	expect(app:tree("#captain-digest"):find("Write the docs", 1, true) ~= nil).to_be(false)
 

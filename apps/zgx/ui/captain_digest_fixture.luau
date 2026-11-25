@@ -13,24 +13,16 @@ local store = require("@app/screens/chat/store")
 local CaptainDigest = require("@app/screens/chat/captain_digest")
 local Panel = require("@app/screens/panel")
 
-local CHAT = "cap-a"
+local C = require("./captain_drive_contract")
+
+local CHAT = C.chat
 local SESSION = { id = CHAT, cwd = "/proj" }
 local PROJECT = { id = "p1", path = "/proj", name = "proj" }
 
--- The Captain's Drive, as the host would answer it: `DIGEST.md`, the engine's
--- Needs-you snapshot (SUR-100) and the crew's reports. `end_turn` below
--- changes it as the Captain's turn writing it does.
-local drive = {
-	digest = "# Billing\n\nTwo things are waiting on you.\n\n## Needs you\n\n- Approve the invoice\n- Pick a deploy window\n",
-	needsYou = {
-		version = 1,
-		updatedAt = "2026-11-22T01:00:00Z",
-		items = { "Approve the invoice", "Pick a deploy window" },
-	},
-	reports = {
-		{ name = "billing-2026-11-22.md", text = "# Crew report\n\nInvoices reconciled; one needs your approval." },
-	},
-}
+-- The Captain's Drive, as the host would answer it: the contract's one
+-- shared fixture (`DIGEST.md`, `state/needs-you.json` and `reports/a2.md`).
+-- `end_turn` below changes it as the Captain's turn writing it does.
+local drive = C.digest_answer()
 
 -- Each call answered on the next tick, as the host's is.
 local due: { () -> () } = {}
@@ -58,7 +50,7 @@ local function settle(value: any): any
 end
 
 CaptainDigest.roster = function(): any
-	return settle { captains = { { chatId = CHAT, name = "Billing", drivePath = "/drive" } } }
+	return settle(C.roster_answer())
 end
 CaptainDigest.drive = function(_chat: string): any
 	return settle(drive)
@@ -74,14 +66,16 @@ ui.command {
 	title = "End the Captain's turn",
 	run = function()
 		drive.digest = drive.digest .. "- Sign the renewal\n"
+		local items = { table.unpack(C.needs_you.items) }
+		table.insert(items, "Sign the renewal")
 		drive.needsYou = {
 			version = 1,
 			updatedAt = "2026-11-22T01:05:00Z",
-			items = { "Approve the invoice", "Pick a deploy window", "Sign the renewal" },
+			items = items,
 		}
 		drive.reports = {
-			{ name = "billing-2026-11-22-2.md", text = "# Crew report\n\nRenewal is signed and filed." },
-			{ name = "billing-2026-11-22.md", text = "# Crew report\n\nInvoices reconciled; one needs your approval." },
+			{ name = "a3.md", text = "# Crew report\n\nRenewal is signed and filed." },
+			{ name = "a2.md", text = C.texts["reports/a2.md"] },
 		}
 		store.messages:push({ id = `m{#store.messages:peek() + 1}`, role = "assistant", text = "Done — see the digest." })
 	end,

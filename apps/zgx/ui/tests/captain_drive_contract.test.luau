@@ -56,7 +56,7 @@ test("captain_drive_contract: the fixture answers the host's listing, row for ro
 		{ "NOTES.md", "file" },
 		{ "handoffs", "directory" },
 		{ "reports", "directory" },
-		{ "reports/2026-11-23-a.md", "file" },
+		{ "reports/a2.md", "file" },
 		-- (The one the host never sends, added to prove the tab hides it.)
 		{ "state/needs-you.json", "file" },
 	}
@@ -98,7 +98,7 @@ test("captain_drive_contract: a read answers the host's two keys, and nothing el
 	-- `reports/`, answered a read (`state/`'s row is machine-only and never
 	-- opened).
 	expect(served).to_be(5)
-	expect(c.reads["reports/2026-11-23-a.md"] ~= nil).to_be(true)
+	expect(c.reads["reports/a2.md"] ~= nil).to_be(true)
 end)
 
 test("captain_drive_contract: the host's refusals, word for word", function()

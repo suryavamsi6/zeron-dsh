@@ -356,8 +356,19 @@ const FILE_CAP: u64 = 256 * 1024;
 /// A copy of `providers`' own, kept here because this module's slice of the
 /// app is the one file SUR-83 was granted (`apps/zgx/src/captains.rs`) plus the
 /// registration line, not `providers.rs`.
+///
+/// An engine from before the Captains RPCs answers `unknown method`: that is
+/// the page's Helm-unavailable state (`unsupported`), not a roster refusal to
+/// show in the engine's words. Every other refusal is the engine's own,
+/// verbatim.
 fn answer(reply: Result<Json, String>) -> Result<Value, String> {
-    let json = reply?;
+    let json = reply.map_err(|error| {
+        if error.to_ascii_lowercase().contains("unknown method") {
+            "unsupported".to_owned()
+        } else {
+            error
+        }
+    })?;
     let text = serde_json::to_string(&json).map_err(|error| error.to_string())?;
     Value::from_json(&text).ok_or_else(|| "the engine's answer didn't parse".to_string())
 }

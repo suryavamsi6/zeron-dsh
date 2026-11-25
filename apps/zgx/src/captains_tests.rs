@@ -59,11 +59,13 @@ fn every_captain_action_forwards_to_its_own_rpc_method_and_surfaces_a_refusal() 
         let sent = Rc::clone(&recording);
         Box::pin(async move {
             sent.borrow_mut().push((method.to_owned(), params));
-            // The engine refuses a demote of a chat that is not a Captain, in
-            // its own words (`crates/engine/src/captains.rs`). The bridge must
-            // not turn that into an empty roster.
-            if method == "DemoteCaptain" {
-                return Err("bad params: chat-a is not a Captain on this device".to_owned());
+            // The engine's own `deny_unknown_fields` refusal when a caller
+            // tries to write the registry's retired busy state. The bridge
+            // must carry it byte for byte, not flatten it into a state word.
+            if method == "PromoteCaptain" {
+                return Err(
+                    "bad params: unknown field `helm_busy`, expected `chatId` or `name`".to_owned(),
+                );
             }
             Ok(json!({ "captains": [] }))
         })
@@ -117,13 +119,79 @@ fn every_captain_action_forwards_to_its_own_rpc_method_and_surfaces_a_refusal() 
         *lines.borrow(),
         vec![
             "Captains=ok".to_owned(),
-            "PromoteCaptain=ok".to_owned(),
-            "DemoteCaptain=err:bad params: chat-a is not a Captain on this device".to_owned(),
+            "PromoteCaptain=err:bad params: unknown field `helm_busy`, expected `chatId` or `name`".to_owned(),
+            "DemoteCaptain=ok".to_owned(),
             "AddCrew=ok".to_owned(),
             "RemoveCrew=ok".to_owned(),
         ],
-        "a refusal reaches the page as the host's error, in the engine's own words"
+        "a helm_busy refusal reaches the page verbatim as the host's error"
     );
+}
+
+/// The words the bridge test pins are not a hand-written approximation:
+/// this is the engine's own `deny_unknown_fields` answer to `helm_busy`,
+/// over its real RPC service.
+#[test]
+fn the_engine_s_helm_busy_refusal_is_the_one_the_bridge_pins() {
+    let rig = crate::helm_live::Rig::new();
+    rig.create_chat("cap-a");
+    let refused = rig
+        .call(
+            zeron_rpc::methods::PROMOTE_CAPTAIN,
+            json!({ "chatId": "cap-a", "name": "Billing", "helm_busy": true }),
+        )
+        .expect_err("the registry has no helm_busy state to write");
+    assert_eq!(
+        refused,
+        "bad params: unknown field `helm_busy`, expected `chatId` or `name`"
+    );
+}
+
+/// An engine from before the Captains RPCs is not a roster error: the page
+/// gets the bridge's stable Helm-unavailable state, while any other refusal
+/// keeps the engine's words.
+#[test]
+fn an_unknown_captains_method_is_the_helm_unavailable_state() {
+    let lines: Rc<RefCell<Vec<String>>> = Rc::default();
+    let done = Rc::new(Cell::new(false));
+    let call = move |_method: &'static str, _params: Json| -> crate::providers::McpCall {
+        Box::pin(async move { Err("unknown method: Captains".to_owned()) })
+    };
+    let page = r#"
+ui.call("Captains", {}):after(function(_answer: any)
+	ui.invoke("test.record", "ok")
+	ui.invoke("test.done", nil)
+end, function(err: any)
+	ui.invoke("test.record", "err:" .. tostring(err.message))
+	ui.invoke("test.done", nil)
+end)
+
+return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "old engine" }) })
+"#;
+
+    let app = {
+        let lines = Rc::clone(&lines);
+        let done = Rc::clone(&done);
+        TestApp::new(move |runtime| {
+            let host = ScriptHost::inline(runtime, "captains_old_engine", page);
+            crate::captains::install_over(&host, call);
+            host.action("test.record", move |line| {
+                lines.borrow_mut().push(crate::auth::text(&line));
+            });
+            host.action("test.done", move |_| done.set(true));
+            host
+        })
+    };
+    let mut app = app;
+    for _ in 0..2000 {
+        app.frames(1);
+        if done.get() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(done.get(), "the page never finished; what came back: {:?}", lines.borrow());
+    assert_eq!(*lines.borrow(), vec!["err:unsupported".to_owned()]);
 }
 
 /// The Digest tab's one read: the roster's `drivePath` is the only path it
