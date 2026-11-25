@@ -431,7 +431,7 @@ async fn sdk_runtime_round_trip_and_resume() {
             execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(vec![]);
+                let _ = tx.send(crate::InputResponse::default());
                 rx
             }),
             steering,

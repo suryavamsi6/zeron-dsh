@@ -420,7 +420,7 @@ impl Harness for MockHarness {
                             .into(),
                 });
                 tokio::time::sleep(pause).await;
-                let answers = request_input(question_script()).await.unwrap_or_default();
+                let answers = request_input(question_script()).await.unwrap_or_default().answers;
                 let picked: Vec<String> = answers
                     .iter()
                     .flat_map(|a| a.labels.iter().cloned())
@@ -470,7 +470,8 @@ impl Harness for MockHarness {
                     let question = crate::approval::command("Mock", "cargo test --workspace");
                     let answers = request_input(vec![question.clone()])
                         .await
-                        .unwrap_or_default();
+                        .unwrap_or_default()
+                        .answers;
                     if crate::approval::approved(&question, &answers) {
                         let _ = tx.send(AgentEvent::ToolCall {
                             id: "mock-approved-tool".into(),

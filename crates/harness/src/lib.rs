@@ -251,11 +251,12 @@ pub struct RunControls {
     /// Standalone callers without an update coordinator can leave it unset.
     pub execution_lease: Option<std::sync::Arc<tokio::sync::OwnedRwLockReadGuard<()>>>,
     /// The run sends questions and awaits answers (blocks the agent, mirrors zeron).
-    /// No answers at all — an empty list, or a dropped sender — is a decline:
-    /// the person closed the questions, or the run stopped waiting. Drivers
-    /// answer it with their protocol's own decline where it has one.
+    /// An empty `answers` — or a dropped sender — stays a decline: the person
+    /// closed the questions, or the run stopped waiting. `by` names who
+    /// resolved it (the host fills it; `None` when it did not record one).
+    /// Drivers answer a decline with their protocol's own where it has one.
     pub request_input: Box<
-        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
+        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<InputResponse> + Send + Sync,
     >,
     /// Steer prompts consumed at step/turn boundaries.
     pub steering: mpsc::Receiver<SteerMessage>,
@@ -265,6 +266,14 @@ pub struct RunControls {
     pub interrupt: CancellationToken,
     /// Turn-level stop and background-work reporting (see [`TurnControl`]).
     pub turn: TurnControl,
+}
+
+/// Answers returned to a run, with the identity the host recorded when the
+/// parked question was resolved.
+#[derive(Debug, Clone, Default)]
+pub struct InputResponse {
+    pub answers: Vec<UserInputAnswer>,
+    pub by: Option<zeron_proto::InputActor>,
 }
 
 /// Catalog provenance stays internal; RPC clients retain the Vec<Model> shape.

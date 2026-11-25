@@ -1995,7 +1995,8 @@ async fn wrong_id_respond_is_rejected_and_correct_answer_still_resumes() {
                     requires_person: false,
                 }])
                 .await
-                .unwrap_or_default();
+                .unwrap_or_default()
+                .answers;
                 let picked = answers
                     .first()
                     .and_then(|a| a.labels.first().cloned())
@@ -2354,7 +2355,8 @@ async fn harness_emitted_input_twin_is_dropped_and_answer_resumes() {
                     .await;
                 let answers = (controls.request_input)(vec![question])
                     .await
-                    .unwrap_or_default();
+                    .unwrap_or_default()
+                    .answers;
                 let picked = answers
                     .first()
                     .and_then(|a| a.labels.first().cloned())

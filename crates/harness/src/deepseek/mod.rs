@@ -691,6 +691,9 @@ async fn run_child(
     let mut active = true;
     let mut pending = std::collections::VecDeque::new();
     let result = async {
+        // The validated Captains blob rides the start config; its role is the
+        // run's own, read here — never a second parse of the raw env.
+        let captains = config.get("captains").cloned();
         write(&mut stdin, config).await?;
         write(&mut stdin, json!({ "type": "prompt", "prompt": request.prompt, "attachments": request.attachments })).await?;
         loop {
@@ -745,25 +748,15 @@ async fn run_child(
                                     let response = (controls.request_input)(vec![question.clone()]);
                                     answers.push(Box::pin(async move {
                                         let response = response.await.unwrap_or_default();
-                                        (id, json!({"outcome": if crate::approval::approved(&question, &response) {"allowed-once"} else {"rejected"}}))
+                                        (id, json!({"outcome": if crate::approval::approved(&question, &response.answers) {"allowed-once"} else {"rejected"}}))
                                     }));
                                 }
                             } else if method == "user-question/ask" {
-                                let questions = host_questions(params)?;
+                                let questions = ask_questions(params, captains.as_ref())?;
                                 let response = (controls.request_input)(questions.clone());
                                 answers.push(Box::pin(async move {
                                     let response = response.await.unwrap_or_default();
-                                    if response.len() != questions.len() { return (id, json!({"cancelled":true})) }
-                                    let mut encoded = Vec::new();
-                                    for question in questions {
-                                        let Some(answer) = response.iter().find(|a| a.question_id == question.id) else { return (id, json!({"cancelled":true})) };
-                                        let selected: Vec<_> = answer.labels.iter().filter(|s| question.options.contains(s)).collect();
-                                        let custom = answer.labels.iter().filter(|s| !question.options.contains(s)).cloned().collect::<Vec<_>>().join("\n");
-                                        let mut answer = json!({"id":question.id,"selected":selected});
-                                        if !custom.is_empty() { answer["custom"] = custom.into(); }
-                                        encoded.push(answer);
-                                    }
-                                    (id, json!({"answers":encoded}))
+                                    (id, question_result(&questions, response))
                                 }));
                             } else {
                                 write(&mut stdin, json!({"type":"answer","id":id,"result":{"cancelled":true}})).await?;
@@ -808,6 +801,46 @@ async fn run_child(
     stderr_task.abort();
     let _ = stderr_task.await;
     result
+}
+
+/// Whether the validated Captains blob says this run is a Captain turn — the
+/// only turn whose questions are the person's alone.
+fn captain_turn(captains: Option<&Value>) -> bool {
+    captains.and_then(|blob| blob["role"].as_str()) == Some("captain")
+}
+
+/// An ask frame's questions, person-marked by the turn's role: a Captain turn
+/// makes every question the person's own; elsewhere the wire's own flag rules.
+fn ask_questions(params: &Value, captains: Option<&Value>) -> Result<Vec<UserInputQuestion>, HarnessError> {
+    let mut questions = host_questions(params)?;
+    if captain_turn(captains) {
+        for question in &mut questions {
+            question.requires_person = true;
+        }
+    }
+    Ok(questions)
+}
+
+/// The tool result the asking model reads: the encoded answers, and who
+/// resolved them (`by`), on both the answered and the cancelled shape — a
+/// dismissal is not anonymous either.
+fn question_result(questions: &[UserInputQuestion], response: crate::InputResponse) -> Value {
+    let by = serde_json::to_value(response.by.unwrap_or_default()).unwrap_or(Value::Null);
+    if response.answers.len() != questions.len() {
+        return json!({"cancelled": true, "by": by});
+    }
+    let mut encoded = Vec::new();
+    for question in questions {
+        let Some(answer) = response.answers.iter().find(|a| a.question_id == question.id) else {
+            return json!({"cancelled": true, "by": by});
+        };
+        let selected: Vec<_> = answer.labels.iter().filter(|label| question.options.contains(label)).collect();
+        let custom = answer.labels.iter().filter(|label| !question.options.contains(label)).cloned().collect::<Vec<_>>().join("\n");
+        let mut encoded_answer = json!({"id": question.id, "selected": selected});
+        if !custom.is_empty() { encoded_answer["custom"] = custom.into(); }
+        encoded.push(encoded_answer);
+    }
+    json!({"answers": encoded, "by": by})
 }
 
 fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError> {
