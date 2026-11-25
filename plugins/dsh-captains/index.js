@@ -131,6 +131,27 @@ function applyRevoked(ctx) {
   });
 }
 
+function crewRuleBodies(text) {
+  if (typeof text !== 'string') return [];
+  const bodies = [];
+  for (const match of text.matchAll(/<crew-rules(?:\s[^>]*)?>([\s\S]*?)<\/crew-rules>/g)) {
+    let body = match[1];
+    // crewRules() adds one structural newline around the file body.
+    if (body.startsWith('\n') && body.endsWith('\n')) body = body.slice(1, -1);
+    if (body !== '') bodies.push(body);
+  }
+  return bodies;
+}
+
+function messageText(content) {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('');
+}
+
 // SUR-85: a crew chat serves the Captain's CREW.md as a prompt section that
 // re-reads the file at every assembly. The bytes served to each assembly's
 // signal are remembered; when the next admitted first step of a turn sees the
@@ -151,6 +172,75 @@ function applyCrew(ctx, cfg) {
   // saw the bytes the resumed series was built from, so that first admitted
   // step must rebase; only a known equal baseline passes through untouched.
   const lastBytes = new Map();
+  const repairChecked = new WeakSet();
+  const repairCheckpoints = async (agent, signal) => {
+    const { session } = agent;
+    const current = crewRules(cfg);
+    const [currentBody] = crewRuleBodies(current);
+    if (currentBody === undefined) return;
+
+    const retired = new Set();
+    for (let seq = 1; seq <= session.seq; seq += 1) {
+      const event = session.eventAt(seq);
+      if (event?.type !== 'system/message') continue;
+      const content = session.deriveEventMessage?.(event)?.content ?? event.data?.message?.content;
+      for (const body of crewRuleBodies(messageText(content))) {
+        if (body !== currentBody) retired.add(body);
+      }
+    }
+    if (retired.size === 0) return;
+
+    const contaminated = [];
+    for (const seq of session.surface?.nodes ?? []) {
+      const event = session.eventAt(seq);
+      if (event?.type !== 'user/message' || event.data?.source?.kind !== 'compact-checkpoint') continue;
+      const text = messageText(event.data?.content);
+      if ([...retired].some(body => text.includes(body))) contaminated.push(seq);
+    }
+    if (contaminated.length === 0) return;
+
+    for (const seq of contaminated) {
+      const checkpoint = session.eventAt(seq);
+      const compactionId = checkpoint?.data?.source?.compactionId;
+      let summary;
+      for (let at = seq - 1; at >= 0; at -= 1) {
+        const event = session.eventAt(at);
+        if (event?.type === 'compaction/summary' && event.data?.compactionId === compactionId) {
+          summary = event;
+          break;
+        }
+      }
+      if (summary === undefined) throw new Error(`crew-rules checkpoint ${seq} has no paired compaction summary`);
+      const cleanBlocks = summary.data.summary.map(block => {
+        if (block?.type !== 'text' || typeof block.text !== 'string') return block;
+        let text = block.text;
+        for (const body of retired) text = text.replaceAll(body, '(none)');
+        return { ...block, text };
+      });
+
+      // The service is optional and this row must load without it: use the
+      // undeclared-access fallback when the direct read is refused.
+      let compaction;
+      try {
+        compaction = ctx.compaction;
+      } catch {
+        compaction = undefined;
+      }
+      compaction ??= ctx.get?.('compaction');
+      if (typeof compaction?.compactRegion !== 'function' || typeof compaction.summarize !== 'function') return;
+      const originalSummarize = compaction.summarize;
+      compaction.summarize = async (_input, owner, abort) => {
+        abort?.throwIfAborted();
+        const { provider, model } = session.requestHeader().config;
+        return { summary: cleanBlocks, provider, model, maxTokens: compaction.config.maxTokens };
+      };
+      try {
+        await compaction.compactRegion(seq, seq, agent, signal);
+      } finally {
+        compaction.summarize = originalSummarize;
+      }
+    }
+  };
   const register = agent => {
     const scope = rootScope(agent);
     if (scope === undefined || registered.has(agent)) return;
@@ -211,6 +301,33 @@ function applyCrew(ctx, cfg) {
       if (previous !== undefined && previous.equals(current)) return decision;
       return { ...decision, startsRequestSeries: true };
     });
+    // SUR-263 clause 2: "retired" means the body of a crew-rules block this
+    // session's own log served before the body CREW.md serves now; an archived
+    // pre-fix head is what supplies that text. The WeakSet makes the check run
+    // once per session, before the first request, and the repair finishes
+    // before next() so the head commit, pricing, and automatic compaction
+    // later in the same waterfall already see the clean surface.
+    //
+    // It must stay a compaction transaction. A `surfaceOp: replace` cannot
+    // target the paired `compaction/summary` record because that record has no
+    // surface node, and appending a clean `user/message` directly over the
+    // checkpoint seq makes resumeSession reject the log (`compaction checkpoint
+    // has no matching compaction/start`). compactRegion(seq, seq, ...) with a
+    // call-local summarize override instead appends a matched start, summary,
+    // checkpoint and end chain; the old events remain read-only history while
+    // the new checkpoint shadows the contaminated one.
+    scope.on('agent/pre-step', async ({ agent, signal }, next) => {
+      const { session } = agent;
+      if (session === null || typeof session !== 'object' || repairChecked.has(session)) return next();
+      repairChecked.add(session);
+      try {
+        await repairCheckpoints(agent, signal);
+      } catch (error) {
+        ctx.logger?.info?.('zeron-captains: crew-rules checkpoint repair failed: %s',
+          error instanceof Error ? error.message : String(error));
+      }
+      return next();
+    }, { prepend: true });
   };
   ctx.on('agent/created', ({ agent }) => register(agent));
   // A root created before this fiber settled never reached the listener above.
