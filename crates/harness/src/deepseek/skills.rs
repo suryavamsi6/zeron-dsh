@@ -9,11 +9,12 @@
 //! can offer them before a chat starts, with no runtime to ask.
 
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
 };
 
+use yaml_rust2::YamlLoader;
 use zeron_proto::invocation::Skill;
 
 /// The skills this scanner (SUR-56) reads for `cwd` — three of the roots
@@ -155,16 +156,19 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         return None;
     }
     let closing = lines.iter().skip(1).position(|line| *line == "---")? + 1;
+    // The SDK parses the frontmatter with a real YAML parser and drops the
+    // skill when that parse fails. Validate the same text before this menu's
+    // line-oriented extraction: tab indentation, unterminated or trailing
+    // quoted scalars, duplicate mapping keys and sequence/mapping structure
+    // are the parser's grammar, not rules to approximate here.
+    if YamlLoader::load_from_str(&lines[1..closing].join("\n")).is_err() {
+        return None;
+    }
     let mut fields = Vec::new();
     let mut index = 1;
     // The root mapping's indent, from its first key: usually none, but a
     // document may indent its whole root mapping.
     let mut base: Option<usize> = None;
-    // yaml rejects duplicate keys in every mapping, not only in the fields
-    // this scanner reads. Track the key path so sibling mappings may reuse a
-    // key while two keys in one mapping cannot.
-    let mut seen_keys = HashSet::new();
-    let mut parents: Vec<(usize, String)> = Vec::new();
     while index < closing {
         let line = lines[index];
         index += 1;
@@ -172,29 +176,11 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        // Tabs may separate or comment a line, but they may not be YAML
-        // indentation; yaml reports the ubiquitous-tab error and rejects the
-        // document.
-        if line[..indent_of(line)].contains('\t') {
-            return None;
-        }
         let indent = indent_of(line);
         let Some((key, value)) = trimmed.split_once(':') else {
             continue;
         };
         let key = key.trim().to_string();
-        while parents
-            .last()
-            .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
-        {
-            parents.pop();
-        }
-        let mut path: Vec<String> = parents.iter().map(|(_, key)| key.clone()).collect();
-        path.push(key.clone());
-        if !seen_keys.insert(path) {
-            return None;
-        }
-        parents.push((indent, key.clone()));
         let value = value.trim();
         let Some(marker) = value.chars().next().filter(|c| matches!(c, '|' | '>')) else {
             let mut scalar_text = value.to_string();
@@ -217,7 +203,7 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
                     }
                 }
             }
-            let scalar = scalar(&scalar_text)?;
+            let scalar = scalar(&scalar_text);
             let base = *base.get_or_insert(indent);
             if indent == base {
                 fields.push((key, scalar));
@@ -250,19 +236,16 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
 
 /// A single-line scalar: a value wrapped in matching quotes stays a string
 /// under the existing unquote rules, and a comment after the closing quote
-/// is dropped; anything else is plain. A quote that never closes, or one
-/// followed by anything but space and a comment, makes the YAML document
-/// malformed rather than a differently shaped scalar.
-fn scalar(value: &str) -> Option<Value> {
-    if matches!(value.as_bytes().first(), Some(b'"' | b'\'')) {
-        let end = quoted_end(value)?;
+/// is dropped; anything else is plain. Malformed scalars never reach this
+/// extraction: the YAML parse above has already dropped the document.
+fn scalar(value: &str) -> Value {
+    if let Some(end) = quoted_end(value) {
         let rest = value[end..].trim_start();
         if rest.is_empty() || rest.starts_with('#') {
-            return Some(Value::Quoted(unquote(&value[..end])));
+            return Value::Quoted(unquote(&value[..end]));
         }
-        return None;
     }
-    Some(Value::Plain(strip_comment(value)))
+    Value::Plain(strip_comment(value))
 }
 
 /// The byte index just past an opening quote's matching close, or `None`
@@ -778,6 +761,16 @@ mod tests {
             (
                 "duplicate nested keys",
                 "name: review\nmetadata:\n  owner: one\n  owner: two\n",
+                false,
+            ),
+            (
+                "sequence of mappings",
+                "name: review\ndescription: Review\ninputs:\n  - input: one\n  - input: two\n",
+                true,
+            ),
+            (
+                "duplicate keys in one sequence item",
+                "name: review\ndescription: Review\ninputs:\n  - input: one\n    input: two\n",
                 false,
             ),
             (
