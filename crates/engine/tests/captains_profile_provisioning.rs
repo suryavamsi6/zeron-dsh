@@ -138,6 +138,46 @@ fn preserved_in_order(before: &str, after: &str) -> bool {
         })
 }
 
+/// A byte-for-byte snapshot of a materialised bundle tree, with relative
+/// paths normalised to `/` so the comparison is portable.
+fn snapshot_tree(root: &Path) -> Vec<(String, Vec<u8>)> {
+    fn walk(dir: &Path, root: &Path, files: &mut Vec<(String, Vec<u8>)>) {
+        let mut entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("{} should read: {error}", dir.display()))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("the tree's entries should read");
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let file_type = entry
+                .file_type()
+                .unwrap_or_else(|error| panic!("{} should stat: {error}", entry.path().display()));
+            if file_type.is_dir() {
+                walk(&entry.path(), root, files);
+            } else if file_type.is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("a recursive entry is below its root")
+                    .components()
+                    .map(|component| component.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                files.push((
+                    relative,
+                    std::fs::read(entry.path()).unwrap_or_else(|error| {
+                        panic!("{} should read: {error}", entry.path().display())
+                    }),
+                ));
+            }
+        }
+    }
+
+    let mut files = Vec::new();
+    walk(root, root, &mut files);
+    files.sort();
+    files
+}
+
 /// Rule 2 (and the acceptance's first clause): a clean home gets a profile
 /// created from the shipped template, with the packaged bundle materialised
 /// and listed — no pnpm, no promote-time install, and writable, because dsh
@@ -228,7 +268,10 @@ async fn an_existing_profile_gains_only_the_missing_bundle_entry() {
 }
 
 /// Rule 4: a profile that already lists the bundle is a no-op — the exact
-/// bytes and link stay as they were, so a reinstall or upgrade reruns safely.
+/// bytes stay as they were, so a reinstall or upgrade reruns safely. The
+/// entry is a link where the host has a link primitive and a materialised
+/// copy where it does not; the copy case compares tree bytes rather than
+/// assuming `read_link` exists on the platform this test is protecting.
 #[tokio::test]
 async fn a_provisioned_profile_is_a_no_op_on_the_next_run() {
     let rig = Rig::new();
@@ -236,8 +279,9 @@ async fn a_provisioned_profile_is_a_no_op_on_the_next_run() {
     let first_manifest = rig.manifest();
     let first_patch = std::fs::read_to_string(rig.profile().join("cordis.patch.yml"))
         .expect("the patch layer reads");
-    let first_link = std::fs::read_link(rig.profile().join("node_modules").join(BUNDLE))
-        .expect("the bundle link reads");
+    let entry = rig.profile().join("node_modules").join(BUNDLE);
+    let first_link = std::fs::read_link(&entry).ok();
+    let first_copy = first_link.is_none().then(|| snapshot_tree(&entry));
 
     rig.prepare(Some("another-chat"))
         .await
@@ -254,12 +298,19 @@ async fn a_provisioned_profile_is_a_no_op_on_the_next_run() {
         first_patch,
         "the patch layer must not be rewritten"
     );
-    assert_eq!(
-        std::fs::read_link(rig.profile().join("node_modules").join(BUNDLE))
-            .expect("the bundle link still reads"),
-        first_link,
-        "the bundle link must not be re-pointed"
-    );
+    if let Some(first_link) = first_link {
+        assert_eq!(
+            std::fs::read_link(&entry).expect("the bundle link still reads"),
+            first_link,
+            "the bundle link must not be re-pointed"
+        );
+    } else {
+        assert_eq!(
+            snapshot_tree(&entry),
+            first_copy.expect("a materialised copy has a first snapshot"),
+            "a materialised copy and its marker must stay byte-identical"
+        );
+    }
 }
 
 /// Rule 5: a manifest that cannot be parsed is never edited — the run is

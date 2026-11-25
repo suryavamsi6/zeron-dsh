@@ -7,9 +7,14 @@ for f in crates/harness/tests/*.rs crates/preview/tests/*.rs crates/doc/tests/*.
   [[ -f "$f" ]] || continue
   tests+=(--test "$(basename "$f" .rs)")
 done
-for t in e2e big_remote_chats warm_start misc geometry session_publication restart_resume side_chats message_queue device_routing device_room plugin_services restart_hook captain_role_runtime; do
+for t in e2e big_remote_chats warm_start misc geometry session_publication restart_resume side_chats message_queue device_routing device_room plugin_services restart_hook captain_role_runtime captains_profile_provisioning; do
   tests+=(--test "$t")
 done
+
+# SUR-234: make the packaged-profile coverage visible in the gate log, not
+# only inferable from eight scattered PASS lines inside nextest's sharded total.
+captains_cases=$(cargo test -p zeron-engine --test captains_profile_provisioning --locked -- --list --format terse | grep -c ': test$')
+echo "core gate suite captains_profile_provisioning: $captains_cases cases"
 
 exec cargo nextest run --config-file scripts/ci/nextest.toml --locked --no-fail-fast \
   -p zeron-harness -p zeron-engine -p zeron-sync -p zeron-update -p zeron-doc -p zeron-preview \

@@ -22,6 +22,7 @@ use std::sync::{Mutex, PoisonError};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::Digest;
 use zeron_rpc::{RpcError, methods};
 
 const FILE_NAME: &str = "captains.json";
@@ -671,6 +672,12 @@ fn holds_plugin_bundle(dir: &Path) -> bool {
 /// profile's own `node_modules` resolves it.
 const BUNDLE_NAME: &str = "zeron-dsh-captains";
 
+/// The ownership marker written into a materialised copy of the bundle. It
+/// records the hash of the copy this host provisioned, so an upgrade can tell
+/// that disposable copy from a real directory a person installed and refresh
+/// only the former.
+const COPY_MARKER: &str = ".zeron-dsh-captains.copy.json";
+
 /// The `sdk` profile template dsh's `initProfile` writes, byte for byte:
 /// the user patch layer every bundle layer is applied under, and the
 /// workspace file that makes the profile a plain hoisted pnpm project.
@@ -927,8 +934,12 @@ fn complete_profile(profile: &Path, bundle: &Path, text: &str) -> ProvisionOutco
 
 /// Whether `profile/node_modules/<bundle>` already *is* the bundle — a
 /// read, never a write: a link that canonicalises to `bundle`, or a real
-/// directory whose `package.json` names it, which is what a hoisted pnpm
-/// install or a materialised copy leaves.
+/// directory whose `package.json` names it. A real directory without the
+/// copy marker is a person's hoisted install and counts as present without
+/// any further comparison, because provisioning never rewrites it. A marked
+/// copy counts only while both its marker and its bytes still match the
+/// packaged bundle; otherwise it is this host's own stale copy and can be
+/// refreshed.
 fn link_resolves(profile: &Path, bundle: &Path) -> bool {
     let entry = profile.join("node_modules").join(BUNDLE_NAME);
     if std::fs::canonicalize(&entry).is_ok_and(|target| target == bundle) {
@@ -936,8 +947,18 @@ fn link_resolves(profile: &Path, bundle: &Path) -> bool {
     }
     // `symlink_metadata` reports the entry's own type: `is_dir` here is a
     // real directory, never a link to one.
-    std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_dir())
-        && names_bundle(&entry)
+    if !(std::fs::symlink_metadata(&entry).is_ok_and(|metadata| metadata.is_dir())
+        && names_bundle(&entry))
+    {
+        return false;
+    }
+    let Some(recorded) = copy_marker_hash(&entry) else {
+        return true;
+    };
+    let Ok(packaged) = bundle_hash(bundle) else {
+        return false;
+    };
+    recorded == packaged && bundle_hash(&entry).is_ok_and(|copy| copy == recorded)
 }
 
 /// Whether the real directory at `entry` is the bundle itself: its
@@ -951,16 +972,109 @@ fn names_bundle(entry: &Path) -> bool {
         .is_some_and(|name| name == BUNDLE_NAME)
 }
 
+/// The hash recorded in the copy marker at `entry`, or `None` when there is
+/// no marker this host recognises. Requiring the bundle name and schema
+/// version keeps an unrelated file of the same name from making a person's
+/// directory look disposable.
+fn copy_marker_hash(entry: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(entry.join(COPY_MARKER)).ok()?;
+    let marker: Value = serde_json::from_str(&text).ok()?;
+    if marker.get("version").and_then(Value::as_u64) != Some(1)
+        || marker.get("bundle").and_then(Value::as_str) != Some(BUNDLE_NAME)
+    {
+        return None;
+    }
+    marker
+        .get("bundleHash")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
+/// A stable hash of the files `copy_bundle` materialises: relative paths in
+/// sorted order plus each file's length and bytes. Top-level `node_modules`,
+/// `test` and the copy marker are outside the bundle exactly as they are in
+/// the copy; links are not followed. The hash is platform-stable because
+/// path components join with `/` before hashing.
+fn bundle_hash(root: &Path) -> std::io::Result<String> {
+    let mut files = Vec::new();
+    collect_bundle_files(root, root, true, &mut files)?;
+    files.sort();
+    let mut hasher = sha2::Sha256::new();
+    for file in files {
+        let path = file
+            .components()
+            .map(|component| component.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        hasher.update(path.as_bytes());
+        hasher.update(b"\0");
+        let bytes = std::fs::read(root.join(&file))?;
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(bytes);
+        hasher.update(b"\0");
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Collect the regular files `copy_bundle` would carry below `dir`, with
+/// paths relative to `root`. `read_dir` order is platform-dependent, so the
+/// caller sorts the collected paths before hashing them.
+fn collect_bundle_files(
+    dir: &Path,
+    root: &Path,
+    top: bool,
+    files: &mut Vec<PathBuf>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if top
+            && matches!(
+                entry.file_name().to_str(),
+                Some("node_modules" | "test") | Some(COPY_MARKER)
+            )
+        {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            collect_bundle_files(&entry.path(), root, false, files)?;
+        } else if file_type.is_file() {
+            files.push(
+                entry
+                    .path()
+                    .strip_prefix(root)
+                    .expect("a recursive entry is below its root")
+                    .to_path_buf(),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Link `profile/node_modules/<bundle>` at `bundle`: created when absent,
 /// re-pointed when it is a link resolving anywhere else — and only the
 /// link itself is ever removed, never another `node_modules` name and
 /// never the tree a link points at. A real directory or file at that
 /// name is a person's package, not ours: one that is already the bundle
 /// is `link_resolves`' present case, and anything else refuses rather
-/// than being deleted or overwritten. Where no link primitive exists —
-/// Windows without Developer Mode cannot make a directory symlink — the
-/// bundle is materialised instead.
+/// than being deleted or overwritten. The one exception is a directory
+/// carrying this provisioning copy's marker: that marker is written only
+/// into a copy this host made, so the tree is disposable and an upgrade
+/// refreshes it in place. Where no link primitive exists — Windows
+/// without Developer Mode cannot make a directory symlink — the bundle
+/// is materialised instead.
 fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
+    ensure_link_with(profile, bundle, link_dir)
+}
+
+/// `ensure_link` with the platform link primitive passed in, so the copy
+/// fallback is exercised on every OS rather than only on a host whose
+/// symlink creation really fails.
+fn ensure_link_with(
+    profile: &Path,
+    bundle: &Path,
+    linker: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> Result<(), String> {
     if link_resolves(profile, bundle) {
         return Ok(());
     }
@@ -968,10 +1082,35 @@ fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
     let link = node_modules.join(BUNDLE_NAME);
     std::fs::create_dir_all(&node_modules)
         .map_err(|error| format!("cannot create {}: {error}", node_modules.display()))?;
+    // Refreshing a copy rewrites the entry through sibling staging trees.
+    // Chat starts can provision the same profile concurrently, so those
+    // rewrites are serialised across threads and processes before the
+    // entry is inspected; the second prepare then sees the first prepare's
+    // completed copy instead of deleting its staging tree mid-copy.
+    let lock_path = node_modules.join(format!(".{BUNDLE_NAME}.prepare.lock"));
+    let provisioning_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    provisioning_lock
+        .lock()
+        .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
+    if link_resolves(profile, bundle) {
+        return Ok(());
+    }
     match std::fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             remove_link(&link)
                 .map_err(|error| format!("cannot re-point {}: {error}", link.display()))?;
+        }
+        Ok(metadata) if metadata.is_dir() && copy_marker_hash(&link).is_some() => {
+            return materialise_bundle(bundle, &link).map_err(|error| {
+                format!(
+                    "cannot refresh the materialised {BUNDLE_NAME} copy at {}: {error}",
+                    link.display()
+                )
+            });
         }
         Ok(_) => {
             return Err(format!(
@@ -984,7 +1123,7 @@ fn ensure_link(profile: &Path, bundle: &Path) -> Result<(), String> {
             return Err(format!("cannot inspect {}: {error}", link.display()));
         }
     }
-    match link_dir(bundle, &link) {
+    match linker(bundle, &link) {
         Ok(()) => Ok(()),
         Err(link_error) => materialise_bundle(bundle, &link).map_err(|copy_error| {
             format!(
@@ -1015,23 +1154,38 @@ fn remove_link(link: &Path) -> std::io::Result<()> {
 
 /// Materialise the bundle at `link` — the fallback for hosts with no
 /// usable link primitive — as a real directory holding the files the
-/// bundle ships. The copy stages beside `link` and renames over it, so a
-/// failure leaves no half-shipped bundle at the entry: the staging
-/// directory is this function's own and is cleaned up; `link` itself —
-/// absent when this is reached — is never touched.
+/// bundle ships plus the marker that makes the copy refreshable. The copy
+/// stages beside `link`, so a copy failure never leaves a half-shipped
+/// bundle at the entry. On a refresh the old copy moves aside only after
+/// the new one is complete, moves back if the install rename fails, and is
+/// removed once the new copy is in place.
 fn materialise_bundle(bundle: &Path, link: &Path) -> std::io::Result<()> {
     let staging = link.with_file_name(format!(".{BUNDLE_NAME}.materialising"));
+    let retiring = link.with_file_name(format!(".{BUNDLE_NAME}.retiring"));
     let result = (|| {
-        match std::fs::symlink_metadata(&staging) {
-            // Stale staging is this function's own, left by a crashed run.
-            Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&staging)?,
-            Ok(_) => std::fs::remove_file(&staging)?,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
-        }
+        remove_own_temp_tree(&staging)?;
         std::fs::create_dir(&staging)?;
         copy_bundle(bundle, &staging, true)?;
-        std::fs::rename(&staging, link)
+        write_copy_marker(&staging)?;
+        remove_own_temp_tree(&retiring)?;
+        match std::fs::symlink_metadata(link) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::rename(&staging, link)
+            }
+            Err(error) => Err(error),
+            Ok(_) => {
+                std::fs::rename(link, &retiring)?;
+                match std::fs::rename(&staging, link) {
+                    Ok(()) => remove_own_temp_tree(&retiring),
+                    Err(error) => match std::fs::rename(&retiring, link) {
+                        Ok(()) => Err(error),
+                        Err(rollback) => Err(std::io::Error::other(format!(
+                            "cannot install the refreshed copy ({error}); restoring the old copy failed too ({rollback})"
+                        ))),
+                    },
+                }
+            }
+        }
     })();
     if result.is_err() {
         let _ = std::fs::remove_dir_all(&staging);
@@ -1039,14 +1193,44 @@ fn materialise_bundle(bundle: &Path, link: &Path) -> std::io::Result<()> {
     result
 }
 
+/// Remove one of `materialise_bundle`'s own temporary trees. The names are
+/// private to provisioning, so a stale one is safe to delete: it can only be
+/// the interrupted copy it was staged as.
+fn remove_own_temp_tree(path: &Path) -> std::io::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(path),
+        Ok(_) => std::fs::remove_file(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Write the ownership marker for a materialised copy. The hash is taken
+/// from the copy itself after materialisation, so it describes the exact
+/// bytes a later prepare compares with the packaged bundle.
+fn write_copy_marker(copy: &Path) -> std::io::Result<()> {
+    let marker = json!({
+        "version": 1,
+        "bundle": BUNDLE_NAME,
+        "bundleHash": bundle_hash(copy)?,
+    });
+    std::fs::write(copy.join(COPY_MARKER), format!("{marker}\n"))
+}
+
 /// Copy the files the bundle ships from `from` into `to`, recursively:
 /// the manifest, the entry point, the patch layer and `src` — which
 /// `index.js` imports — with the packager's own `node_modules` and `test`
-/// left out at the top level. A link inside the bundle is not followed.
+/// left out at the top level. The copy marker is metadata for the copy, not
+/// bundle payload, and a link inside the bundle is not followed.
 fn copy_bundle(from: &Path, to: &Path, top: bool) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
-        if top && matches!(entry.file_name().to_str(), Some("node_modules" | "test")) {
+        if top
+            && matches!(
+                entry.file_name().to_str(),
+                Some("node_modules" | "test") | Some(COPY_MARKER)
+            )
+        {
             continue;
         }
         let file_type = entry.file_type()?;
@@ -3882,6 +4066,213 @@ mod tests {
             plugin_dir_from(Some(&override_dir), &exe, "linux", true),
             Some(override_dir),
             "with index.js written the same directory resolves"
+        );
+    }
+
+    /// A minimal packaged Captains bundle for the provisioning-copy tests:
+    /// the manifest must name the bundle, and the nested file proves the
+    /// recursive copy and its hash cover more than the entry point.
+    fn provisioning_source(root: &Path) -> PathBuf {
+        let source = root.join("packaged");
+        std::fs::create_dir_all(source.join("src")).unwrap();
+        std::fs::write(
+            source.join("package.json"),
+            format!("{{\"name\":\"{BUNDLE_NAME}\"}}"),
+        )
+        .unwrap();
+        std::fs::write(source.join("index.js"), b"first entry").unwrap();
+        std::fs::write(source.join("src/tool.js"), b"first nested").unwrap();
+        source
+    }
+
+    /// SUR-235: the fallback itself is portable to test: when the injected
+    /// link primitive reports the Windows no-privilege case, provisioning
+    /// materialises the bundle and marks the copy with the bundle's hash.
+    #[test]
+    fn a_failed_link_materialises_a_marked_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = provisioning_source(dir.path());
+        let profile = dir.path().join("home/profiles/sdk");
+
+        ensure_link_with(&profile, &source, |_, _| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "no directory symlink privilege",
+            ))
+        })
+        .unwrap();
+
+        let entry = profile.join("node_modules").join(BUNDLE_NAME);
+        assert!(
+            std::fs::symlink_metadata(&entry)
+                .expect("the materialised copy exists")
+                .is_dir(),
+            "the fallback leaves a real directory, not a link"
+        );
+        assert_eq!(
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            b"first nested",
+            "the fallback copies the bundle recursively"
+        );
+        assert_eq!(
+            copy_marker_hash(&entry),
+            Some(bundle_hash(&source).unwrap()),
+            "the copy records the packaged bundle's hash"
+        );
+    }
+
+    /// SUR-235: a copy made because the host has no link primitive is a
+    /// byte-identical no-op while the packaged bundle is unchanged, and an
+    /// upgrade refreshes that same disposable copy when the bundle's hash
+    /// moves. The test drives `ensure_link` — provisioning's own decision
+    /// point — rather than calling the copy primitive twice.
+    #[test]
+    fn a_materialised_copy_is_a_no_op_until_the_packaged_bundle_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = provisioning_source(dir.path());
+        let profile = dir.path().join("home/profiles/sdk");
+        let entry = profile.join("node_modules").join(BUNDLE_NAME);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        materialise_bundle(&source, &entry).unwrap();
+        let first = [
+            std::fs::read(entry.join("package.json")).unwrap(),
+            std::fs::read(entry.join("index.js")).unwrap(),
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            std::fs::read(entry.join(COPY_MARKER)).unwrap(),
+        ];
+
+        ensure_link(&profile, &source).unwrap();
+
+        assert_eq!(
+            [
+                std::fs::read(entry.join("package.json")).unwrap(),
+                std::fs::read(entry.join("index.js")).unwrap(),
+                std::fs::read(entry.join("src/tool.js")).unwrap(),
+                std::fs::read(entry.join(COPY_MARKER)).unwrap(),
+            ],
+            first,
+            "an unchanged copy, including its marker, must stay byte-identical"
+        );
+
+        std::fs::write(source.join("src/tool.js"), b"second nested").unwrap();
+        ensure_link(&profile, &source).unwrap();
+
+        assert_eq!(
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            b"second nested",
+            "a changed packaged bundle refreshes the materialised copy"
+        );
+        assert_ne!(
+            std::fs::read(entry.join(COPY_MARKER)).unwrap(),
+            first[3],
+            "the refreshed copy records the new bundle hash"
+        );
+        let refreshed = [
+            std::fs::read(entry.join("package.json")).unwrap(),
+            std::fs::read(entry.join("index.js")).unwrap(),
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            std::fs::read(entry.join(COPY_MARKER)).unwrap(),
+        ];
+        ensure_link(&profile, &source).unwrap();
+        assert_eq!(
+            [
+                std::fs::read(entry.join("package.json")).unwrap(),
+                std::fs::read(entry.join("index.js")).unwrap(),
+                std::fs::read(entry.join("src/tool.js")).unwrap(),
+                std::fs::read(entry.join(COPY_MARKER)).unwrap(),
+            ],
+            refreshed,
+            "the refreshed copy is itself a no-op on the next prepare"
+        );
+        for suffix in ["materialising", "retiring"] {
+            assert!(
+                !entry
+                    .with_file_name(format!(".{BUNDLE_NAME}.{suffix}"))
+                    .exists(),
+                "the refresh leaves no .{suffix} tree behind"
+            );
+        }
+    }
+
+    /// Concurrent prepares of one stale copy are serialised: every caller
+    /// either performs the refresh or waits and then sees the completed
+    /// copy. None may delete another caller's half-written staging tree.
+    #[test]
+    fn overlapping_copy_refreshes_are_serialised() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = provisioning_source(dir.path());
+        let profile = dir.path().join("home/profiles/sdk");
+        let entry = profile.join("node_modules").join(BUNDLE_NAME);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        materialise_bundle(&source, &entry).unwrap();
+        std::fs::write(source.join("src/tool.js"), b"second nested").unwrap();
+
+        let barrier = std::sync::Barrier::new(4);
+        let barrier = &barrier;
+        let profile = &profile;
+        let source = &source;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    ensure_link(profile, source)
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("a provisioning thread must not panic")
+                    .unwrap();
+            }
+        });
+
+        assert_eq!(
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            b"second nested",
+            "the completed refresh is intact after every prepare returns"
+        );
+        assert_eq!(
+            copy_marker_hash(&entry),
+            Some(bundle_hash(&source).unwrap()),
+            "the surviving copy records the packaged bundle's hash"
+        );
+    }
+
+    /// SUR-235: a real directory that names the bundle but carries no copy
+    /// marker is a person's install even when its bytes differ from the
+    /// packaged bundle. It still satisfies provisioning and is never
+    /// rewritten as though it were our disposable copy.
+    #[test]
+    fn an_unmarked_real_bundle_directory_is_never_refreshed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = provisioning_source(dir.path());
+        let profile = dir.path().join("home/profiles/sdk");
+        let entry = profile.join("node_modules").join(BUNDLE_NAME);
+        std::fs::create_dir_all(&entry).unwrap();
+        std::fs::write(
+            entry.join("package.json"),
+            format!("{{\"name\":\"{BUNDLE_NAME}\"}}"),
+        )
+        .unwrap();
+        std::fs::write(entry.join("index.js"), b"the user's install").unwrap();
+        std::fs::write(entry.join("keep-me"), b"user data").unwrap();
+
+        ensure_link(&profile, &source).unwrap();
+
+        assert_eq!(
+            std::fs::read(entry.join("index.js")).unwrap(),
+            b"the user's install",
+            "an unmarked install is never overwritten"
+        );
+        assert_eq!(
+            std::fs::read(entry.join("keep-me")).unwrap(),
+            b"user data",
+            "an unmarked install's own files survive"
+        );
+        assert!(
+            !entry.join(COPY_MARKER).exists(),
+            "provisioning must not retroactively claim a person's directory"
         );
     }
 
