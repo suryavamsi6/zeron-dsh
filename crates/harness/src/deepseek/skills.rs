@@ -9,7 +9,7 @@
 //! can offer them before a chat starts, with no runtime to ask.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -160,6 +160,11 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
     // The root mapping's indent, from its first key: usually none, but a
     // document may indent its whole root mapping.
     let mut base: Option<usize> = None;
+    // yaml rejects duplicate keys in every mapping, not only in the fields
+    // this scanner reads. Track the key path so sibling mappings may reuse a
+    // key while two keys in one mapping cannot.
+    let mut seen_keys = HashSet::new();
+    let mut parents: Vec<(usize, String)> = Vec::new();
     while index < closing {
         let line = lines[index];
         index += 1;
@@ -167,19 +172,39 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let indent = indent_of(line);
-        let base = *base.get_or_insert(indent);
-        if indent != base {
-            continue;
+        // Tabs may separate or comment a line, but they may not be YAML
+        // indentation; yaml reports the ubiquitous-tab error and rejects the
+        // document.
+        if line[..indent_of(line)].contains('\t') {
+            return None;
         }
+        let indent = indent_of(line);
         let Some((key, value)) = trimmed.split_once(':') else {
             continue;
         };
+        let key = key.trim().to_string();
+        while parents
+            .last()
+            .is_some_and(|(parent_indent, _)| *parent_indent >= indent)
+        {
+            parents.pop();
+        }
+        let mut path: Vec<String> = parents.iter().map(|(_, key)| key.clone()).collect();
+        path.push(key.clone());
+        if !seen_keys.insert(path) {
+            return None;
+        }
+        parents.push((indent, key.clone()));
         let value = value.trim();
         let Some(marker) = value.chars().next().filter(|c| matches!(c, '|' | '>')) else {
-            fields.push((key.trim().to_string(), scalar(value)));
+            let scalar = scalar(value)?;
+            let base = *base.get_or_insert(indent);
+            if indent == base {
+                fields.push((key, scalar));
+            }
             continue;
         };
+        let base = *base.get_or_insert(indent);
         // A block scalar's lines are the more-indented ones that follow; its
         // chomping indicator only affects a trailing break nobody displays.
         let mut parts = Vec::new();
@@ -196,25 +221,28 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         } else {
             parts.join("\n")
         };
-        fields.push((
-            key.trim().to_string(),
-            Value::Block(text.trim().to_string()),
-        ));
+        if indent == base {
+            fields.push((key, Value::Block(text.trim().to_string())));
+        }
     }
     Some(fields)
 }
 
 /// A single-line scalar: a value wrapped in matching quotes stays a string
 /// under the existing unquote rules, and a comment after the closing quote
-/// is dropped; anything else is plain.
-fn scalar(value: &str) -> Value {
-    if let Some(end) = quoted_end(value) {
+/// is dropped; anything else is plain. A quote that never closes, or one
+/// followed by anything but space and a comment, makes the YAML document
+/// malformed rather than a differently shaped scalar.
+fn scalar(value: &str) -> Option<Value> {
+    if matches!(value.as_bytes().first(), Some(b'"' | b'\'')) {
+        let end = quoted_end(value)?;
         let rest = value[end..].trim_start();
         if rest.is_empty() || rest.starts_with('#') {
-            return Value::Quoted(unquote(&value[..end]));
+            return Some(Value::Quoted(unquote(&value[..end])));
         }
+        return None;
     }
-    Value::Plain(strip_comment(value))
+    Some(Value::Plain(strip_comment(value)))
 }
 
 /// The byte index just past an opening quote's matching close, or `None`
@@ -674,5 +702,68 @@ mod tests {
             "---\nname: block\ndescription: |\n  userInvocable: false\n---\n",
         );
         assert_eq!(names(&discover(&root, &home)), ["block"]);
+    }
+
+    #[test]
+    fn malformed_yaml_is_accepted_exactly_when_the_sdk_accepts_it() {
+        // The `sdk_accepts` column was measured against the pinned SDK's
+        // yaml@2.9.1 `parse`: this table is the acceptance boundary, not a
+        // list of shapes this parser happens to like.
+        let cases = [
+            (
+                "plain mapping",
+                "name: review\ndescription: Review the diff\n",
+                true,
+            ),
+            (
+                "tab-indented root key",
+                "name: review\n\tdescription: Review the diff\n",
+                false,
+            ),
+            (
+                "tab-indented nested key",
+                "name: review\nmetadata:\n\tdescription: Review the diff\n",
+                false,
+            ),
+            (
+                "tab-indented comment",
+                "# comment\n\t# indented comment\nname: review\ndescription: Review\n",
+                true,
+            ),
+            (
+                "trailing junk after a quoted scalar",
+                "name: review\ndescription: \"Review the diff\" trailing\n",
+                false,
+            ),
+            (
+                "unterminated quote",
+                "name: review\ndescription: \"Review the diff\n",
+                false,
+            ),
+            (
+                "duplicate root keys",
+                "name: review\ndescription: Review\ndescription: Duplicate\n",
+                false,
+            ),
+            (
+                "duplicate nested keys",
+                "name: review\nmetadata:\n  owner: one\n  owner: two\n",
+                false,
+            ),
+            (
+                "nested mapping",
+                "name: review\nmetadata:\n  owner: one\ndescription: Review\n",
+                true,
+            ),
+            (
+                "block scalar",
+                "name: review\ndescription: |\n  Review the diff\n  carefully\n",
+                true,
+            ),
+        ];
+        for (name, body, sdk_accepts) in cases {
+            let raw = format!("---\n{body}---\n");
+            assert_eq!(frontmatter(&raw).is_some(), sdk_accepts, "{name}");
+        }
     }
 }
