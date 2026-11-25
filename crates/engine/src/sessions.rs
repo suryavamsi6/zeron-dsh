@@ -3157,11 +3157,12 @@ impl Inner {
                     return false;
                 };
                 // A textless turn earns a report only when the ending itself
-                // is the news: an error or an interruption. Decided before the
-                // claim below, so a turn that writes nothing records nothing —
-                // a later text-bearing finalization of the same run still lands.
+                // is the news: an error, an interruption, or a token ceiling
+                // hit before any reply text. Decided before the claim below,
+                // so a turn that writes nothing records nothing — a later
+                // text-bearing finalization of the same run still lands.
                 let Some(text) = turn_text.text.or(match status {
-                    DoneStatus::Errored | DoneStatus::Interrupted => Some(""),
+                    DoneStatus::Errored | DoneStatus::Interrupted | DoneStatus::MaxTokens => Some(""),
                     _ => None,
                 }) else {
                     return false;
@@ -9740,9 +9741,10 @@ mod tests {
     }
 
     /// SUR-216: the token ceiling is not a clean completion in the report the
-    /// Captain reads, even though the session lifecycle still closes cleanly.
+    /// Captain reads, even when the cap hit before any reply text; the
+    /// session lifecycle itself still closes cleanly.
     #[tokio::test]
-    async fn a_token_capped_crew_turn_reports_max_tokens() {
+    async fn a_textless_token_capped_crew_turn_reports_token_capped() {
         let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
         let dir = tempfile::tempdir().expect("tempdir");
         let (sessions, home) = needs_you_engine(dir.path(), registry);
@@ -9763,7 +9765,7 @@ mod tests {
             DoneStatus::MaxTokens,
             Some(TurnText {
                 id: "turn-max-tokens",
-                text: Some("partial reply"),
+                text: None,
             })
         ));
         let mut body = String::new();
