@@ -234,6 +234,7 @@ jobs:
       pull-requests: read  # the suites' first-red step compares the run's head with the PR's
     uses: ./.github/workflows/zgx-tests.yml
     with:
+      skip: ${{ toJSON(fromJSON(needs.plan.outputs.skip).zgx || fromJSON('[]')) }}
       pass-key: ${{ fromJSON(needs.plan.outputs.keys).zgx || '' }}
 
   result:

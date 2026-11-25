@@ -156,6 +156,24 @@ class PlanTests(unittest.TestCase):
         self.assertEqual(plan.gated(sync, "fast", plan.plan(sync, "fast"))[0], {"ios": ["ios-tests"]})
         self.assertEqual(plan.gated(change, "full", plan.plan(change, "full")), ({}, {}))
 
+    def test_macos_pool_jobs_share_one_fast_tier_rule(self):
+        """SUR-261: a non-platform pull request must not consume either starvation-prone macOS leg."""
+        engine = files("crates/engine/src/dsh_providers.rs", patch="+let x = 1;")
+        suites = plan.plan(engine, "fast", zgx=["crates/engine/**"])
+        self.assertIn("zgx", selected(suites))
+        off, _ = plan.gated(engine, "fast", suites)
+        self.assertEqual(off.get("zgx"), ["zgx-macos"])
+        counts = plan.reservation(plan.jobs_to_run(suites, off), "pull_request", "refs/pull/1/merge")
+        self.assertEqual(counts["macos"], 0)
+        sync = files("crates/sync/src/lib.rs", patch="+let x = 1;")
+        self.assertEqual(plan.gated(sync, "fast", plan.plan(sync, "fast"))[0].get("ios"), ["ios-tests"])
+
+        # zgx's own files still buy the macOS leg on a pull request; the full
+        # tier always does. ios-tests keeps the same rule beside it in JOB_PATHS.
+        app = files("apps/zgx/ui/app.luau", patch="+x")
+        self.assertNotIn("zgx", plan.gated(app, "fast", plan.plan(app, "fast"))[0])
+        self.assertEqual(plan.gated(engine, "full", plan.plan(engine, "full", zgx=["crates/engine/**"]))[0], {})
+
     def test_reservation(self):
         suites = plan.plan(files("Cargo.lock"), "full", nightly=True)
         counts = plan.reservation(plan.jobs_to_run(suites), "pull_request", "refs/pull/1/merge")

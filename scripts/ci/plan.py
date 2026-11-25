@@ -154,6 +154,13 @@ HARNESS_PATHS = ["crates/harness/**"]
 
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
 # On the full tier everything runs.
+#
+# The two `macos-latest` test legs share one pool rule here, because a queued
+# job that never receives a runner is cancelled after fifteen minutes and makes
+# the aggregate red on capacity alone: `ios-tests` runs only for the app/FFI
+# files it links, and `zgx-macos` only for zgx's own files. Other pull requests
+# keep their Linux zgx and iOS-core coverage; main, the merge queue, manual
+# runs and `ci:full` still run both macOS legs.
 JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # Release build, packaging, installer and CLI start-up probes (`tests`
     # already compiles the binary).
@@ -164,6 +171,11 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # crate and the client it wraps; ios-core tests the rest of the mobile core.
     ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
                                    "crates/client/**", ".github/workflows/macos.yml"],
+    # zgx's Linux shards compile and test the same Rust workspace and Luau UI.
+    # The macOS leg adds macOS-specific compilation, Ghostty and the engine's
+    # plugin tests, so it stays for zgx's own changes and for full-tier runs.
+    ("zgx", "zgx-macos"): ["apps/zgx/**", "scripts/ci/test-zgx.sh", "scripts/ci/zgx-known-failures.txt",
+                            ".github/workflows/zgx-tests.yml"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its
 # fingerprint), (suite, flag) -> the files that turn them on. None at present.
