@@ -17,7 +17,7 @@
 //! Every dying path must instead carry its own visible error (child crash with stderr,
 //! spawn failure, stream error, engine-restart recovery).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use chrono::Utc;
@@ -277,6 +277,9 @@ struct Inner {
     /// while no run was live (between the failed run and its retry) found
     /// nothing to stop, and still ends the turn.
     user_stops: Mutex<HashMap<String, u64>>,
+    /// Chats the person stopped, until a turn starts: a crew report must
+    /// not restart them (SUR-222).
+    stopped: Mutex<HashSet<String>>,
     /// Loopback IPC port this engine serves, once known (0 = not serving):
     /// what the injected `zeron mcp` server dials back into.
     ipc_port: std::sync::atomic::AtomicU16,
@@ -530,6 +533,7 @@ impl SessionsEngine {
                 revivals_starting: Mutex::new(std::collections::HashSet::new()),
                 cancelled_sends: Mutex::new(HashMap::new()),
                 user_stops: Mutex::new(HashMap::new()),
+                stopped: Mutex::new(HashSet::new()),
                 ipc_port: std::sync::atomic::AtomicU16::new(0),
                 ipc_ready: tokio::sync::Notify::new(),
                 ipc_none: std::sync::atomic::AtomicBool::new(false),
@@ -1739,6 +1743,7 @@ impl SessionsEngine {
         }
         // A new turn: a Stop's mark belongs to the one before it.
         self.inner.journal.clear_user_stop(chat_id);
+        lock(&self.inner.stopped).remove(chat_id);
         runs.insert(
             chat_id.to_string(),
             RunHandle {
@@ -2204,7 +2209,9 @@ impl SessionsEngine {
     /// run can take seconds to settle and close its journal, and an engine
     /// that dies in between must not read the stopped turn as a crashed one
     /// ([`RunJournal::note_user_stop`]; cleared when the journal closes the
-    /// turn, or the next turn starts).
+    /// turn, or the next turn starts). A Stop that lands on a live turn
+    /// also marks the chat in `Inner::stopped`: until a new turn starts, a
+    /// crew report must not wake a Captain the person stopped (SUR-222).
     fn note_user_stop(&self, chat_id: &str) {
         *lock(&self.inner.user_stops)
             .entry(chat_id.to_string())
@@ -2218,6 +2225,7 @@ impl SessionsEngine {
         };
         if live && self.turn_in_flight(chat_id) {
             self.inner.journal.note_user_stop(chat_id);
+            lock(&self.inner.stopped).insert(chat_id.to_string());
         }
     }
 
@@ -3190,10 +3198,12 @@ impl Inner {
     /// turn, busy steers at the boundary. Runs inside the report's
     /// `spawn_blocking`, never on the event loop.
     ///
-    /// Three gates, in order: only `Completed` wakes; at most once per crew
-    /// turn (the claim lands before the enqueue); and the target must still
-    /// be a live Captain when the enqueue happens. A failure at the enqueue
-    /// itself is a `tracing::warn!`, never a retry.
+    /// Four gates, in order: only `Completed` wakes; a Captain the person
+    /// stopped is not woken (SUR-222 — the report stays on disk for the
+    /// next human-started turn); at most once per crew turn (the claim
+    /// lands before the enqueue); and the target must still be a live
+    /// Captain when the enqueue happens. A failure at the enqueue itself
+    /// is a `tracing::warn!`, never a retry.
     fn wake_captain(
         &self,
         chat_id: &str,
@@ -3214,6 +3224,14 @@ impl Inner {
         let Some(captain_id) = captain_id else {
             return;
         };
+        // The person's Stop is a boundary a report does not cross (SUR-222):
+        // the report is already on disk and the next human-started turn
+        // reads it. No claim is taken here — if the person resumes and the
+        // same crew turn is finalized again, it may wake then.
+        if lock(&self.stopped).contains(captain_id) {
+            tracing::info!(chat = %chat_id, captain = %captain_id, "crew report wake dropped: the Captain was stopped");
+            return;
+        }
         let title = self
             .workspace()
             .and_then(|ws| ws.chat(chat_id).ok().flatten())
@@ -9459,6 +9477,130 @@ mod tests {
         assert!(
             wakes[0].1.contains("reports/crew-b.md"),
             "…and names the path it could not write: {}",
+            wakes[0].1
+        );
+    }
+
+    /// A Captain wired for a crew wake: its roster row, its Drive, the wake
+    /// seam, and its own turn ended so the chat is idle when the crew reports.
+    /// With `stopped`, the person's Stop is noted on the live turn first.
+    async fn captain_after_its_turn(
+        stopped: bool,
+    ) -> (
+        WakeRig,
+        std::path::PathBuf,
+        String,
+        Arc<Mutex<Vec<(String, String)>>>,
+    ) {
+        let rig = wake_rig("cap-a", false).await;
+        let dir = rig._dir.path();
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(
+            dir.join("captains.json"),
+            r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#,
+        )
+        .unwrap();
+        rig.core.sessions.use_captains_home(home.clone());
+        let drive = crate::captains::drive_dir(&home, "cap-a");
+        std::fs::create_dir_all(&drive).unwrap();
+        let wakes: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = wakes.clone();
+        rig.core
+            .sessions
+            .use_crew_wake(Arc::new(move |captain: &str, text: &str| {
+                sink.lock()
+                    .unwrap()
+                    .push((captain.to_string(), text.to_string()));
+            }));
+        if stopped {
+            assert!(
+                rig.core.sessions.turn_in_flight("cap-a"),
+                "the Captain's run is live before the Stop"
+            );
+            rig.core.sessions.note_user_stop("cap-a");
+        }
+        let end = if stopped {
+            DoneStatus::Interrupted
+        } else {
+            DoneStatus::Completed
+        };
+        rig.feed.send(done(end)).unwrap();
+        let session = settled(&rig).await;
+        assert_eq!(session.status, SessionStatus::Idle, "the Captain's turn ended");
+        let stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        (rig, drive, stamp, wakes)
+    }
+
+    /// SUR-222: the person's Stop is a boundary a crew report does not cross.
+    /// The Captain's turn is stopped while the crew is still running; the
+    /// crew's finalization still writes its report, but must not wake the
+    /// Captain back into the turn it was stopped out of.
+    #[tokio::test]
+    async fn a_stopped_captain_is_not_woken_by_a_crew_report() {
+        let (rig, drive, stamp, wakes) = captain_after_its_turn(true).await;
+        assert!(rig.core.sessions.turn_end_writes(
+            "crew-b",
+            Some(&stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "run-stopped-wake",
+                text: Some("crew finished"),
+            })
+        ));
+        let report = drive.join(crate::crew_reports::DIR).join("crew-b.md");
+        for _ in 0..200 {
+            if report.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            report.exists(),
+            "the report is written even when the wake is dropped: {}",
+            report.display()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            wakes.lock().unwrap().is_empty(),
+            "a stopped Captain is not woken: {:?}",
+            wakes.lock().unwrap()
+        );
+    }
+
+    /// The other half of SUR-222: without a Stop the same finalization wakes
+    /// the Captain exactly as before, pointer line included.
+    #[tokio::test]
+    async fn an_unstopped_captain_is_still_woken_by_a_crew_report() {
+        let (rig, _drive, stamp, wakes) = captain_after_its_turn(false).await;
+        assert!(rig.core.sessions.turn_end_writes(
+            "crew-b",
+            Some(&stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "run-wake",
+                text: Some("crew finished"),
+            })
+        ));
+        for _ in 0..200 {
+            if !wakes.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        let wakes = wakes.lock().unwrap();
+        assert_eq!(wakes.len(), 1, "one wake for one turn: {wakes:?}");
+        assert_eq!(wakes[0].0, "cap-a");
+        assert!(
+            wakes[0].1.contains("reports/crew-b.md"),
+            "the pointer line is unchanged: {}",
             wakes[0].1
         );
     }
