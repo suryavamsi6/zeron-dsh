@@ -314,7 +314,7 @@ mod proc_table {
         dir.flatten()
             .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
             .filter_map(|pid| {
-                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
                 let (ppid, pgid, start) = parse_stat(&stat)?;
                 Some(ProcEntry {
                     pid,
@@ -328,7 +328,7 @@ mod proc_table {
 
     #[cfg(target_os = "linux")]
     pub(super) fn start_time(pid: i32) -> Option<u64> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
         parse_stat(&stat).map(|(_, _, start)| start)
     }
 
@@ -392,7 +392,7 @@ mod proc_table {
     /// Its parent's pid: 1 once its parent died and init adopted it.
     #[cfg(target_os = "linux")]
     pub(super) fn ppid(pid: i32) -> Option<i32> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
         parse_stat(&stat).map(|(ppid, _, _)| ppid)
     }
 
@@ -435,14 +435,34 @@ mod proc_table {
     }
 
     #[cfg(target_os = "linux")]
+    pub(super) fn stat_state(stat: &[u8]) -> Option<&[u8]> {
+        let close = stat.iter().rposition(|byte| *byte == b')')?;
+        stat.get(close + 1..)?
+            .split(|byte| byte.is_ascii_whitespace())
+            .find(|field| !field.is_empty())
+    }
+
+    #[cfg(target_os = "linux")]
     pub(super) fn zombie(pid: i32) -> bool {
-        std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|stat| {
-                let rest = &stat[stat.rfind(')')? + 1..];
-                rest.split_whitespace().next().map(|state| state == "Z")
-            })
-            .unwrap_or(false)
+        let Ok(stat) = std::fs::read(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        if stat_state(&stat) != Some(b"Z") {
+            return false;
+        }
+        // The thread-group leader can be a zombie while its worker threads
+        // still run. Linux does not list those workers as top-level /proc
+        // entries, so inspect the leader's tasks before calling the process
+        // dead. Missing data fails open: shutdown may wait longer, but it
+        // must not abandon live work.
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            return false;
+        };
+        tasks.flatten().all(|task| {
+            std::fs::read(task.path().join("stat"))
+                .ok()
+                .is_some_and(|stat| stat_state(&stat) == Some(b"Z"))
+        })
     }
 
     #[cfg(target_os = "linux")]
@@ -564,15 +584,24 @@ mod proc_table {
 
     /// `(ppid, pgrp, starttime)` from a `/proc/<pid>/stat` line: fields 4,
     /// 5 and 22, counted after the parenthesized command name (which may
-    /// itself hold spaces and parentheses).
+    /// itself hold spaces, parentheses and bytes outside UTF-8).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(super) fn parse_stat(stat: &str) -> Option<(i32, i32, u64)> {
-        let rest = &stat[stat.rfind(')')? + 1..];
-        let fields: Vec<&str> = rest.split_whitespace().collect();
+    pub(super) fn parse_stat(stat: impl AsRef<[u8]>) -> Option<(i32, i32, u64)> {
+        let stat = stat.as_ref();
+        let close = stat.iter().rposition(|byte| *byte == b')')?;
+        let fields: Vec<&[u8]> = stat
+            .get(close + 1..)?
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect();
+        fn number<T: std::str::FromStr>(fields: &[&[u8]], index: usize) -> Option<T> {
+            let field = std::str::from_utf8(fields.get(index)?).ok()?;
+            field.parse().ok()
+        }
         Some((
-            fields.get(1)?.parse().ok()?,
-            fields.get(2)?.parse().ok()?,
-            fields.get(19)?.parse().ok()?,
+            number(&fields, 1)?,
+            number(&fields, 2)?,
+            number(&fields, 19)?,
         ))
     }
 }
@@ -1016,11 +1045,74 @@ mod tests {
         assert!(!runs(pid), "the reaped pid is not running");
     }
 
+    /// On Linux a thread-group leader can be a zombie while its worker
+    /// threads still run. The leader's top-level `/proc` state alone must not
+    /// make teardown treat the process as dead.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_zombie_thread_leader_with_live_workers_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("threadleader.c");
+        let binary = dir.path().join("threadleader");
+        std::fs::write(
+            &source,
+            r#"
+#include <pthread.h>
+#include <unistd.h>
+static void *worker(void *unused) {
+    (void)unused;
+    for (;;) pause();
+}
+int main(void) {
+    pthread_t thread;
+    pthread_create(&thread, 0, worker, 0);
+    pthread_exit(0);
+}
+"#,
+        )
+        .unwrap();
+        let built = std::process::Command::new("cc")
+            .arg("-pthread")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .status()
+            .unwrap();
+        assert!(built.success(), "the threaded fixture did not compile");
+
+        let mut child = tokio::process::Command::new(&binary)
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap() as i32;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut leader_state = None;
+        while std::time::Instant::now() < deadline {
+            leader_state = std::fs::read(format!("/proc/{pid}/stat"))
+                .ok()
+                .and_then(|stat| proc_table::stat_state(&stat).map(<[u8]>::to_vec));
+            if leader_state.as_deref() == Some(b"Z") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(leader_state.as_deref(), Some(&b"Z"[..]));
+        assert!(runs(pid), "a live worker thread does not run");
+
+        child.kill().await.unwrap();
+        assert!(!runs(pid), "the killed threaded fixture still runs");
+    }
+
     #[test]
     fn proc_stat_fields_survive_hostile_command_names() {
         // Field 22 (starttime) and 4 (ppid), with a comm holding ") (".
         let stat = "4242 (evil) (name) S 17 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
         assert_eq!(proc_table::parse_stat(stat), Some((17, 4242, 987654)));
+        let invalid_utf8 = b"4242 (bad\xffname) S 17 4242 4242 0 -1 4194560 100 0 0 0 1 2 0 0 20 0 1 0 987654 1000 10";
+        assert_eq!(
+            proc_table::parse_stat(invalid_utf8),
+            Some((17, 4242, 987654))
+        );
         assert_eq!(proc_table::parse_stat("4242 (truncated) S 17"), None);
     }
 

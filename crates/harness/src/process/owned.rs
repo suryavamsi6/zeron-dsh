@@ -65,9 +65,16 @@ impl Child {
             let deadline = tokio::time::Instant::now() + grace;
             loop {
                 let _ = self.inner.try_wait();
-                // SAFETY: signal 0 only checks the private process group.
-                if unsafe { libc::kill(group, 0) } != 0 {
-                    break;
+                // Signal 0 counts an unreaped zombie as a group member even
+                // though it cannot execute; wait only while a member runs.
+                // A member can fork while one process-table scan is being
+                // assembled, so confirm an apparently empty group with a
+                // second scan before calling shutdown finished.
+                if !crate::process::group_runs(-group) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    if !crate::process::group_runs(-group) {
+                        break;
+                    }
                 }
                 if tokio::time::Instant::now() >= deadline {
                     crate::send_signal(&group, crate::Signal::Kill);
@@ -117,6 +124,58 @@ impl Drop for Child {
 mod tests {
     use super::*;
     use crate::process::Command;
+
+    /// An unreaped zombie still answers signal 0 for its group, but it cannot
+    /// execute: shutdown must stop waiting once every live member has ended.
+    #[tokio::test]
+    async fn shutdown_does_not_wait_out_grace_for_a_zombie_group_member() {
+        use std::os::unix::process::CommandExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        let script = format!("echo ready > {}; sleep 30", ready.display());
+        let mut command = Command::new("sh");
+        command.args(["-c", &script]);
+        command.process_group(0);
+        let mut child = Child::new(command.spawn().unwrap());
+        let group = child.id().unwrap() as i32;
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(ready.exists(), "the group leader did not start");
+
+        // A child of this test joins the owned child's group, then dies without
+        // being reaped. It keeps the group visible to kill(0) on every host,
+        // including one whose PID 1 reaps orphans promptly.
+        let mut zombie = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(group)
+            .spawn()
+            .unwrap();
+        let zombie_pid = zombie.id() as i32;
+        // SAFETY: SIGKILL to this test's own child.
+        unsafe { libc::kill(zombie_pid, libc::SIGKILL) };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while crate::process::runs(zombie_pid) && std::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            !crate::process::runs(zombie_pid),
+            "the fixture is not a zombie"
+        );
+
+        let started = std::time::Instant::now();
+        child.shutdown(std::time::Duration::from_secs(2)).await;
+        let elapsed = started.elapsed();
+        zombie.wait().unwrap();
+        assert!(
+            elapsed < std::time::Duration::from_secs(1),
+            "shutdown waited out its grace on a zombie group member: {elapsed:?}"
+        );
+    }
 
     /// A child that has exited and been reaped can no longer be traced:
     /// what was snapshotted while it ran is still ended.
