@@ -18,9 +18,12 @@ def all_off():
     return {name: False for name in PLAN_KEYS}
 
 
-def needs(selected, results):
+def needs(selected, results, skip=None):
     return {
-        "plan": {"result": "success", "outputs": {"suites": json.dumps(selected)}},
+        "plan": {
+            "result": "success",
+            "outputs": {"suites": json.dumps(selected), "skip": json.dumps(skip or {})},
+        },
         "admit": {"result": "success", "outputs": {}},
         **{name: {"result": results.get(name, "skipped"), "outputs": {}} for name in JOB_NAMES},
     }
@@ -44,6 +47,11 @@ class ResultTests(unittest.TestCase):
     def test_an_abandoned_selected_suite_still_fails(self):
         errors = result.evaluate(needs(all_off() | {"zgx": True}, {"zgx": "abandoned"}))
         self.assertIn("selected suite zgx=abandoned", errors)
+
+    def test_fully_reused_suites_do_not_count_as_zero_selected(self):
+        skip = {"zgx": ["zgx-macos", "zgx-linux-1", "zgx-linux-2", "zgx-linux-ui"]}
+        errors = result.evaluate(needs(all_off(), {}, skip))
+        self.assertEqual(errors, [])
 
     def test_an_empty_suites_map_never_passes(self):
         errors = result.evaluate(needs({}, {}))

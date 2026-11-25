@@ -41,11 +41,23 @@ def evaluate(needs):
         errors.append("plan emitted an empty or malformed suites map")
         selected = {}
 
+    outputs = needs.get("plan", {}).get("outputs", {})
+    try:
+        skipped_jobs = json.loads(outputs.get("skip", "{}"))
+    except (TypeError, json.JSONDecodeError):
+        skipped_jobs = {}
+        errors.append("plan emitted a malformed skip map")
+    if not isinstance(skipped_jobs, dict):
+        skipped_jobs = {}
+        errors.append("plan emitted a malformed skip map")
+
     missing = sorted(key for key in suites.values() if key not in selected)
     if missing:
         errors.append("plan suites map is missing: " + ", ".join(missing))
 
-    chosen = sorted(key for key in suites.values() if selected.get(key) is True)
+    chosen = sorted(
+        key for key in suites.values() if selected.get(key) is True or skipped_jobs.get(key)
+    )
     if not chosen:
         errors.append("plan selected zero suites")
 
