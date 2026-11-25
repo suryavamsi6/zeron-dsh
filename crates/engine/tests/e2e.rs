@@ -1588,6 +1588,9 @@ async fn rpc_surface_over_in_memory_transport() {
 /// marks its question a decision only the person's own client may answer.
 pub struct EchoAnswerHarness {
     pub requires_person: bool,
+    /// When set, records the response the engine hands back — the actor on a
+    /// dismissal is part of what the harness must be able to report.
+    pub seen: Option<Arc<std::sync::Mutex<Option<zeron_harness::InputResponse>>>>,
 }
 #[async_trait]
 impl Harness for EchoAnswerHarness {
@@ -1616,8 +1619,9 @@ impl Harness for EchoAnswerHarness {
     ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
         let requires_person = self.requires_person;
+        let seen = self.seen.clone();
         tokio::spawn(async move {
-            let answers = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+            let response = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
                 note: None,
                 detail: None,
                 id: "q1".into(),
@@ -1631,7 +1635,11 @@ impl Harness for EchoAnswerHarness {
             }])
             .await
             .unwrap_or_default();
-            let picked = answers
+            if let Some(seen) = &seen {
+                *seen.lock().unwrap() = Some(response.clone());
+            }
+            let picked = response
+                .answers
                 .first()
                 .and_then(|a| a.labels.first().cloned())
                 .unwrap_or_else(|| "none".into());
@@ -1667,10 +1675,12 @@ fn recorded_answers(core: &EngineCore) -> Option<Vec<zeron_proto::UserInputAnswe
 #[tokio::test]
 async fn closing_a_question_unanswered_declines_and_records_it() {
     let dir = tempfile::tempdir().unwrap();
+    let seen: Arc<std::sync::Mutex<Option<zeron_harness::InputResponse>>> = Arc::default();
     let core = assemble(
         dir.path(),
         Arc::new(EchoAnswerHarness {
             requires_person: false,
+            seen: Some(seen.clone()),
         }),
     );
     let handle = core.doc_host.open(CHAT).unwrap();
@@ -1735,6 +1745,24 @@ async fn closing_a_question_unanswered_declines_and_records_it() {
         Some((SessionCommandStatus::Applied, None))
     );
     assert_eq!(recorded_answers(&core), Some(vec![]));
+
+    // The harness is told who closed it: a dismissal is not anonymous, and the
+    // engine hands the harness the same actor it journaled.
+    let response = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the harness received the closed question");
+    assert!(
+        response.answers.is_empty(),
+        "a closed panel sends no answers: {response:?}"
+    );
+    assert_eq!(
+        response.by,
+        Some(zeron_proto::InputActor::Client),
+        "the dismissal names the person's own client"
+    );
+
     wait_for(
         || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
         "session to settle idle",
@@ -1824,6 +1852,7 @@ async fn respond_input_resolves_pending_question() {
         dir.path(),
         Arc::new(EchoAnswerHarness {
             requires_person: false,
+            seen: None,
         }),
     );
     let handle = core.doc_host.open(CHAT).unwrap();
@@ -2480,6 +2509,7 @@ async fn respond_input_from_another_chat_records_who_answered() {
         dir.path(),
         Arc::new(EchoAnswerHarness {
             requires_person: false,
+            seen: None,
         }),
     );
     // The MCP resolve_chat reads the workspace rows: the chat needs one, and
@@ -2650,6 +2680,7 @@ async fn requires_person_card_refuses_an_agent_and_accepts_the_client() {
         dir.path(),
         Arc::new(EchoAnswerHarness {
             requires_person: true,
+            seen: None,
         }),
     );
     let here = core.device_id.clone();

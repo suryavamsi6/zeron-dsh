@@ -686,3 +686,121 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
         "a title run carried the chat's role: {title}"
     );
 }
+
+/// The role comes from the Captains blob `configuration` already validated —
+/// never from a second parse of the raw env. A Captain turn is the only one
+/// whose questions are the person's alone.
+#[test]
+fn captain_turn_reads_the_validated_role_only() {
+    let captain = json!({
+        "role": "captain", "chatId": "c", "captainId": "c",
+        "captainName": "Ada", "driveRoot": "/d"
+    });
+    let crew = json!({
+        "role": "crew", "chatId": "c", "captainId": "c",
+        "captainName": "Ada", "driveRoot": "/d"
+    });
+    assert!(captain_turn(Some(&captain)), "a captain turn is a Captain turn");
+    assert!(!captain_turn(Some(&crew)), "a crew turn is not");
+    assert!(!captain_turn(None), "an unstamped run is not");
+    assert!(
+        !captain_turn(Some(&json!({"role": 7}))),
+        "a malformed role is not a Captain"
+    );
+    assert!(
+        !captain_turn(Some(&json!({"role": "boss"}))),
+        "an unknown role is not a Captain"
+    );
+}
+
+/// A `user-question/ask` frame on a Captain turn is person-only even when the
+/// wire says nothing: the role supplies the rule, not the question.
+#[test]
+fn a_captain_ask_frame_marks_every_question_person_only() {
+    let frame = json!({
+        "questions": [
+            {"id": "q1", "header": "Pick", "question": "Which one?",
+             "options": [{"label": "a"}, {"label": "b"}]},
+            {"id": "q2", "header": "Confirm", "question": "Go ahead?",
+             "options": [{"label": "yes"}, {"label": "no"}]}
+        ]
+    });
+    let captain = json!({
+        "role": "captain", "chatId": "c", "captainId": "c",
+        "captainName": "Ada", "driveRoot": "/d"
+    });
+    let crew = json!({
+        "role": "crew", "chatId": "c", "captainId": "c",
+        "captainName": "Ada", "driveRoot": "/d"
+    });
+
+    let asked = ask_questions(&frame, Some(&captain)).expect("a Captain's ask frame");
+    assert_eq!(asked.len(), 2);
+    assert!(
+        asked.iter().all(|q| q.requires_person),
+        "every question on a Captain turn is the person's: {asked:?}"
+    );
+
+    let crew_asked = ask_questions(&frame, Some(&crew)).expect("a crew ask frame");
+    assert!(
+        crew_asked.iter().all(|q| !q.requires_person),
+        "a crew turn asks no person-only question: {crew_asked:?}"
+    );
+
+    let unstamped = ask_questions(&frame, None).expect("an unstamped ask frame");
+    assert!(
+        unstamped.iter().all(|q| !q.requires_person),
+        "an ordinary chat asks no person-only question: {unstamped:?}"
+    );
+
+    // The wire's own flag still counts where the role does not speak.
+    let explicit = json!({
+        "questions": [{"id": "q1", "header": "Pick", "question": "Which?",
+                       "options": [], "requiresPerson": true}]
+    });
+    assert!(
+        ask_questions(&explicit, None).expect("a flagged ask frame")[0].requires_person,
+        "an explicit requiresPerson survives an ordinary turn"
+    );
+}
+
+/// Closing a question unanswered still tells the runtime who closed it — a
+/// dismissal is not anonymous, and an answer names its actor the same way.
+#[test]
+fn a_dismissed_question_reports_its_actor() {
+    let questions = vec![crate::approval::question("Pick", "Which one?")];
+    let dismissed = question_result(
+        &questions,
+        crate::InputResponse {
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    assert_eq!(
+        dismissed["cancelled"],
+        json!(true),
+        "no answers is a dismissal"
+    );
+    assert_eq!(
+        dismissed["by"],
+        json!({"kind": "client"}),
+        "the dismissal names its actor: {dismissed}"
+    );
+
+    let answered = question_result(
+        &questions,
+        crate::InputResponse {
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: questions[0].id.clone(),
+                labels: vec!["yes".into()],
+            }],
+            by: Some(zeron_proto::InputActor::Agent { chat_id: None }),
+        },
+    );
+    assert_eq!(answered["answers"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        answered["by"],
+        json!({"kind": "agent", "chatId": null}),
+        "an answer names its actor: {answered}"
+    );
+}
