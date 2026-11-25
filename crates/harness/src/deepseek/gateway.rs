@@ -368,9 +368,11 @@ fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
     let Ok(body) = std::fs::read_to_string(path) else {
         return values;
     };
-    let mut lines = body.lines();
-    while let Some(line) = lines.next() {
-        let line = line.trim();
+    let lines: Vec<&str> = body.lines().collect();
+    let mut index = 0;
+    while index < lines.len() {
+        let line = lines[index].trim();
+        index += 1;
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -386,11 +388,20 @@ fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
         if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`'))
             && !value[1..].contains(quote)
         {
-            while let Some(next) = lines.next() {
-                value.push('\n');
-                value.push_str(next);
-                if next.contains(quote) {
+            let mut end = index;
+            let mut closed = false;
+            while end < lines.len() {
+                if lines[end].contains(quote) {
+                    closed = true;
                     break;
+                }
+                end += 1;
+            }
+            if closed {
+                while index <= end {
+                    value.push('\n');
+                    value.push_str(lines[index]);
+                    index += 1;
                 }
             }
         }
@@ -538,6 +549,24 @@ mod tests {
             Some("last"),
             "a repeated assignment resolves to Node parseEnv's last value"
         );
+        std::fs::write(
+            project.join(".env"),
+            "UNCLOSED=\"missing\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+        )
+        .unwrap();
+        let unclosed = dotenv_snapshot_at(&home, &project);
+        assert_eq!(
+            unclosed.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
+            Some("last"),
+            "a quote that never closes does not swallow later assignments"
+        );
+
+        std::fs::write(
+            project.join(".env"),
+            "MULTILINE=\"one\nMARKER_ACCOUNT_API_KEY=embedded\nend\"\nMARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
+        )
+        .unwrap();
+        let snapshot = dotenv_snapshot_at(&home, &project);
         assert_eq!(
             snapshot.get("MULTILINE").map(String::as_str),
             Some("one\nMARKER_ACCOUNT_API_KEY=embedded\nend"),
