@@ -645,6 +645,11 @@ fn write_starter(path: &Path, contents: &str) -> Result<(), String> {
 /// The next refresh reads it back to decide which reports are new.
 const REFRESHED: &str = "<!-- refreshed ";
 
+/// The engine-owned record of the last synthesis (`<drive>/state/` is a
+/// folder the Drive tools refuse the model): the New cutoff a rewrite of
+/// DIGEST.md cannot take away.
+const CUTOFF_FILE: &str = "digest-refresh";
+
 /// One crew chat as the digest synthesis sees it: the roster id, the
 /// workspace row's title, and whether the row is live — present and not
 /// archived. A crew that is not live, or no longer on the roster at all,
@@ -740,7 +745,10 @@ fn needs_you_section(digest: &str) -> String {
             if inside {
                 break;
             }
-            inside = line.trim_end() == "## Needs you";
+            // The same heading the snapshot parser recognizes: the model's
+            // capitalization is its own, and a refresh must not drop asks
+            // `parse_needs_you` would have read.
+            inside = line.trim().eq_ignore_ascii_case("## needs you");
         }
         if inside {
             kept.push(line);
@@ -783,7 +791,18 @@ pub fn refresh_digest(
 ) -> Result<(), String> {
     let path = drive.join("DIGEST.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let since = previous_refresh(&existing);
+    // The cutoff is the engine-owned sidecar first: the model rewrites
+    // DIGEST.md whole, and a write that drops the freshness comment must
+    // not resurrect every report as new. The comment is the fallback for
+    // a drive whose state directory is gone.
+    let since = std::fs::read_to_string(drive.join("state").join(CUTOFF_FILE))
+        .ok()
+        .and_then(|text| {
+            DateTime::parse_from_rfc3339(text.trim())
+                .ok()
+                .map(|parsed| parsed.with_timezone(&Utc))
+        })
+        .or_else(|| previous_refresh(&existing));
     let mut new_items: Vec<String> = Vec::new();
     let mut in_progress: Vec<String> = Vec::new();
     let mut stalls: Vec<String> = Vec::new();
@@ -826,6 +845,14 @@ pub fn refresh_digest(
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     temp.persist(&path)
         .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
+    // The sidecar follows the digest, never leads it: a crash between the
+    // two re-lists a report as new — noise — rather than losing it from
+    // New before it was ever listed. Best effort: a failed sidecar write
+    // falls back to the digest's own marker, which this write just set.
+    let state = drive.join("state");
+    if std::fs::create_dir_all(&state).is_ok() {
+        let _ = std::fs::write(state.join(CUTOFF_FILE), format!("{stamp}\n"));
+    }
     Ok(())
 }
 
@@ -6955,6 +6982,55 @@ mod tests {
             section_lines(&digest, "## In progress").len(),
             1,
             "the crew itself stays listed: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_a_capitalized_needs_you_heading_survives() {
+        // `parse_needs_you` reads the heading case-insensitively, so the
+        // refresh must preserve what the snapshot would recognize.
+        let (_dir, drive) = digest_drive("## Needs You\n- approve the deploy\n");
+        let at = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        refresh_digest(&drive, &[], at).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(
+            section_lines(&digest, "## Needs You"),
+            vec!["- approve the deploy"],
+            "the asks survive under the model's own capitalization: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_a_rewrite_dropping_the_marker_does_not_resurrect_reports() {
+        // The model writes DIGEST.md whole; a write that drops the freshness
+        // comment must not make every report new again — the cutoff is the
+        // engine-owned sidecar's, not the file the model can overwrite.
+        let (_dir, drive) = digest_drive("## Needs you\n");
+        seed_report(&drive, "crew-b", "completed", "2026-11-25T10:00:00Z", "done");
+        let first = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let crew = [digest_crew("crew-b", "Billing", true)];
+        refresh_digest(&drive, &crew, first).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(section_lines(&digest, "## New").len(), 1, "{digest}");
+
+        std::fs::write(drive.join("DIGEST.md"), "## Needs you\n- half-written\n").unwrap();
+        let later = DateTime::parse_from_rfc3339("2026-11-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        refresh_digest(&drive, &crew, later).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert!(
+            section_lines(&digest, "## New").is_empty(),
+            "the sidecar's cutoff survives the rewrite: {digest}"
+        );
+        assert_eq!(
+            section_lines(&digest, "## Needs you"),
+            vec!["- half-written"],
+            "and the model's edit is the section the refresh keeps: {digest}"
         );
     }
 
