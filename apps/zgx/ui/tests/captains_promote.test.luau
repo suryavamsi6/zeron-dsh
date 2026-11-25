@@ -68,6 +68,23 @@ test("captains_promote: the chat's menu promotes it, Demote replaces Promote, an
 	expect(sent(app)).to_be("promote:a1:Billing,demote:a1")
 end)
 
+test("captains_promote: a roster read in flight during promotion cannot stale the next menu", function()
+	local app = shell()
+	app:set_state("test_captains_hold_roster", true)
+	menu(app)
+	promote(app, "Billing")
+	pause(app)
+	expect(sent(app)).to_be("promote:a1:Billing")
+	-- Let the read that opened the first menu answer now, with the roster as
+	-- it was before the promotion. The refresh the promotion queued must be
+	-- the one this next menu reads: there is no roster change in between.
+	app:set_state("test_captains_release_roster", true)
+	pause(app)
+	menu(app)
+	expect(app:has('role:menuitem "Demote to chat"')).to_be(true)
+	expect(app:has('role:menuitem "Promote to Captain…"')).to_be(false)
+end)
+
 test("captains_promote: a refused promotion says why, leaves the menu on Promote, and can be tried again", function()
 	local app = shell()
 	app:set_state("test_captains_refuse", true)
