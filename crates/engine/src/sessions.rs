@@ -29,7 +29,9 @@ use zeron_doc::{
     SessionCommandPayload, SessionDoc, SessionMessageEntry, fold_event_into_parts,
     sanitize_tool_call,
 };
-use zeron_harness::{CancellationToken, Harness, RunControls, SteerMessage, TurnControl};
+use zeron_harness::{
+    CancellationToken, Harness, InputResponse, RunControls, SteerMessage, TurnControl,
+};
 use zeron_proto::{
     AgentEvent, DoneStatus, HarnessId, InputActor, RunRequest, SandboxLevel, Session, SessionStatus,
     UserInputAnswer, UserInputQuestion,
@@ -76,7 +78,7 @@ pub enum RespondInputOutcome {
 /// A parked input request: the questions asked (a `requires_person` one only
 /// the person's own client may answer) beside the run's resolver.
 type PendingInputs = Arc<
-    Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<Vec<UserInputAnswer>>)>>,
+    Mutex<HashMap<String, (Vec<UserInputQuestion>, oneshot::Sender<InputResponse>)>>,
 >;
 
 pub(crate) fn ensure_run_harness(harness: HarnessId) -> Result<(), EngineError> {
@@ -1650,10 +1652,26 @@ impl SessionsEngine {
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
+        let captain_requires_person = self
+            .inner
+            .data_dir
+            .get()
+            .and_then(|data_dir| crate::captains::Registry::load(data_dir).ok())
+            .is_some_and(|registry| {
+                matches!(
+                    registry.run_role(chat_id),
+                    crate::captains::RunRole::Captain { .. }
+                )
+            });
         let request_input = {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
-            Box::new(move |questions: Vec<UserInputQuestion>| {
+            Box::new(move |mut questions: Vec<UserInputQuestion>| {
+                if captain_requires_person {
+                    for question in &mut questions {
+                        question.requires_person = true;
+                    }
+                }
                 let (mut tx, rx) = oneshot::channel();
                 let (answer_tx, answer_rx) = oneshot::channel();
                 let request_id = new_id();
@@ -1666,8 +1684,8 @@ impl SessionsEngine {
                 let engine_tx = engine_tx.clone();
                 tokio::spawn(async move {
                     tokio::select! {
-                        // A dropped resolver stays an error for the harness, as before.
-                        answer = answer_rx => if let Ok(answer) = answer { let _ = tx.send(answer); },
+                        // A dropped resolver declines the questions for the harness.
+                        answer = answer_rx => { let _ = tx.send(answer.unwrap_or_default()); },
                         _ = tx.closed() => {
                             lock(&pending).remove(&request_id);
                             // The run stopped waiting: closed unanswered.
@@ -2258,7 +2276,7 @@ impl SessionsEngine {
         // Unpark questions first: the stopped turn can never be answered.
         let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send(InputResponse::default());
         }
         turn.stop_turn();
         let deadline = tokio::time::Instant::now() + STOP_SETTLE;
@@ -2303,7 +2321,7 @@ impl SessionsEngine {
         // Unpark questions before harness teardown, which can await them.
         let parked: Vec<_> = lock(&pending).drain().map(|(_, (_, tx))| tx).collect();
         for tx in parked {
-            let _ = tx.send(Vec::new());
+            let _ = tx.send(InputResponse::default());
         }
         // Harness-level interrupt (protocol + child teardown) …
         token.cancel();
@@ -2351,6 +2369,7 @@ impl SessionsEngine {
         answers: Vec<UserInputAnswer>,
         by: Option<InputActor>,
     ) -> Result<RespondInputOutcome, EngineError> {
+        let by = by.unwrap_or(InputActor::Client);
         let target = lock(&self.inner.runs)
             .get(chat_id)
             .map(|h| (h.pending_inputs.clone(), h.engine_tx.clone()));
@@ -2363,7 +2382,7 @@ impl SessionsEngine {
                 && questions.iter().any(|q| q.requires_person)
                 && matches!(
                     by,
-                    Some(InputActor::Agent { .. }) | Some(InputActor::Plugin { .. })
+                    InputActor::Agent { .. } | InputActor::Plugin { .. }
                 )
         });
         if refused {
@@ -2373,11 +2392,14 @@ impl SessionsEngine {
             return Ok(RespondInputOutcome::NoPending);
         };
         drop(parked);
-        let _ = resolver.send(answers.clone());
+        let _ = resolver.send(InputResponse {
+            answers: answers.clone(),
+            by: Some(by.clone()),
+        });
         let _ = engine_tx.send(AgentEvent::InputResolved {
             request_id: request_id.to_string(),
             answers: Some(answers),
-            by: Some(by.unwrap_or(InputActor::Client)),
+            by: Some(by),
         });
         Ok(RespondInputOutcome::Applied)
     }
@@ -6517,7 +6539,7 @@ async fn drive_run(
                             .get(&chat_id)
                             .and_then(|h| lock(&h.pending_inputs).remove(request_id));
                         if let Some((_, tx)) = resolver {
-                            let _ = tx.send(Vec::new());
+                            let _ = tx.send(InputResponse::default());
                         }
                         tracing::debug!(chat = %chat_id, "parked session: post-turn input request auto-declined");
                         continue;
@@ -6829,7 +6851,7 @@ async fn drive_run(
                 .map(|h| h.pending_inputs.clone());
             if let Some(pending) = pending {
                 for (_, (_, tx)) in lock(&pending).drain() {
-                    let _ = tx.send(Vec::new());
+                    let _ = tx.send(InputResponse::default());
                 }
             }
             let message_status = match status {

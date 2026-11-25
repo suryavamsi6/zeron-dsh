@@ -6,7 +6,7 @@ use tokio::sync::{mpsc, oneshot};
 pub use tokio_util::sync::CancellationToken;
 
 use zeron_proto::{
-    AccessMode, AgentEvent, HarnessId, Model, ReasoningLevel, RunRequest, SlashCommand,
+    AccessMode, AgentEvent, HarnessId, InputActor, Model, ReasoningLevel, RunRequest, SlashCommand,
     SteeringMode, UserInputAnswer, UserInputQuestion,
 };
 
@@ -243,6 +243,26 @@ pub fn same_model_options(
         .all(|key| a.get(key).and_then(canonical) == b.get(key).and_then(canonical))
 }
 
+/// A run's input resolution: who resolved it rides beside the answers rather
+/// than inside the answer list.
+///
+/// Dereferencing to the answers keeps existing drivers source-compatible —
+/// `answers.first()`, `answers.iter()`, and
+/// `approval::approved(&question, &answers)` all keep their old shape.
+#[derive(Debug, Clone, Default)]
+pub struct InputResponse {
+    pub answers: Vec<UserInputAnswer>,
+    pub by: Option<InputActor>,
+}
+
+impl std::ops::Deref for InputResponse {
+    type Target = Vec<UserInputAnswer>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.answers
+    }
+}
+
 /// Host-side controls handed to a run: input-request bridge + steering mailbox.
 pub struct RunControls {
     /// Shared execution gate held until the harness has shut down and reaped
@@ -255,7 +275,7 @@ pub struct RunControls {
     /// the person closed the questions, or the run stopped waiting. Drivers
     /// answer it with their protocol's own decline where it has one.
     pub request_input: Box<
-        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<Vec<UserInputAnswer>> + Send + Sync,
+        dyn Fn(Vec<UserInputQuestion>) -> oneshot::Receiver<InputResponse> + Send + Sync,
     >,
     /// Steer prompts consumed at step/turn boundaries.
     pub steering: mpsc::Receiver<SteerMessage>,
