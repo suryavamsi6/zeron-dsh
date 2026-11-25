@@ -1652,22 +1652,27 @@ impl SessionsEngine {
 
         // Input bridge: the harness asks questions; we mint the request id, park the
         // resolver for `respond_input`, and surface the event through the run pipeline.
-        let captain_requires_person = self
-            .inner
-            .data_dir
-            .get()
-            .and_then(|data_dir| crate::captains::Registry::load(data_dir).ok())
-            .is_some_and(|registry| {
-                matches!(
-                    registry.run_role(chat_id),
-                    crate::captains::RunRole::Captain { .. }
-                )
-            });
+        let roster_data_dir = self.inner.data_dir.get().cloned();
+        let chat = chat_id.to_string();
         let request_input = {
             let pending = pending_inputs.clone();
             let engine_tx = engine_tx.clone();
             Box::new(move |mut questions: Vec<UserInputQuestion>| {
-                if captain_requires_person {
+                // SUR-239 review: the role can change between the run starting and the
+                // harness asking, so read it at ask time.
+                let captain = roster_data_dir.as_deref().is_some_and(|data_dir| {
+                    match crate::captains::Registry::load(data_dir) {
+                        Ok(registry) => matches!(
+                            registry.run_role(&chat),
+                            crate::captains::RunRole::Captain { .. }
+                        ),
+                        Err(error) => {
+                            tracing::warn!(chat = %chat, error = %error, "captains registry load failed");
+                            false
+                        }
+                    }
+                });
+                if captain {
                     for question in &mut questions {
                         question.requires_person = true;
                     }

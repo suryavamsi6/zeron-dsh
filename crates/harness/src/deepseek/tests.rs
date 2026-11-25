@@ -645,6 +645,19 @@ fn question_result_reports_who_answered_and_who_dismissed() {
         "the asking model is told an agent answered"
     );
 
+    // The person's own client resolves any card: the result says so too.
+    let by_client = question_result(
+        vec![question("q1")],
+        InputResponse {
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+            by: Some(InputActor::Client),
+        },
+    );
+    assert_eq!(by_client["by"], json!({"kind": "client"}));
+
     // SUR-242 made an agent's dismissal legitimate: it keeps its actor too.
     let dismissed = question_result(
         vec![question("q1")],

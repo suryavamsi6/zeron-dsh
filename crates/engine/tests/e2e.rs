@@ -3165,6 +3165,68 @@ async fn a_question_asked_after_a_mid_run_demotion_is_not_person_only() {
     core.shutdown().await;
 }
 
+/// The role gate the engine applies to a question asked in `CHAT`, for a
+/// roster file given verbatim. The question itself always arrives with
+/// `requires_person: false` — only the roster can make it person-only.
+async fn question_flag_for_roster(roster: &str) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("captains.json"), roster).expect("captains.json");
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-roster",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    let flag = questions[0].requires_person;
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-roster",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+    flag
+}
+
+/// A demoted (archived) Captain is not live: its questions stay ordinary.
+#[tokio::test]
+async fn an_archived_captains_questions_are_not_person_only() {
+    let roster = r#"{"captains":[{"chatId":"chat-e2e","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+    assert!(
+        !question_flag_for_roster(roster).await,
+        "an archived Captain must not stamp its questions"
+    );
+}
+
+/// The role belongs to the Captain's own chat: a crew chat's questions are
+/// ordinary, even though its Captain is live.
+#[tokio::test]
+async fn a_crew_chats_questions_are_not_person_only() {
+    let roster = r#"{"captains":[{"chatId":"chat-cap","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["chat-e2e"]}]}"#;
+    assert!(
+        !question_flag_for_roster(roster).await,
+        "a crew chat must not stamp its questions"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Attachments (round 17): chunked upload → durable path → Run carrying both
 // the prompt-embedded refs (the persisted transport) and the staged paths.
