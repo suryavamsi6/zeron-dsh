@@ -2951,6 +2951,220 @@ async fn captain_chat_questions_require_the_person_without_an_sdk_marker() {
     core.shutdown().await;
 }
 
+/// Writes the small engine roster file: the e2e chat is a live Captain, or the
+/// roster is empty. Used to flip the role while a run is already in flight.
+fn write_captains_roster(dir: &std::path::Path, captain: bool) {
+    let body = if captain {
+        r#"{"captains":[{"chatId":"chat-e2e","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#
+    } else {
+        r#"{"captains":[]}"#
+    };
+    std::fs::write(dir.join("captains.json"), body).expect("captains.json");
+}
+
+/// Asks its one question only when the test releases it, so a run can start
+/// under one roster and the ask land after the roster changes.
+struct GatedAskHarness {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Harness for GatedAskHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Gated asking"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        let started = self.started.clone();
+        let release = self.release.clone();
+        tokio::spawn(async move {
+            let _ = started.send(());
+            release.notified().await;
+            let response = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                note: None,
+                detail: None,
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                prefill: None,
+                multiline: false,
+                multi_select: false,
+                requires_person: false,
+            }])
+            .await
+            .unwrap_or_default();
+            let picked = response
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+/// The live question in the doc, with its request id.
+async fn wait_for_input_questions(
+    core: &EngineCore,
+) -> (String, Vec<zeron_proto::UserInputQuestion>) {
+    wait_for(
+        || {
+            entries_now(core).iter().any(|e| {
+                e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Input { resolved: false, .. }))
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+    entries(core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } => Some((request_id.clone(), questions.clone())),
+                _ => None,
+            })
+        })
+        .expect("the live question")
+}
+
+/// SUR-239 review: the role must be read when the harness asks, not when the
+/// run starts. A chat promoted while its run is in flight must still make the
+/// run's next question the person's alone.
+#[tokio::test]
+async fn a_question_asked_after_a_mid_run_promotion_is_person_only() {
+    let dir = tempfile::tempdir().unwrap();
+    write_captains_roster(dir.path(), false);
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let core = assemble(
+        dir.path(),
+        Arc::new(GatedAskHarness {
+            started: started_tx,
+            release: release.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-promoted-mid-run",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    started_rx.recv().await.expect("the run started");
+    // Promoted while the run is in flight, before the harness asks.
+    write_captains_roster(dir.path(), true);
+    release.notify_one();
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    assert!(
+        questions[0].requires_person,
+        "a Captain promoted mid-run is the person's alone"
+    );
+    // Close it unanswered: the turn still settles with the harness's decline.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-promoted",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// And the other direction: a Captain demoted mid-run must not stamp the
+/// questions its run asks afterwards.
+#[tokio::test]
+async fn a_question_asked_after_a_mid_run_demotion_is_not_person_only() {
+    let dir = tempfile::tempdir().unwrap();
+    write_captains_roster(dir.path(), true);
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let core = assemble(
+        dir.path(),
+        Arc::new(GatedAskHarness {
+            started: started_tx,
+            release: release.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-demoted-mid-run",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    started_rx.recv().await.expect("the run started");
+    // Demoted while the run is in flight, before the harness asks.
+    write_captains_roster(dir.path(), false);
+    release.notify_one();
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    assert!(
+        !questions[0].requires_person,
+        "a Captain demoted mid-run is not stamped"
+    );
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-demoted",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+}
+
 // ---------------------------------------------------------------------------
 // Attachments (round 17): chunked upload → durable path → Run carrying both
 // the prompt-embedded refs (the persisted transport) and the staged paths.
