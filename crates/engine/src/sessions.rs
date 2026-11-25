@@ -3256,11 +3256,25 @@ impl Inner {
                     // before the wake, so the Captain it starts reads a
                     // digest that already carries this report.
                     if let Some(captain_id) = captain_id.as_deref() {
-                        let facts = inner.digest_crew_facts(captain_id);
-                        if let Err(error) =
-                            crate::captains::refresh_digest(&drive, &facts, Utc::now())
-                        {
-                            tracing::warn!(chat = %chat_id, error = %error, "digest refresh failed");
+                        // A Captain mid-turn writes its Drive: a refresh now
+                        // would read-modify-write DIGEST.md across the
+                        // model's own write, and whichever rename lands last
+                        // wins whole-file — the asks saved in between are
+                        // gone. The Captain's own turn end resynthesizes
+                        // over those writes, so a busy Captain's refresh is
+                        // not just racy but redundant; an idle one writes
+                        // nothing, and this refresh lands before the wake
+                        // starts its next turn.
+                        let busy = lock(&inner.statuses)
+                            .get(captain_id)
+                            .is_some_and(is_active);
+                        if !busy {
+                            let facts = inner.digest_crew_facts(captain_id);
+                            if let Err(error) =
+                                crate::captains::refresh_digest(&drive, &facts, Utc::now())
+                            {
+                                tracing::warn!(chat = %chat_id, error = %error, "digest refresh failed");
+                            }
                         }
                     }
                     // The report is on disk (or definitively failed) before
