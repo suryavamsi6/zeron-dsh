@@ -421,8 +421,8 @@ async fn a_watch_tells_a_burst_of_changes_once_and_reads_are_not_changes() {
     // quiet is 1000ms, not 150ms: 150 held on a quiet box (5/5 green, ~2.23s
     // each) but on a loaded CI runner a mid-loop deschedule after `b3.txt`
     // let the quiet window close before `b4.txt` was written — the failure
-    // set CI hit. 1000ms keeps "one burst, every path" without measuring the
-    // scheduler.
+    // set CI hit. 1000ms tolerates up to a one-second stall between events;
+    // a longer stall can still split the burst and fail this assertion.
     assert_eq!(r.ask(&plan, "watch", json!({ "folder": path, "quiet": 1000 })).await.unwrap(), json!(true));
     // As it goes live: anything may have changed, once.
     until("live", || told(&r).len() == 1).await;
@@ -436,19 +436,19 @@ async fn a_watch_tells_a_burst_of_changes_once_and_reads_are_not_changes() {
     let paths = told(&r)[1]["paths"].clone();
     let paths: Vec<&str> = paths.as_array().unwrap().iter().filter_map(|p| p.as_str()).collect();
     assert!(paths.contains(&"src/a.rs") && paths.contains(&"b4.txt"), "{paths:?}");
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(told(&r).len(), 2, "one burst, told once: {:?}", told(&r));
     // Reads (as `git status` reads the tree) aren't changes.
     for _ in 0..5 {
         let _ = std::fs::read_to_string(folder.path().join("src/a.rs")).unwrap();
         let _ = std::fs::read_dir(folder.path().join("src")).unwrap().count();
     }
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(told(&r).len(), 2, "reads were told as changes: {:?}", told(&r));
     // Stopped: nothing more.
     r.ask(&plan, "unwatch", json!({})).await.unwrap();
     std::fs::write(folder.path().join("src/a.rs"), "after").unwrap();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    tokio::time::sleep(Duration::from_millis(2500)).await;
     assert_eq!(told(&r).len(), 2, "heard after it stopped: {:?}", told(&r));
 }
 
