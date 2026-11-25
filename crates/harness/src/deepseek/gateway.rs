@@ -365,16 +365,37 @@ fn dotenv_snapshot_at(home: &Path, project: &Path) -> BTreeMap<String, String> {
 
 fn dotenv_file(path: &Path) -> BTreeMap<String, String> {
     let mut values = BTreeMap::new();
-    let Ok(entries) = dotenvy::from_path_iter(path) else {
+    let Ok(body) = std::fs::read_to_string(path) else {
         return values;
     };
-    for entry in entries {
-        let Ok((key, value)) = entry else {
-            return BTreeMap::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export").map(str::trim_start).unwrap_or(line);
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
         };
-        values.insert(key, value);
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        values.insert(key.to_string(), dotenv_value(value.trim()));
     }
     values
+}
+
+/// A value in Node `parseEnv`'s line grammar: a quoted value ends at its
+/// closing quote; an unquoted value ends at `#`; both trim outer space.
+fn dotenv_value(value: &str) -> String {
+    if let Some(quote) = value.chars().next().filter(|c| matches!(c, '"' | '\'' | '`')) {
+        if let Some(end) = value[1..].find(quote) {
+            return value[1..1 + end].to_string();
+        }
+        return value.to_string();
+    }
+    value.split('#').next().unwrap_or("").trim().to_string()
 }
 
 /// What a service process inherits: enough to find its stores and its own
@@ -489,7 +510,7 @@ mod tests {
         std::fs::create_dir_all(&project).unwrap();
         std::fs::write(
             project.join(".env"),
-            "MARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\n",
+            "MARKER_ACCOUNT_API_KEY=first\nMARKER_ACCOUNT_API_KEY=last\nSPACED_KEY=some words\n",
         )
         .unwrap();
         std::fs::write(
@@ -503,6 +524,11 @@ mod tests {
             snapshot.get("MARKER_ACCOUNT_API_KEY").map(String::as_str),
             Some("last"),
             "a repeated assignment resolves to Node parseEnv's last value"
+        );
+        assert_eq!(
+            snapshot.get("SPACED_KEY").map(String::as_str),
+            Some("some words"),
+            "an unquoted value keeps its spaces as Node parseEnv reads it"
         );
         assert_eq!(
             snapshot.get("HOME_ONLY_KEY").map(String::as_str),
