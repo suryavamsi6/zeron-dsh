@@ -174,8 +174,8 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # zgx's Linux shards compile and test the same Rust workspace and Luau UI.
     # The macOS leg adds macOS-specific compilation, Ghostty and the engine's
     # plugin tests, so it stays for zgx's own changes and for full-tier runs.
-    ("zgx", "zgx-macos"): ["apps/zgx/**", "scripts/ci/test-zgx.sh", "scripts/ci/zgx-known-failures.txt",
-                            ".github/workflows/zgx-tests.yml"],
+    ("zgx", "zgx-macos"): ["apps/zgx/**", "scripts/ci/nextest.toml", "scripts/ci/test-zgx.sh",
+                            "scripts/ci/zgx-known-failures.txt", ".github/workflows/zgx-tests.yml"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its
 # fingerprint), (suite, flag) -> the files that turn them on. None at present.
