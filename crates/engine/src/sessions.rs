@@ -33,8 +33,8 @@ use zeron_harness::{
     CancellationToken, Harness, InputResponse, RunControls, SteerMessage, TurnControl,
 };
 use zeron_proto::{
-    AgentEvent, DoneStatus, HarnessId, InputActor, RunRequest, SandboxLevel, Session, SessionStatus,
-    UserInputAnswer, UserInputQuestion,
+    AgentEvent, CAPTAINS_ENV, DoneStatus, HarnessId, InputActor, RunRequest, SandboxLevel, Session,
+    SessionStatus, UserInputAnswer, UserInputQuestion,
 };
 
 use crate::doc_host::{ChatDocHandle, DocHost};
@@ -494,13 +494,6 @@ pub use warm_start::WarmOutcome;
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
-
-/// The env key a DeepSeek run's Captain role stamp rides under
-/// ([`crate::captains::captains_env`]). `stamp_captain_role` writes it at
-/// dispatch and `dispatch_captain_stamp` reads it back at turn end — one
-/// literal for both, so the turn-end decision is the role the turn was
-/// dispatched with, never the roster as it then stands.
-const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
 /// The last assistant text of the turn being finalized.
 pub(crate) struct TurnText<'a> {

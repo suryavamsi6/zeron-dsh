@@ -202,6 +202,40 @@ test('a changed CREW.md rebases the series on the next admitted first step', asy
   assert.deepEqual(midTurn.result, enter, 'a non-first step rebased');
 });
 
+test('sessions without ids keep independent crew-rules baselines', async t => {
+  const root = await drive(t);
+  const file = join(root, 'CREW.md');
+  await writeFile(file, 'rules v1');
+  const h = harness(crew(root));
+  const section = h.crewRules();
+  assert.ok(section, 'the crew-rules section was not registered');
+  const enter = { kind: 'enter', messages: [{}] };
+  const secondAgent = { session: { header: { origin: 'root' } }, ctx: h.agent.ctx };
+  assert.equal(h.agent.session.id, undefined, 'the first fixture session unexpectedly carried an id');
+  assert.equal(secondAgent.session.id, undefined, 'the second fixture session unexpectedly carried an id');
+
+  const admitted = async (agent, turn) => {
+    const signal = new AbortController().signal;
+    section.text({ signal });
+    return (await h.preStep({ agent, turn, step: 1, signal }, enter)).result;
+  };
+
+  assert.deepEqual(await admitted(h.agent, 1), { ...enter, startsRequestSeries: true },
+    'the first session did not rebase its unknown baseline');
+  assert.deepEqual(await admitted(secondAgent, 1), { ...enter, startsRequestSeries: true },
+    'a second id-less session shared the first session\'s baseline');
+  assert.deepEqual(await admitted(h.agent, 2), enter,
+    'the first session rebased unchanged bytes');
+  assert.deepEqual(await admitted(secondAgent, 2), enter,
+    'the second session rebased unchanged bytes');
+
+  await writeFile(file, 'rules v2 — changed');
+  assert.deepEqual(await admitted(h.agent, 3), { ...enter, startsRequestSeries: true },
+    'a changed CREW.md did not rebase the first session');
+  assert.deepEqual(await admitted(secondAgent, 3), { ...enter, startsRequestSeries: true },
+    'a changed CREW.md did not rebase the second session');
+});
+
 // SUR-85 r2: the engine stops a parked runtime after idle and resumes the
 // session on the next message, so the first turn of a NEW process is the
 // normal path. That process has no in-memory baseline — it cannot know which

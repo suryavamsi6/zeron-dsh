@@ -53,10 +53,11 @@ jobs:
             -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine `
             --lib --bins `
             --test background_engine --test noop_browser `
-            --test worktree_on_run --test auth
+            --test worktree_on_run --test auth --test captains_profile_provisioning
       # Same selection as before, minus the deleted GPUI app and its shader layout:
       #   harness SDK normalization and shared lifecycle tests
-      #   application and updater, worktree paths, engine unit/catalog/login/auth
+      #   application and updater, worktree paths, engine unit/catalog/login/auth,
+      #   and packaged Captains profile provisioning
       - name: Harness, application, updater and engine tests
         env:
           RUST_BACKTRACE: '1'
@@ -67,8 +68,8 @@ jobs:
             -p zeron-harness -p zeron -p zeron-update -p zeron-proto -p zeron-engine `
             --lib --bins `
             --test background_engine --test noop_browser `
-            --test worktree_on_run --test auth `
-            -E "package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_))))"
+            --test worktree_on_run --test auth --test captains_profile_provisioning `
+            -E "package(zeron-harness) | package(zeron) | package(zeron-update) | (package(zeron-proto) & test(device_paths)) | (package(zeron-engine) & (kind(lib) | binary_id(zeron-engine::auth) | binary_id(zeron-engine::captains_profile_provisioning) | (binary_id(zeron-engine::worktree_on_run) & test(worktree_location_))))"
       - name: Record the pass (CI skips this job while its inputs stay the same)
         if: inputs.pass-key != ''
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

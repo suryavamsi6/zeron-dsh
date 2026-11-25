@@ -33,8 +33,8 @@ use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AccessMode, AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode,
+    AccessMode, AgentEvent, CAPTAINS_ENV, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel,
+    RunRequest, SandboxLevel, SessionStatus, SteeringMode,
 };
 
 const CHAT: &str = "chat-captain-role";
@@ -59,7 +59,16 @@ const CREW87E: &str = "chat-sur87-crew-e";
 const CAP232: &str = "chat-sur232-cap";
 const CREW232: &str = "chat-sur232-crew";
 const DEVICE: &str = "dev-captains";
-const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
+
+/// Shared bound for the turn, roster, and file polls below. The 15 s bound
+/// this replaces failed in CI at 15.058 s on `the second crew turn` (PR #177,
+/// job `138818721465`) for a case that runs locally in 0.072–0.078 s; the
+/// other four affected cases run locally in 0.054–0.067 s. That failure is
+/// consistent with a ~200× loaded-shard slowdown: 0.073 s × 200 ≈ 14.6 s.
+/// At 120 s the cap is ~8× the observed failure and ~1500× the slowest local
+/// case, so this stays a hang detector — the same assertion with the same
+/// label still fires, and the CI job timeout remains the outer backstop.
+const CASE_WAIT: Duration = Duration::from_secs(120);
 
 /// A one-turn hold between an answer's `TextDelta` and its `Done`, so a test
 /// can move the roster while the turn is still in flight. `watch`, not
@@ -355,9 +364,15 @@ fn parked(core: &EngineCore) -> bool {
 }
 
 async fn wait_for(mut what: impl FnMut() -> bool, label: &str) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let started = std::time::Instant::now();
+    let deadline = started + CASE_WAIT;
     while !what() {
-        assert!(std::time::Instant::now() < deadline, "timed out: {label}");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out: {label} after {:.1}s (cap {:.0}s)",
+            started.elapsed().as_secs_f64(),
+            CASE_WAIT.as_secs_f64()
+        );
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
 }
@@ -369,7 +384,8 @@ async fn wait_roster(
     label: &str,
     found: impl Fn(&serde_json::Value) -> bool,
 ) {
-    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let started = std::time::Instant::now();
+    let deadline = started + CASE_WAIT;
     loop {
         let roster = client
             .call(zeron_rpc::methods::CAPTAINS, serde_json::json!({}))
@@ -380,7 +396,9 @@ async fn wait_roster(
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "timed out: {label}"
+            "timed out: {label} after {:.1}s (cap {:.0}s)",
+            started.elapsed().as_secs_f64(),
+            CASE_WAIT.as_secs_f64()
         );
         tokio::time::sleep(Duration::from_millis(15)).await;
     }
@@ -760,7 +778,7 @@ async fn a_demote_during_a_captain_turn_still_writes_the_file() {
     .await;
 
     let path = needs_you_path(&rig.dir, CHAT_DEMOTE);
-    file_lands(&path, Duration::from_secs(15)).await;
+    file_lands(&path, CASE_WAIT).await;
     assert!(
         path.exists(),
         "a turn dispatched as a Captain must still write its Needs You file when the \
@@ -834,7 +852,7 @@ async fn a_sidebar_archived_captain_turn_still_writes_the_file() {
     .await;
 
     let path = needs_you_path(&rig.dir, CHAT_SIDEBAR);
-    file_lands(&path, Duration::from_secs(15)).await;
+    file_lands(&path, CASE_WAIT).await;
     assert!(
         path.exists(),
         "a sidebar archive is a view concern: the Captain's turn must still write its \
@@ -866,7 +884,7 @@ async fn a_crew_turn_writes_its_report_into_the_captains_drive() {
     // `parked` cannot order against it: poll for the file.
     let path = crew_report_path(&rig.dir, CAP, CREW);
     assert!(
-        file_lands(&path, Duration::from_secs(15)).await,
+        file_lands(&path, CASE_WAIT).await,
         "a crew turn must write its report at {path:?}; nothing was written"
     );
     let body = std::fs::read_to_string(&path).expect("the report reads");
@@ -916,7 +934,7 @@ async fn a_second_crew_turn_replaces_the_first_report() {
 
     let path = crew_report_path(&rig.dir, CAP, CREW2);
     assert!(
-        file_lands(&path, Duration::from_secs(15)).await,
+        file_lands(&path, CASE_WAIT).await,
         "a crew turn must write its report at {path:?}; nothing was written"
     );
     // The second turn's write lands off the event loop too: once the path
@@ -963,7 +981,7 @@ async fn a_long_crew_turn_report_is_capped_with_a_note() {
 
     let path = crew_report_path(&rig.dir, CAP, CREW3);
     assert!(
-        file_lands(&path, Duration::from_secs(15)).await,
+        file_lands(&path, CASE_WAIT).await,
         "a crew turn must write its report at {path:?}; nothing was written"
     );
     let body = std::fs::read_to_string(&path).expect("the report reads");
