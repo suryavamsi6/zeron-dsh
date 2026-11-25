@@ -14,7 +14,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use yaml_rust2::YamlLoader;
+use yaml_rust2::{
+    parser::{Event, EventReceiver, Parser, Tag},
+    scanner::TScalarStyle,
+};
 use zeron_proto::invocation::Skill;
 
 /// The skills this scanner (SUR-56) reads for `cwd` — three of the roots
@@ -145,6 +148,135 @@ fn indent_of(line: &str) -> usize {
     line.chars().take_while(|c| matches!(c, ' ' | '\t')).count()
 }
 
+/// One YAML node in the event tree validation builds. Aliases stay references
+/// to an anchor id instead of expanding the anchored collection: validating a
+/// hostile nested alias must cost memory linear in the frontmatter, not
+/// exponential in its alias depth.
+#[derive(PartialEq, Eq)]
+enum YamlScalar {
+    String(String),
+    Boolean(bool),
+    Null,
+    Number(String),
+    Tagged(String, TScalarStyle, Option<Tag>),
+}
+
+#[derive(PartialEq, Eq)]
+enum YamlNode {
+    Scalar(YamlScalar),
+    Alias(usize),
+    Sequence(Vec<YamlNode>),
+    Mapping(Vec<(YamlNode, YamlNode)>),
+}
+
+fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>) -> YamlScalar {
+    if tag.is_some() {
+        return YamlScalar::Tagged(value.to_string(), style, tag.clone());
+    }
+    if style == TScalarStyle::Plain {
+        if matches!(value, "~" | "null" | "Null" | "NULL") {
+            return YamlScalar::Null;
+        }
+        if matches!(value, "true" | "True" | "TRUE") {
+            return YamlScalar::Boolean(true);
+        }
+        if matches!(value, "false" | "False" | "FALSE") {
+            return YamlScalar::Boolean(false);
+        }
+        if plain_is_number(value) {
+            return YamlScalar::Number(value.to_string());
+        }
+    }
+    YamlScalar::String(value.to_string())
+}
+
+struct YamlEvents(Vec<Event>);
+
+impl EventReceiver for YamlEvents {
+    fn on_event(&mut self, event: Event) {
+        self.0.push(event);
+    }
+}
+
+fn yaml_node(events: &[Event], index: &mut usize) -> Option<YamlNode> {
+    match events.get(*index)? {
+        Event::Scalar(value, style, _, tag) => {
+            *index += 1;
+            Some(YamlNode::Scalar(yaml_scalar(value, *style, tag)))
+        }
+        Event::Alias(anchor) => {
+            *index += 1;
+            Some(YamlNode::Alias(*anchor))
+        }
+        Event::SequenceStart(..) => {
+            *index += 1;
+            let mut items = Vec::new();
+            while !matches!(events.get(*index), Some(Event::SequenceEnd)) {
+                items.push(yaml_node(events, index)?);
+            }
+            *index += 1;
+            Some(YamlNode::Sequence(items))
+        }
+        Event::MappingStart(..) => {
+            *index += 1;
+            let mut entries = Vec::new();
+            while !matches!(events.get(*index), Some(Event::MappingEnd)) {
+                let key = yaml_node(events, index)?;
+                if entries
+                    .iter()
+                    .any(|(seen, _): &(YamlNode, YamlNode)| *seen == key)
+                {
+                    return None;
+                }
+                let value = yaml_node(events, index)?;
+                entries.push((key, value));
+            }
+            *index += 1;
+            Some(YamlNode::Mapping(entries))
+        }
+        _ => None,
+    }
+}
+
+fn yaml_keys_are_unique(events: &[Event]) -> bool {
+    let mut index = 0;
+    while index < events.len() {
+        match events[index] {
+            Event::StreamStart | Event::StreamEnd | Event::DocumentStart | Event::DocumentEnd => {
+                index += 1
+            }
+            _ => {
+                if yaml_node(events, &mut index).is_none() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether the frontmatter is YAML the SDK accepts. The event parser checks
+/// the grammar without `YamlLoader`'s alias expansion, and the event tree
+/// checks duplicate mapping keys. Two scanner differences are normalized to
+/// the SDK: a tab directly after a mapping colon is a separator, while a tab
+/// before the document's first key is indentation and malformed.
+fn valid_yaml(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line[..indent_of(line)].contains('\t') {
+            return false;
+        }
+        break;
+    }
+    let normalized = text.replace(":\t", ": ");
+    let mut parser = Parser::new_from_str(&normalized);
+    let mut events = YamlEvents(Vec::new());
+    parser.load(&mut events, true).is_ok() && yaml_keys_are_unique(&events.0)
+}
+
 /// The `key: value` frontmatter between the first two `---` lines. Only keys
 /// at the root mapping's own indent are fields; a more- or less-indented line
 /// belongs to the entry above it and is skipped. Quoted scalars are unwrapped
@@ -161,7 +293,7 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
     // line-oriented extraction: tab indentation, unterminated or trailing
     // quoted scalars, duplicate mapping keys and sequence/mapping structure
     // are the parser's grammar, not rules to approximate here.
-    if YamlLoader::load_from_str(&lines[1..closing].join("\n")).is_err() {
+    if !valid_yaml(&lines[1..closing].join("\n")) {
         return None;
     }
     let mut fields = Vec::new();
@@ -734,6 +866,16 @@ mod tests {
                 true,
             ),
             (
+                "tab after a mapping colon",
+                "name: review\ndescription:\tReview\n",
+                true,
+            ),
+            (
+                "tab before the first key",
+                "\tname: review\n description: Review\n",
+                false,
+            ),
+            (
                 "trailing junk after a quoted scalar",
                 "name: review\ndescription: \"Review the diff\" trailing\n",
                 false,
@@ -754,9 +896,24 @@ mod tests {
                 true,
             ),
             (
+                "quoted scalar continuing at column zero",
+                "name: review\ndescription: \"Review\nthe diff\"\n",
+                false,
+            ),
+            (
                 "duplicate root keys",
                 "name: review\ndescription: Review\ndescription: Duplicate\n",
                 false,
+            ),
+            (
+                "plain and quoted spellings of one string key",
+                "name: review\ndescription: Review\nfoo: one\n\"foo\": two\n",
+                false,
+            ),
+            (
+                "plain boolean and quoted string keys",
+                "name: review\ndescription: Review\ntrue: one\n\"true\": two\n",
+                true,
             ),
             (
                 "duplicate nested keys",
@@ -772,6 +929,16 @@ mod tests {
                 "duplicate keys in one sequence item",
                 "name: review\ndescription: Review\ninputs:\n  - input: one\n    input: two\n",
                 false,
+            ),
+            (
+                "duplicate keys in a flow mapping",
+                "name: review\nmetadata: {owner: one, owner: two}\n",
+                false,
+            ),
+            (
+                "aliased mapping",
+                "name: review\ndescription: Review\nfirst: &x\n  owner: one\nsecond: *x\n",
+                true,
             ),
             (
                 "nested mapping",
