@@ -8161,6 +8161,26 @@ mod tests {
         assert!(known["cloud"].ready);
     }
 
+    /// An imported DeepSeek transcript is read-only where the session record
+    /// is produced; an ordinary chat is writable. This pins the mapping
+    /// itself, not a UI fixture's hand-set copy of the flag.
+    #[test]
+    fn an_imported_session_is_read_only_and_an_unimported_one_is_writable() {
+        let chats = Chats::default();
+        let open = Open { id: "c".into(), ..Open::default() };
+        let read_only = |chats: &Chats| session_value(chats, &open, false).field("readOnly").cloned();
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "imported": 2, "config": { "harness": "deepseek" } }),
+        );
+        assert_eq!(read_only(&chats), Some(Value::Bool(true)));
+        chats.chats.borrow_mut().insert(
+            "c".into(),
+            json!({ "id": "c", "config": { "harness": "deepseek" } }),
+        );
+        assert_eq!(read_only(&chats), Some(Value::Bool(false)));
+    }
+
     /// A chat on another device names its model before (or without) that
     /// device's catalog: its id, then the catalog's name once one has it.
     #[test]
