@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use zeron_proto::{
     AgentAccount, AgentAccountWarning, AgentAccountsSnapshot, AgentAuthKind, AgentLoginPoll,
-    AgentLoginStart, HarnessId,
+    AgentLoginStart, CAPTAINS_ENV, HarnessId,
 };
 
 use crate::EngineError;
@@ -299,7 +299,7 @@ impl crate::registry::RunEnvironment for PinRunEnvironment {
             if let Some(value) =
                 crate::captains::captains_env(&registry, &self.0.config.deepseek_home, chat_id)
             {
-                request.env.insert("ZERON_DEEPSEEK_CAPTAINS".into(), value);
+                request.env.insert(CAPTAINS_ENV.into(), value);
             }
             crate::captains::ensure_drive(&registry, &self.0.config.deepseek_home, chat_id)?;
         }
@@ -589,13 +589,13 @@ mod tests {
         // dispatch passes a chat id at all.
         for chat_id in [None, Some("stranger")] {
             let request = prepare(&env, chat_id).await;
-            assert!(!request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
+            assert!(!request.env.contains_key(CAPTAINS_ENV));
         }
 
         store.promote("chat-1", "ada").unwrap();
         let request = prepare(&env, Some("chat-1")).await;
         let stamp: serde_json::Value =
-            serde_json::from_str(&request.env["ZERON_DEEPSEEK_CAPTAINS"]).unwrap();
+            serde_json::from_str(&request.env[CAPTAINS_ENV]).unwrap();
         assert_eq!(stamp["role"], "captain");
         assert_eq!(stamp["chatId"], "chat-1");
         assert_eq!(stamp["captainId"], "chat-1");
@@ -610,7 +610,7 @@ mod tests {
         store.add_crew("chat-1", "chat-2").unwrap();
         let request = prepare(&env, Some("chat-2")).await;
         let stamp: serde_json::Value =
-            serde_json::from_str(&request.env["ZERON_DEEPSEEK_CAPTAINS"]).unwrap();
+            serde_json::from_str(&request.env[CAPTAINS_ENV]).unwrap();
         assert_eq!(stamp["role"], "crew");
         assert_eq!(stamp["chatId"], "chat-2");
         assert_eq!(stamp["captainId"], "chat-1");
@@ -622,7 +622,7 @@ mod tests {
         for chat_id in ["chat-1", "chat-2"] {
             let request = prepare(&env, Some(chat_id)).await;
             assert!(
-                !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+                !request.env.contains_key(CAPTAINS_ENV),
                 "{chat_id} is released on the next run"
             );
         }
@@ -631,11 +631,11 @@ mod tests {
         // the wire, and never lands in text a child would read.
         store.promote("chat-1", "ada").unwrap();
         let request = prepare(&env, Some("chat-1")).await;
-        assert!(request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
-        assert!(!request.prompt.contains("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(request.env.contains_key(CAPTAINS_ENV));
+        assert!(!request.prompt.contains(CAPTAINS_ENV));
         assert!(!request.prompt.contains("driveRoot"));
         let wire = serde_json::to_string(&request).unwrap();
-        assert!(!wire.contains("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(!wire.contains(CAPTAINS_ENV));
         assert!(!wire.contains("driveRoot"));
     }
 
@@ -700,7 +700,7 @@ mod tests {
         env.prepare(HarnessId::DeepSeek, Some("chat-x"), &mut request)
             .await
             .expect("an unreadable roster must not refuse an ordinary chat");
-        assert!(!request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"));
+        assert!(!request.env.contains_key(CAPTAINS_ENV));
         assert!(
             !config.deepseek_home.exists(),
             "an ordinary chat creates nothing, not even the captains root"
@@ -763,7 +763,7 @@ mod tests {
                 .await
                 .unwrap_or_else(|error| panic!("{chat_id} must run ordinary: {error}"));
             assert!(
-                !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+                !request.env.contains_key(CAPTAINS_ENV),
                 "{chat_id} was stamped although the plugin would refuse the row"
             );
         }
@@ -800,7 +800,7 @@ mod tests {
             .await
             .expect("a malformed roster must not refuse an ordinary run");
         assert!(
-            !request.env.contains_key("ZERON_DEEPSEEK_CAPTAINS"),
+            !request.env.contains_key(CAPTAINS_ENV),
             "a malformed roster stamped a role"
         );
         assert!(
