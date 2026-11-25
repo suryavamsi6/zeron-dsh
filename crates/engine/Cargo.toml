@@ -56,6 +56,9 @@ ignore.workspace = true
 fff-search.workspace = true
 
 same-file = "1"
+# Provider credentials materialized through DSH's `.env` layers
+# (dsh_providers.rs); the SDK's own launcher uses the same dotenv shape.
+dotenvy = "0.15"
 tempfile.workspace = true
 # `show_image` reads a shown image's size from its header (already in the
 # tree with these decoders via zeron-ui).

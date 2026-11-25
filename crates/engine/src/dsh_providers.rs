@@ -131,6 +131,39 @@ pub fn stored_key(home: &std::path::Path, reference: &str) -> Option<String> {
     None
 }
 
+/// One variable from a dotenv file, parsed with the same shape DSH's
+/// launcher accepts. The value stays local to the account read: an unreadable
+/// or malformed file is simply no credential, never part of an error string.
+fn dotenv_key(path: &std::path::Path, reference: &str) -> Option<String> {
+    for entry in dotenvy::from_path_iter(path).ok()? {
+        let (name, value) = entry.ok()?;
+        if name == reference {
+            return (!value.is_empty()).then_some(value);
+        }
+    }
+    None
+}
+
+/// A route key resolved the way the gateway's credential provider resolves
+/// it below the managed store: the invoking project's `.env` before the
+/// Harness home's. The gateway inherits its working directory from this
+/// engine, so `project` is the same launch layer DSH reads.
+fn resolvable_key(
+    home: &std::path::Path,
+    project: &std::path::Path,
+    reference: &str,
+) -> Option<String> {
+    stored_key(home, reference).or_else(|| {
+        dotenv_key(&project.join(".env"), reference).or_else(|| {
+            if project == home {
+                None
+            } else {
+                dotenv_key(&home.join(".env"), reference)
+            }
+        })
+    })
+}
+
 /// The models endpoint under a route's base URL. Catalog and declared
 /// endpoints already carry the API's version segment (`.../v1`, `.../v4`,
 /// `.../v1beta`), so only a bare host like `https://api.mistral.ai` takes the
@@ -193,9 +226,10 @@ impl GatewayAccountModels {
 #[async_trait::async_trait]
 impl AccountModels for GatewayAccountModels {
     async fn list(&self, route: &GatewayProvider) -> Result<Vec<ModelChoice>, String> {
+        let project = std::env::current_dir().unwrap_or_else(|_| self.home.clone());
         let key = route
             .credential_ref()
-            .and_then(|reference| stored_key(&self.home, reference))
+            .and_then(|reference| resolvable_key(&self.home, &project, reference))
             .ok_or_else(|| "no key".to_string())?;
         // A declared route's profile baseURL wins; a catalog route answers
         // on its `defaultBaseURL`.
@@ -2131,5 +2165,53 @@ mod tests {
             None,
             "a cold start with no store file is no key, not an error"
         );
+    }
+
+    #[test]
+    fn an_env_credential_resolves_below_the_store_project_before_home() {
+        let home = tempfile::tempdir().expect("a temp home");
+        let project = tempfile::tempdir().expect("a temp project");
+        let stored = "stored-marker-7c31";
+        let project_marker = "project-marker-7c31";
+        let home_marker = "home-marker-7c31";
+        std::fs::write(
+            project.path().join(".env"),
+            format!("MARKER_ACCOUNT_API_KEY=\"{project_marker}\"\n"),
+        )
+        .expect("project env");
+        std::fs::write(
+            home.path().join(".env"),
+            format!("export MARKER_ACCOUNT_API_KEY={home_marker}\n"),
+        )
+        .expect("home env");
+
+        assert_eq!(
+            resolvable_key(home.path(), project.path(), "MARKER_ACCOUNT_API_KEY").as_deref(),
+            Some(project_marker),
+            "the invoking project's layer outranks the Harness home's"
+        );
+        std::fs::remove_file(project.path().join(".env")).expect("remove project env");
+        assert_eq!(
+            resolvable_key(home.path(), project.path(), "MARKER_ACCOUNT_API_KEY").as_deref(),
+            Some(home_marker),
+            "the Harness home layer is still a resolvable key"
+        );
+
+        std::fs::write(
+            home.path().join(".credentials.yaml"),
+            format!("version: 1\nrefs:\n  MARKER_ACCOUNT_API_KEY: {stored}\n"),
+        )
+        .expect("credential store");
+        assert_eq!(
+            resolvable_key(home.path(), project.path(), "MARKER_ACCOUNT_API_KEY").as_deref(),
+            Some(stored),
+            "the managed store still outranks every dotenv fallback"
+        );
+
+        let miss = resolvable_key(home.path(), project.path(), "ABSENT_API_KEY");
+        assert_eq!(miss, None);
+        for marker in [stored, project_marker, home_marker] {
+            assert!(!format!("{miss:?}").contains(marker));
+        }
     }
 }
