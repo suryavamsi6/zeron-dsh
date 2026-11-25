@@ -1082,6 +1082,23 @@ fn ensure_link_with(
     let link = node_modules.join(BUNDLE_NAME);
     std::fs::create_dir_all(&node_modules)
         .map_err(|error| format!("cannot create {}: {error}", node_modules.display()))?;
+    // Refreshing a copy rewrites the entry through sibling staging trees.
+    // Chat starts can provision the same profile concurrently, so those
+    // rewrites are serialised across threads and processes before the
+    // entry is inspected; the second prepare then sees the first prepare's
+    // completed copy instead of deleting its staging tree mid-copy.
+    let lock_path = node_modules.join(format!(".{BUNDLE_NAME}.prepare.lock"));
+    let provisioning_lock = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| format!("cannot open {}: {error}", lock_path.display()))?;
+    provisioning_lock
+        .lock()
+        .map_err(|error| format!("cannot lock {}: {error}", lock_path.display()))?;
+    if link_resolves(profile, bundle) {
+        return Ok(());
+    }
     match std::fs::symlink_metadata(&link) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             remove_link(&link)
@@ -4175,6 +4192,51 @@ mod tests {
                 "the refresh leaves no .{suffix} tree behind"
             );
         }
+    }
+
+    /// Concurrent prepares of one stale copy are serialised: every caller
+    /// either performs the refresh or waits and then sees the completed
+    /// copy. None may delete another caller's half-written staging tree.
+    #[test]
+    fn overlapping_copy_refreshes_are_serialised() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = provisioning_source(dir.path());
+        let profile = dir.path().join("home/profiles/sdk");
+        let entry = profile.join("node_modules").join(BUNDLE_NAME);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        materialise_bundle(&source, &entry).unwrap();
+        std::fs::write(source.join("src/tool.js"), b"second nested").unwrap();
+
+        let barrier = std::sync::Barrier::new(4);
+        let barrier = &barrier;
+        let profile = &profile;
+        let source = &source;
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for _ in 0..4 {
+                handles.push(scope.spawn(move || {
+                    barrier.wait();
+                    ensure_link(profile, source)
+                }));
+            }
+            for handle in handles {
+                handle
+                    .join()
+                    .expect("a provisioning thread must not panic")
+                    .unwrap();
+            }
+        });
+
+        assert_eq!(
+            std::fs::read(entry.join("src/tool.js")).unwrap(),
+            b"second nested",
+            "the completed refresh is intact after every prepare returns"
+        );
+        assert_eq!(
+            copy_marker_hash(&entry),
+            Some(bundle_hash(&source).unwrap()),
+            "the surviving copy records the packaged bundle's hash"
+        );
     }
 
     /// SUR-235: a real directory that names the bundle but carries no copy
