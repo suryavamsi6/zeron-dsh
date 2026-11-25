@@ -102,6 +102,8 @@ mod helm_live;
 #[cfg(test)]
 mod helm_live_tests;
 #[cfg(test)]
+mod schedules_live_tests;
+#[cfg(test)]
 mod composer_motion_tests;
 #[cfg(test)]
 mod hit_sweep_tests;
