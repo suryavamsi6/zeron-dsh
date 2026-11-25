@@ -147,15 +147,13 @@ fn the_engine_s_helm_busy_refusal_is_the_one_the_bridge_pins() {
     );
 }
 
-/// An engine from before the Captains RPCs is not a roster error: the page
-/// gets the bridge's stable Helm-unavailable state, while any other refusal
-/// keeps the engine's words.
-#[test]
-fn an_unknown_captains_method_is_the_helm_unavailable_state() {
+/// What the page sees in `err.message` when the engine answers every
+/// Captains call with `refusal`, recorded as the test's one line.
+fn the_page_s_error_when_the_engine_refuses(refusal: &'static str) -> Vec<String> {
     let lines: Rc<RefCell<Vec<String>>> = Rc::default();
     let done = Rc::new(Cell::new(false));
     let call = move |_method: &'static str, _params: Json| -> crate::providers::McpCall {
-        Box::pin(async move { Err("unknown method: Captains".to_owned()) })
+        Box::pin(async move { Err(refusal.to_owned()) })
     };
     let page = r#"
 ui.call("Captains", {}):after(function(_answer: any)
@@ -191,7 +189,31 @@ return ui.column({ w_full = true, h_full = true }, { ui.text({ text = "old engin
         std::thread::sleep(Duration::from_millis(2));
     }
     assert!(done.get(), "the page never finished; what came back: {:?}", lines.borrow());
-    assert_eq!(*lines.borrow(), vec!["err:unsupported".to_owned()]);
+    lines.borrow().clone()
+}
+
+/// An engine from before the Captains RPCs is not a roster error: the page
+/// gets the bridge's stable Helm-unavailable state, while any other refusal
+/// keeps the engine's words.
+#[test]
+fn an_unknown_captains_method_is_the_helm_unavailable_state() {
+    assert_eq!(
+        the_page_s_error_when_the_engine_refuses("unknown method: Captains"),
+        vec!["err:unsupported".to_owned()]
+    );
+}
+
+/// A refusal that only *mentions* `unknown method` is not the older-engine
+/// state: the engine's validation errors echo what they reject, so a Captain
+/// name carrying those words must still arrive verbatim.
+#[test]
+fn a_refusal_mentioning_unknown_method_is_not_the_helm_unavailable_state() {
+    let refusal =
+        "invalid Captain name: \"the unknown method crew\" (allowed: 1-80 UTF-16 code units, no line breaks)";
+    assert_eq!(
+        the_page_s_error_when_the_engine_refuses(refusal),
+        vec![format!("err:{refusal}")]
+    );
 }
 
 /// The Digest tab's one read: the roster's `drivePath` is the only path it

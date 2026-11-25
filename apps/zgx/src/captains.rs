@@ -357,13 +357,16 @@ const FILE_CAP: u64 = 256 * 1024;
 /// app is the one file SUR-83 was granted (`apps/zgx/src/captains.rs`) plus the
 /// registration line, not `providers.rs`.
 ///
-/// An engine from before the Captains RPCs answers `unknown method`: that is
-/// the page's Helm-unavailable state (`unsupported`), not a roster refusal to
-/// show in the engine's words. Every other refusal is the engine's own,
-/// verbatim.
+/// An engine from before the Captains RPCs answers `unknown method: …` (the
+/// RPC crate's own words, `crates/rpc/src/lib.rs`): that is the page's
+/// Helm-unavailable state (`unsupported`), not a roster refusal to show in
+/// the engine's words. The match is the prefix, not a substring anywhere in
+/// the error: a validation refusal echoes what it rejected, and a Captain
+/// named with `unknown method` in it must still arrive verbatim. Every other
+/// refusal is the engine's own, verbatim.
 fn answer(reply: Result<Json, String>) -> Result<Value, String> {
     let json = reply.map_err(|error| {
-        if error.to_ascii_lowercase().contains("unknown method") {
+        if error.to_ascii_lowercase().starts_with("unknown method") {
             "unsupported".to_owned()
         } else {
             error
