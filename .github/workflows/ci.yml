@@ -245,18 +245,4 @@ jobs:
     steps:
       - env:
           RESULTS: ${{ toJSON(needs) }}
-        run: |
-          echo "$RESULTS" | python3 -c '
-          import json, sys
-          needs = json.load(sys.stdin)
-          for name, job in needs.items():
-              print(name.ljust(13), job["result"])
-          bad = [
-              (name, job["result"])
-              for name, job in needs.items()
-              if job["result"] not in ("success", "skipped")
-          ]
-          if bad:
-              print("not success or skipped: " + ", ".join(f"{name}={result}" for name, result in bad))
-              sys.exit(1)
-          '
+        run: echo "$RESULTS" | python3 scripts/ci/result.py
