@@ -707,7 +707,7 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
     });
     request
         .env
-        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), role.to_string());
+        .insert(CAPTAINS_ENV.into(), role.to_string());
     let stamped = configuration(&request, dir.path(), "dsh-session-a").unwrap();
     assert_eq!(stamped["captains"], role, "the role blob was not copied");
 
@@ -726,7 +726,7 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
     for bad in [bad_role, relative, missing_name, numeric_chat, silent] {
         request
             .env
-            .insert("ZERON_DEEPSEEK_CAPTAINS".into(), bad.to_string());
+            .insert(CAPTAINS_ENV.into(), bad.to_string());
         match configuration(&request, dir.path(), "dsh-session-a") {
             Err(HarnessError::Protocol(message)) => {
                 assert_eq!(message, "Invalid Captains configuration", "{bad}")
@@ -736,7 +736,7 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
     }
     request
         .env
-        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), "not json".into());
+        .insert(CAPTAINS_ENV.into(), "not json".into());
     assert_eq!(
         match configuration(&request, dir.path(), "dsh-session-a") {
             Err(HarnessError::Protocol(message)) => message,
@@ -749,7 +749,7 @@ fn helm_configuration_is_scoped_to_sdk_chat_runs() {
     // must not ride it.
     request
         .env
-        .insert("ZERON_DEEPSEEK_CAPTAINS".into(), role.to_string());
+        .insert(CAPTAINS_ENV.into(), role.to_string());
     let title = title_configuration(&request, dir.path(), "dsh-session-a").unwrap();
     assert!(
         title.get("captains").is_none(),

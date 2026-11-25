@@ -23,8 +23,9 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, InputActor, Model, ModelOption, ModelOptionChoice,
-    ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputQuestion,
+    AccessMode, AgentEvent, CAPTAINS_ENV, DoneStatus, HarnessId, InputActor, Model, ModelOption,
+    ModelOptionChoice, ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode,
+    UserInputQuestion,
 };
 
 use crate::{
@@ -366,7 +367,7 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
     // the row override and the plugin owns the rest of the schema.
     let captains = request
         .env
-        .get("ZERON_DEEPSEEK_CAPTAINS")
+        .get(CAPTAINS_ENV)
         .map(|raw| -> Result<Value, HarnessError> {
             let invalid = || HarnessError::Protocol("Invalid Captains configuration".into());
             let blob: Value = serde_json::from_str(raw).map_err(|_| invalid())?;

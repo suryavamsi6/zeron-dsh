@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The host-only environment key carrying a DeepSeek chat's Captain role
+/// stamp. Engine producers and harness consumers share this one spelling so a
+/// rename cannot silently sever the role comparison.
+pub const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
+
 /// The wire prefix of an agent added from the ACP registry: its harness
 /// slug is `acp.<registry id>` (`acp.gemini`), kept apart from the built-in
 /// slugs (the registry also lists agents Zeron drives itself, `cursor`,

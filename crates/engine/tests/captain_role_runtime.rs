@@ -33,8 +33,8 @@ use zeron_doc::{MessagePart, MessageRole, MessageStatus, SessionCommandPayload};
 use zeron_engine::{EngineCore, HarnessRegistry};
 use zeron_harness::{Harness, HarnessError, RunControls};
 use zeron_proto::{
-    AccessMode, AgentEvent, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel, RunRequest,
-    SandboxLevel, SessionStatus, SteeringMode,
+    AccessMode, AgentEvent, CAPTAINS_ENV, ChatConfig, DoneStatus, HarnessId, Model, ReasoningLevel,
+    RunRequest, SandboxLevel, SessionStatus, SteeringMode,
 };
 
 const CHAT: &str = "chat-captain-role";
@@ -59,7 +59,6 @@ const CREW87E: &str = "chat-sur87-crew-e";
 const CAP232: &str = "chat-sur232-cap";
 const CREW232: &str = "chat-sur232-crew";
 const DEVICE: &str = "dev-captains";
-const CAPTAINS_ENV: &str = "ZERON_DEEPSEEK_CAPTAINS";
 
 /// Shared bound for the turn, roster, and file polls below. The 15 s bound
 /// this replaces failed in CI at 15.058 s on `the second crew turn` (PR #177,
