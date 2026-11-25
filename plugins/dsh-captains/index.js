@@ -141,10 +141,8 @@ function applyRevoked(ctx) {
 // listener inside that waterfall — pressure compaction, pricing the step and
 // writing its checkpoint — still reads the retired head. A prepended pre-step
 // listener therefore commits the rendered prompt over the live head BEFORE
-// next(), as soon as an existing baseline disagrees with the bytes just
-// served: one durable replace, never an appended second system node. The
-// prompt is captured at the same assembly the bytes were keyed to, never
-// re-read from the file, so the commit and the serve cannot disagree.
+// next(), when the live head differs from the captured assembly's rendered
+// prompt. The admitted-step declaration below still tracks served crew bytes.
 function applyCrew(ctx, cfg) {
   const registered = new WeakSet();
   const bytesBySignal = new WeakMap();
@@ -179,23 +177,24 @@ function applyCrew(ctx, cfg) {
       return presentation;
     }, { prepend: true });
     scope.on('agent/pre-step', (event, next) => {
-      const { messages, signal, turn, step } = event;
+      const { agent, messages, signal, turn, step } = event;
       if (step !== 1 || !Array.isArray(messages) || messages.length === 0) return next();
-      const { session } = event.agent;
-      const current = bytesBySignal.get(signal);
-      const previous = lastBytes.get(session.id);
-      // Only a known baseline that the fresh bytes disagree with earns a
-      // commit: an unknown one is the resumed-session case the declared
-      // rebase already owns, an equal one changes nothing.
-      if (previous === undefined || current === undefined || previous.equals(current)) return next();
-      const llm = dshLlm();
-      const prompts = dshSystemPrompt();
-      if (llm === undefined || prompts === undefined) return next();
-      signal.throwIfAborted();
+      const { session } = agent;
       const headSeq = session.surface.nodes[0];
-      if (session.eventAt(headSeq)?.type !== 'system/message') throw new Error('Expected surface node zero to be a system/message');
+      const head = session.eventAt(headSeq);
+      if (head?.type !== 'system/message') return next();
       const prompt = promptBySignal.get(signal);
-      if (prompt === undefined) throw new Error('The step system prompt was not captured');
+      if (prompt === undefined) return next();
+      const content = session.deriveEventMessage(head)?.content ?? [];
+      const [block] = content;
+      const headText = content.length === 0 ? ''
+        : content.length === 1 && block?.type === 'text' && typeof block.text === 'string' ? block.text : undefined;
+      // A multi-block head projects to undefined: the guard declines rather
+      // than comparing what it cannot read.
+      if (headText === undefined || headText === prompt) return next();
+      const llm = dshLlm();
+      if (llm === undefined) return next();
+      signal.throwIfAborted();
       session.append('system/message', { turn, step, message: llm.createSystemMessage(prompt) },
         { surfaceOp: { op: 'replace', startSeq: headSeq, endSeq: headSeq }, sourceEventSeqs: [headSeq] });
       return next();
