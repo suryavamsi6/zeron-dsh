@@ -606,6 +606,8 @@ impl SessionsEngine {
     /// Captain's Drive. An unstamped turn writes nothing. `stamp` is the
     /// dispatch-time [`CAPTAINS_ENV`] value — the decision is that stamp, so
     /// the roster is never consulted at turn end.
+    // Test-only: production finalizes through `Inner::turn_end_writes` directly.
+    #[cfg(test)]
     fn turn_end_writes(
         &self,
         chat_id: &str,
