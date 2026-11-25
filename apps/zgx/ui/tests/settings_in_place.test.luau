@@ -1155,6 +1155,26 @@ test("Providers saves a key and names it in the route's profile", function()
 	expect(asked(app, "DshMutateSettings")).to_be(true)
 end)
 
+-- The key is in the store once `DshSetCredential` lands, but the route is
+-- not configured until the mutation naming it does — so a refused mutation
+-- is shown in the engine's words, and "Saved." is never said (SUR-170).
+test("Providers shows a failed mutation instead of reporting the key saved", function()
+	local app = open("Providers")
+	app:set_state("settings_stub_dsh_mutate", "the settings store is read-only")
+	app:click('role:button ~"Show all"')
+	app:frames(10)
+	app:click('role:button "Add API key · OpenCode Go"')
+	app:frames(10)
+	app:type('role:textbox "OpenCode Go API key"', "sk-probe")
+	app:key("Enter")
+	app:frames(10)
+	-- Both writes were asked for: the credential landed, the mutation did not.
+	expect(asked(app, "DshSetCredential")).to_be(true)
+	expect(asked(app, "DshMutateSettings")).to_be(true)
+	expect(shows(app, PAGE, "Couldn't save it: the settings store is read-only")).to_be(true)
+	expect(shows(app, PAGE, "Saved.")).to_be(false)
+end)
+
 test("Providers stands on the page's middle, as General does", function()
 	local app = open("General")
 	app:resize(1400, 900)
