@@ -836,7 +836,9 @@ impl From<RawChat> for Chat {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RawSession {
-    #[serde(default)]
+    /// LENIENT, like `waiting`: a turn outcome this build can't read (a newer
+    /// peer's terminal status) costs the outcome marker, not the session row.
+    #[serde(default, deserialize_with = "lenient_optional")]
     last_turn_outcome: Option<zeron_proto::NativeTurnOutcome>,
     #[serde(default)]
     terminal_activity: Option<zeron_proto::TerminalActivity>,
@@ -855,13 +857,14 @@ pub(crate) struct RawSession {
     background_tasks: Vec<zeron_proto::BackgroundTask>,
     /// LENIENT, as a chat's `config`: a wait this build can't read (a newer
     /// peer's) costs the wait, not the row.
-    #[serde(default, deserialize_with = "lenient_waiting")]
+    #[serde(default, deserialize_with = "lenient_optional")]
     waiting: Option<zeron_proto::SessionWaiting>,
 }
 
-fn lenient_waiting<'de, D>(deserializer: D) -> Result<Option<zeron_proto::SessionWaiting>, D::Error>
+fn lenient_optional<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
 {
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     Ok(value.and_then(|value| serde_json::from_value(value).ok()))
@@ -1060,6 +1063,33 @@ mod tests {
         assert_eq!(row.source_context, Some(context));
         assert_eq!(row.branch.as_deref(), Some("feature/sidebar"));
         assert_eq!(row.checkout_id.as_deref(), Some("checkout-a"));
+    }
+
+    #[test]
+    fn an_unknown_turn_outcome_costs_the_marker_not_the_session_row() {
+        let ws = WorkspaceDoc::new();
+        let mut row = session("chat-1", "dev-a", SessionStatus::Idle);
+        row.last_turn_outcome = Some(zeron_proto::NativeTurnOutcome {
+            status: zeron_proto::DoneStatus::Completed,
+            finished_at: ts(4_000),
+        });
+        ws.upsert_session(&row).unwrap();
+
+        // A future peer's terminal status the local enum cannot decode. The row
+        // itself must remain visible; only the additive outcome marker drops out.
+        let mut outcome = serde_json::to_value(row.last_turn_outcome.unwrap()).unwrap();
+        outcome["status"] = serde_json::json!("statusFromAFuturePeer");
+        ws.row("sessions", "chat-1")
+            .unwrap()
+            .insert("lastTurnOutcome", LoroValue::from(outcome))
+            .unwrap();
+        ws.doc().commit();
+
+        let sessions = ws.read_sessions().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].chat_id, "chat-1");
+        assert_eq!(sessions[0].status, SessionStatus::Idle);
+        assert_eq!(sessions[0].last_turn_outcome, None);
     }
 
     #[test]
