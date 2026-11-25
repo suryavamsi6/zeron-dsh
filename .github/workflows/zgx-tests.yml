@@ -21,6 +21,10 @@ on:
         description: Cache key prefix under which each job records its pass (ci.yml); empty records nothing.
         type: string
         default: ''
+      skip:
+        description: JSON list of jobs not to run (ci.yml; `zgx-macos` when a pull request leaves zgx itself alone).
+        type: string
+        default: '[]'
 
 permissions:
   contents: read
@@ -37,6 +41,7 @@ jobs:
       contents: read
       actions: write
       pull-requests: read  # first-red.sh compares the run's head with the PR's
+    if: ${{ !contains(fromJSON(inputs.skip || '[]'), 'zgx-macos') }}
     runs-on: macos-latest
     timeout-minutes: 120
     steps:

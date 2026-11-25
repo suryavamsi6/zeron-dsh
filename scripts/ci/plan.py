@@ -154,6 +154,17 @@ HARNESS_PATHS = ["crates/harness/**"]
 
 # Fast tier: jobs and steps of a selected suite that only run for their own files.
 # On the full tier everything runs.
+#
+# The two `macos-latest` test legs share one pool rule here, because a queued
+# job that never receives a runner is cancelled after fifteen minutes and makes
+# the aggregate red on capacity alone: `ios-tests` runs only for the app/FFI
+# files it links, and `zgx-macos` only for zgx's own code and test data. Other
+# pull requests keep their Linux zgx and iOS-core coverage; main, the merge
+# queue, manual runs and `ci:full` still run both macOS legs. Unlike the other
+# gated jobs, these two stay path-gated even when CI itself changes: otherwise
+# the rule could never merge while the shared pool is starved.
+MACOS_POOL_JOBS = {("ios", "ios-tests"), ("zgx", "zgx-macos")}
+
 JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # Release build, packaging, installer and CLI start-up probes (`tests`
     # already compiles the binary).
@@ -164,6 +175,11 @@ JOB_PATHS: dict[tuple[str, str], list[str]] = {
     # crate and the client it wraps; ios-core tests the rest of the mobile core.
     ("ios", "ios-tests"): CARGO + ["apps/ios/**", "scripts/ios/**", "crates/mobile/**", "crates/mobile-bindgen/**",
                                    "crates/client/**", ".github/workflows/macos.yml"],
+    # zgx's Linux shards compile and test the same Rust workspace and Luau UI.
+    # The macOS leg adds macOS-specific compilation, Ghostty and the engine's
+    # plugin tests, so it stays for zgx's own changes and for full-tier runs.
+    ("zgx", "zgx-macos"): ["apps/zgx/**", "scripts/ci/nextest.toml", "scripts/ci/test-zgx.sh",
+                            "scripts/ci/zgx-known-failures.txt"],
 }
 # Fast tier: optional steps (flags passed to the suite workflow, and part of its
 # fingerprint), (suite, flag) -> the files that turn them on. None at present.
@@ -281,11 +297,14 @@ def gated(files: list[dict] | None, tier: str, suites: dict[str, bool],
     everything but NIGHTLY_FLAGS, which only `nightly` runs."""
     paths = None if files is None else ({f["filename"] for f in files}
                                         | {f["previous_filename"] for f in files if f.get("previous_filename")})
-    everything = tier != "fast" or paths is None or any(p in CI_SELF for p in paths)
+    ci_self = paths is not None and any(p in CI_SELF for p in paths)
+    everything = tier != "fast" or paths is None or ci_self
     off: dict[str, list[str]] = {}
     flags: dict[str, list[str]] = {}
     for (suite, job), patterns in JOB_PATHS.items():
-        if suites.get(suite) and not everything and not any(matches(p, patterns) for p in paths):
+        forced = everything and (suite, job) not in MACOS_POOL_JOBS
+        if suites.get(suite) and not forced and tier == "fast" and paths is not None \
+                and not any(matches(p, patterns) for p in paths):
             off.setdefault(suite, []).append(job)
     for (suite, flag), patterns in FLAG_PATHS.items():
         if (suite, flag) in NIGHTLY_FLAGS and not nightly:
