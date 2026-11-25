@@ -314,7 +314,7 @@ mod proc_table {
         dir.flatten()
             .filter_map(|entry| entry.file_name().to_str()?.parse::<i32>().ok())
             .filter_map(|pid| {
-                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+                let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
                 let (ppid, pgid, start) = parse_stat(&stat)?;
                 Some(ProcEntry {
                     pid,
@@ -328,7 +328,7 @@ mod proc_table {
 
     #[cfg(target_os = "linux")]
     pub(super) fn start_time(pid: i32) -> Option<u64> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
         parse_stat(&stat).map(|(_, _, start)| start)
     }
 
@@ -392,7 +392,7 @@ mod proc_table {
     /// Its parent's pid: 1 once its parent died and init adopted it.
     #[cfg(target_os = "linux")]
     pub(super) fn ppid(pid: i32) -> Option<i32> {
-        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let stat = std::fs::read(format!("/proc/{pid}/stat")).ok()?;
         parse_stat(&stat).map(|(ppid, _, _)| ppid)
     }
 
@@ -564,15 +564,24 @@ mod proc_table {
 
     /// `(ppid, pgrp, starttime)` from a `/proc/<pid>/stat` line: fields 4,
     /// 5 and 22, counted after the parenthesized command name (which may
-    /// itself hold spaces and parentheses).
+    /// itself hold spaces, parentheses and bytes outside UTF-8).
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-    pub(super) fn parse_stat(stat: &str) -> Option<(i32, i32, u64)> {
-        let rest = &stat[stat.rfind(')')? + 1..];
-        let fields: Vec<&str> = rest.split_whitespace().collect();
+    pub(super) fn parse_stat(stat: impl AsRef<[u8]>) -> Option<(i32, i32, u64)> {
+        let stat = stat.as_ref();
+        let close = stat.iter().rposition(|byte| *byte == b')')?;
+        let fields: Vec<&[u8]> = stat
+            .get(close + 1..)?
+            .split(|byte| byte.is_ascii_whitespace())
+            .filter(|field| !field.is_empty())
+            .collect();
+        fn number<T: std::str::FromStr>(fields: &[&[u8]], index: usize) -> Option<T> {
+            let field = std::str::from_utf8(fields.get(index)?).ok()?;
+            field.parse().ok()
+        }
         Some((
-            fields.get(1)?.parse().ok()?,
-            fields.get(2)?.parse().ok()?,
-            fields.get(19)?.parse().ok()?,
+            number(&fields, 1)?,
+            number(&fields, 2)?,
+            number(&fields, 19)?,
         ))
     }
 }
