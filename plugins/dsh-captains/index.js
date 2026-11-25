@@ -168,10 +168,11 @@ function applyCrew(ctx, cfg) {
   const registered = new WeakSet();
   const bytesBySignal = new WeakMap();
   const promptBySignal = new WeakMap();
-  // In memory, keyed by session id. A missing entry means this process never
-  // saw the bytes the resumed series was built from, so that first admitted
-  // step must rebase; only a known equal baseline passes through untouched.
-  const lastBytes = new Map();
+  // In memory, keyed by the session object. A missing entry means this process
+  // never saw the bytes that session's resumed series was built from, so that
+  // first admitted step must rebase; only a known equal baseline passes through
+  // untouched. The WeakMap drops the baseline with the session it belongs to.
+  const lastBytes = new WeakMap();
   const repairChecked = new WeakSet();
   const repairCheckpoints = async (agent, signal) => {
     const { session } = agent;
@@ -295,9 +296,9 @@ function applyCrew(ctx, cfg) {
       if (event.step !== 1 || decision.kind !== 'enter' || decision.messages.length === 0) return decision;
       const current = bytesBySignal.get(event.signal);
       if (current === undefined) return decision;
-      const key = agent.session?.id ?? '';
-      const previous = lastBytes.get(key);
-      lastBytes.set(key, current);
+      const { session } = event.agent;
+      const previous = lastBytes.get(session);
+      lastBytes.set(session, current);
       if (previous !== undefined && previous.equals(current)) return decision;
       return { ...decision, startsRequestSeries: true };
     });
