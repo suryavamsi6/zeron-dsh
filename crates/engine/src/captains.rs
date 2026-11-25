@@ -650,6 +650,13 @@ const REFRESHED: &str = "<!-- refreshed ";
 /// DIGEST.md cannot take away.
 const CUTOFF_FILE: &str = "digest-refresh";
 
+/// Every refresh the engine writes, process-wide. Two crew turns ending
+/// together otherwise interleave their digest rename and sidecar write,
+/// and the loser pairs an older digest with the winner's newer cutoff —
+/// a report filed between the two never appears under New. The writes
+/// are microseconds; the lock is never the bottleneck.
+static REFRESH_LOCK: Mutex<()> = Mutex::new(());
+
 /// One crew chat as the digest synthesis sees it: the roster id, the
 /// workspace row's title, and whether the row is live — present and not
 /// archived. A crew that is not live, or no longer on the roster at all,
@@ -789,6 +796,7 @@ pub fn refresh_digest(
     crew: &[DigestCrew],
     now: DateTime<Utc>,
 ) -> Result<(), String> {
+    let _serialization = REFRESH_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let path = drive.join("DIGEST.md");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
     // The cutoff is the engine-owned sidecar first: the model rewrites
