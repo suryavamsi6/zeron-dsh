@@ -67,8 +67,14 @@ impl Child {
                 let _ = self.inner.try_wait();
                 // Signal 0 counts an unreaped zombie as a group member even
                 // though it cannot execute; wait only while a member runs.
+                // A member can fork while one process-table scan is being
+                // assembled, so confirm an apparently empty group with a
+                // second scan before calling shutdown finished.
                 if !crate::process::group_runs(-group) {
-                    break;
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    if !crate::process::group_runs(-group) {
+                        break;
+                    }
                 }
                 if tokio::time::Instant::now() >= deadline {
                     crate::send_signal(&group, crate::Signal::Kill);
