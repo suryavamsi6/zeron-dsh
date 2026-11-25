@@ -12,6 +12,14 @@ fn request(cwd: &Path) -> RunRequest {
 }
 
 #[test]
+fn the_token_ceiling_maps_to_its_own_done_status() {
+    assert_eq!(done_status("max-tokens"), DoneStatus::MaxTokens);
+    assert_eq!(done_status("completed"), DoneStatus::Completed);
+    assert_eq!(done_status("aborted"), DoneStatus::Interrupted);
+    assert_eq!(done_status("anything-else"), DoneStatus::Errored);
+}
+
+#[test]
 fn a_run_reads_the_shared_store_only_when_the_host_says_so() {
     let dir = tempfile::tempdir().unwrap();
     let mut request = request(dir.path());

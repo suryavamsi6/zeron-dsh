@@ -31,6 +31,9 @@ fn status_word(status: DoneStatus) -> &'static str {
         DoneStatus::Completed => "completed",
         DoneStatus::Interrupted => "aborted",
         DoneStatus::Errored => "error",
+        // Not the provider's wire literal: the report's own plain-English
+        // outcome, so the finish reason is not copied across the seam.
+        DoneStatus::MaxTokens => "token-capped",
     }
 }
 
