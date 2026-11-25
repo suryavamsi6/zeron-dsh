@@ -197,7 +197,27 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         parents.push((indent, key.clone()));
         let value = value.trim();
         let Some(marker) = value.chars().next().filter(|c| matches!(c, '|' | '>')) else {
-            let scalar = scalar(value)?;
+            let mut scalar_text = value.to_string();
+            if matches!(scalar_text.as_bytes().first(), Some(b'"' | b'\''))
+                && quoted_end(&scalar_text).is_none()
+            {
+                // A quoted scalar may continue onto more-indented lines. The
+                // menu only keeps the scalar kind and text, so consume those
+                // lines before deciding whether the quote ever closes.
+                while index < closing {
+                    let next = lines[index];
+                    if !next.trim().is_empty() && indent_of(next) <= indent {
+                        break;
+                    }
+                    index += 1;
+                    scalar_text.push('\n');
+                    scalar_text.push_str(next);
+                    if quoted_end(&scalar_text).is_some() {
+                        break;
+                    }
+                }
+            }
+            let scalar = scalar(&scalar_text)?;
             let base = *base.get_or_insert(indent);
             if indent == base {
                 fields.push((key, scalar));
@@ -739,6 +759,16 @@ mod tests {
                 "unterminated quote",
                 "name: review\ndescription: \"Review the diff\n",
                 false,
+            ),
+            (
+                "multiline double-quoted scalar",
+                "name: review\ndescription: \"Review\n  the diff\"\n",
+                true,
+            ),
+            (
+                "multiline single-quoted scalar",
+                "name: review\ndescription: 'Review\n  the diff'\n",
+                true,
             ),
             (
                 "duplicate root keys",
