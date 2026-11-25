@@ -22,16 +22,28 @@ local function window(): any
 	return app
 end
 
+-- `app:error()` is the harness's own record of what the scripts threw while
+-- mounting and drawing: 81 test files here assert it is nil, and it is the
+-- reason a throw inside a computed is not invisible — it is only invisible to
+-- a case that does not ask.
+
 test("screen_graph: every screen the app starts with loads", function()
 	local app = window()
 	-- `sur246_fixture` requires the shell and the screens it builds inside a
 	-- `pcall`, in `ui/app.luau`'s order, and writes what threw here.
 	expect(tostring(app:state("test_sur246_load"))).to_be("")
+	-- And nothing threw on the way: the graph loading is not the same as the
+	-- window building without a runtime error.
+	expect(app:error()).to_be_nil()
 end)
 
 test("screen_graph: the window records no screen it failed to build", function()
 	local app = window()
-	local failures = (app:state("shell_failures") :: any) or {}
+	-- The window records this only once the shell has loaded.
+	local ok, failures = pcall(function()
+		return ((app :: any):state("shell_failures") :: any) or {}
+	end)
+	expect(ok).to_be(true)
 	local said: { string } = {}
 	for module, why in failures do
 		table.insert(said, `{module} ({tostring(why)})`)
@@ -41,6 +53,7 @@ test("screen_graph: the window records no screen it failed to build", function()
 	expect(table.concat(said, "; ")).to_be("")
 	-- And the sidebar drew its rows, which is what its failed `projects`
 	-- computed left empty on `039a8265e`.
-	local order = (app:state("shell_sidebar_order") :: any) or {}
+	local order = ((app :: any):state("shell_sidebar_order") :: any) or {}
 	expect(#order > 0).to_be(true)
+	expect(app:error()).to_be_nil()
 end)

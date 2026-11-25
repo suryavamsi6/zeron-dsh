@@ -28,22 +28,32 @@ local function loads(path: string): boolean
 end
 
 -- (What `ui/app.luau` does for the main window, in its order: the design
--- system, then the language, then the shell and the screens it builds.)
+-- system, then the language, the plugins page and the shell.)
 local ds = require("@ds")
 ds.setup()
--- (Settings' host calls and the sign-in terminal first, as `shell_fixture`
--- does before it requires the shell: the settings screens ask `settings.engine`
--- as they load, and unanswered that is a runtime error the harness prints
--- without failing the case — the very silence this check exists to break.
--- Measured: without this line the fixture printed two such errors on every
--- mount and both cases stayed green.)
+-- (The host stand-ins first, as `shell_fixture` requires them at its `:135`
+-- before it requires the shell: the settings screens ask `settings.engine` as
+-- they load and the appearance module applies the scheme through the host, and
+-- unanswered those are runtime errors: the harness records them in
+-- `app:error()`, prints them, and passes every case that does not ask — the
+-- silence this check exists to break. Measured: without these two lines the
+-- fixture threw six such errors on every mount and both cases stayed green.)
 require("./settings_stub")
--- (And the scheme action, as `shell_fixture` stubs it: the appearance module
--- applies the scheme through the host, and a test host has no theme to set —
--- unanswered that is a runtime error the harness prints without failing the
--- case, which is the silence this check exists to break.)
 require("@screens/onboarding/actions").apply_scheme = function() end
-loads("@app/screens/shell")
+
+local loaded = true
+for _, path in { "@app/screens/language", "@app/screens/plugins", "@app/screens/shell" } do
+	-- (`loads` keeps the throw; the loop keeps every module attempted, so one
+	-- failure does not hide the others.)
+	loaded = loads(path) and loaded
+end
+
+-- A graph that did not load still mounts, so the case asserts the capture
+-- rather than dying in the harness's own mount error — with a throw inside
+-- `require("./shell_fixture")` the assertion is never reached.
+if not loaded then
+	return ui.text { "the app's start graph did not load", literal = true }
+end
 
 -- The window, with the chats and the host stubs the shell needs.
 return require("./shell_fixture")
