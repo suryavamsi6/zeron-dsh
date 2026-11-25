@@ -431,7 +431,7 @@ async fn sdk_runtime_round_trip_and_resume() {
             execution_lease: None,
             request_input: Box::new(|_| {
                 let (tx, rx) = oneshot::channel();
-                let _ = tx.send(vec![]);
+                let _ = tx.send(Default::default());
                 rx
             }),
             steering,
@@ -609,6 +609,76 @@ fn host_questions_carries_a_detail_field_and_keeps_the_folded_text() {
         q.question, "Approve this plan?\n\n# Plan\n\n1. Do the thing",
         "a text-only client must still see the plan folded in"
     );
+}
+
+#[test]
+fn question_result_reports_who_answered_and_who_dismissed() {
+    let question = |id: &str| UserInputQuestion {
+        id: id.into(),
+        header: "Pick".into(),
+        question: "Which one?".into(),
+        options: vec!["a".into(), "b".into()],
+        multi_select: false,
+        prefill: None,
+        multiline: false,
+        requires_person: true,
+        note: None,
+        detail: None,
+    };
+    let answered = question_result(
+        vec![question("q1")],
+        InputResponse {
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["b".into()],
+            }],
+            by: Some(InputActor::Agent {
+                chat_id: Some("chat-other".into()),
+            }),
+        },
+    );
+    assert_eq!(answered["answers"][0]["id"], "q1");
+    assert_eq!(answered["answers"][0]["selected"], json!(["b"]));
+    assert_eq!(
+        answered["by"],
+        json!({"kind": "agent", "chatId": "chat-other"}),
+        "the asking model is told an agent answered"
+    );
+
+    // The person's own client resolves any card: the result says so too.
+    let by_client = question_result(
+        vec![question("q1")],
+        InputResponse {
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["a".into()],
+            }],
+            by: Some(InputActor::Client),
+        },
+    );
+    assert_eq!(by_client["by"], json!({"kind": "client"}));
+
+    // SUR-242 made an agent's dismissal legitimate: it keeps its actor too.
+    let dismissed = question_result(
+        vec![question("q1")],
+        InputResponse {
+            answers: Vec::new(),
+            by: Some(InputActor::Plugin {
+                plugin: "dsh-captains".into(),
+                name: "captain".into(),
+            }),
+        },
+    );
+    assert_eq!(dismissed["cancelled"], json!(true));
+    assert_eq!(
+        dismissed["by"],
+        json!({"kind": "plugin", "plugin": "dsh-captains", "name": "captain"})
+    );
+
+    // No resolver captured: say so rather than claiming a person's client.
+    let closed = question_result(vec![question("q1")], InputResponse::default());
+    assert_eq!(closed["cancelled"], json!(true));
+    assert_eq!(closed["by"], json!({"kind": "unattributed"}));
 }
 
 #[test]

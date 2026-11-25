@@ -2793,6 +2793,440 @@ async fn requires_person_card_refuses_an_agent_and_accepts_the_client() {
     core.shutdown().await;
 }
 
+/// SUR-239 gap 1: the shipped SDK carries no person-only marker, so the
+/// engine must stamp a Captain chat's question where the chat's role is
+/// known. The harness here asks with `requires_person: false` — the shape a
+/// real `user-question/ask` frame produces — and the parked card must still be
+/// the person's alone: an agent's answer is refused, the client's lands.
+#[tokio::test]
+async fn captain_chat_questions_require_the_person_without_an_sdk_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    // The roster is engine-owned device state: the chat is a live Captain
+    // before the run starts, exactly as a promoted chat would be.
+    std::fs::write(
+        dir.path().join("captains.json"),
+        r#"{"captains":[{"chatId":"chat-e2e","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#,
+    )
+    .unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    let here = core.device_id.clone();
+    core.workspace
+        .create_chat(CHAT, None, Some(&here), None, None)
+        .unwrap();
+    core.workspace.rename_chat(CHAT, "Captain (test)").unwrap();
+    let handle = core.doc_host.open(CHAT).unwrap();
+    let tools = zeron_mcp::Tools::new(Arc::new(zeron_mcp::Zeron::with_client(
+        zeron_rpc::memory_client(core.rpc_service()),
+        zeron_mcp::Origin {
+            chat_id: Some("chat-other".into()),
+            ..Default::default()
+        },
+    )));
+
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-captain",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    wait_for(
+        || {
+            core.sessions.session_status(CHAT).map(|s| s.status)
+                == Some(SessionStatus::AwaitingInput)
+        },
+        "awaiting input",
+    )
+    .await;
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Input { resolved: false, .. }))
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+    let (request_id, questions) = entries(&core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } => Some((request_id.clone(), questions.clone())),
+                _ => None,
+            })
+        })
+        .expect("the Captain's question is live");
+    assert!(
+        questions[0].requires_person,
+        "a Captain chat's question is the person's alone even without an SDK marker"
+    );
+
+    // An agent's answer is refused: it is not the person this card is for.
+    let reply = tools
+        .call(
+            "respond_to_input",
+            serde_json::json!({
+                "chat": "Captain (test)",
+                "answers": [{ "question_id": "q1", "labels": ["b"] }],
+            }),
+        )
+        .await
+        .unwrap();
+    let command_id = reply["commandId"].as_str().unwrap().to_string();
+    wait_for(
+        || {
+            command_status(&core, &command_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the agent's answer to settle",
+    )
+    .await;
+    let (status, resolution) = command_status(&core, &command_id).unwrap();
+    assert_eq!(
+        status,
+        SessionCommandStatus::Rejected,
+        "an agent must not settle a Captain's question"
+    );
+    assert!(
+        resolution
+            .as_deref()
+            .is_some_and(|text| text.contains("person")),
+        "the refusal names the person: {resolution:?}"
+    );
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::AwaitingInput),
+        "the question is still the person's to answer"
+    );
+
+    // The person's own client answers; the run resumes and records who.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-answer-captain",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: vec![zeron_proto::UserInputAnswer {
+                question_id: "q1".into(),
+                labels: vec!["b".into()],
+            }],
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts
+                        .iter()
+                        .any(|p| matches!(p, MessagePart::Text { text, .. } if text == "picked b"))
+            })
+        },
+        "answered turn to complete",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1, "only the client's answer lands: {events:?}");
+    assert_eq!(
+        events[0]["event"]["by"],
+        serde_json::json!({"kind": "client"})
+    );
+    core.shutdown().await;
+}
+
+/// Writes the small engine roster file: the e2e chat is a live Captain, or the
+/// roster is empty. Used to flip the role while a run is already in flight.
+fn write_captains_roster(dir: &std::path::Path, captain: bool) {
+    let body = if captain {
+        r#"{"captains":[{"chatId":"chat-e2e","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":[]}]}"#
+    } else {
+        r#"{"captains":[]}"#
+    };
+    std::fs::write(dir.join("captains.json"), body).expect("captains.json");
+}
+
+/// Asks its one question only when the test releases it, so a run can start
+/// under one roster and the ask land after the roster changes.
+struct GatedAskHarness {
+    started: tokio::sync::mpsc::UnboundedSender<()>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait]
+impl Harness for GatedAskHarness {
+    fn id(&self) -> HarnessId {
+        HarnessId::Mock
+    }
+    fn display_name(&self) -> &str {
+        "Gated asking"
+    }
+    fn supports_steering(&self) -> bool {
+        false
+    }
+    fn steering_mode(&self) -> SteeringMode {
+        SteeringMode::TurnBoundary
+    }
+    fn reasoning_levels(&self) -> &[ReasoningLevel] {
+        &[]
+    }
+    async fn models(&self) -> Result<Vec<Model>, HarnessError> {
+        Ok(vec![])
+    }
+    async fn run(
+        &self,
+        _request: RunRequest,
+        controls: RunControls,
+    ) -> Result<BoxStream<'static, Result<AgentEvent, HarnessError>>, HarnessError> {
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<AgentEvent, HarnessError>>(16);
+        let started = self.started.clone();
+        let release = self.release.clone();
+        tokio::spawn(async move {
+            let _ = started.send(());
+            release.notified().await;
+            let response = (controls.request_input)(vec![zeron_proto::UserInputQuestion {
+                note: None,
+                detail: None,
+                id: "q1".into(),
+                header: "Pick".into(),
+                question: "Which one?".into(),
+                options: vec!["a".into(), "b".into()],
+                prefill: None,
+                multiline: false,
+                multi_select: false,
+                requires_person: false,
+            }])
+            .await
+            .unwrap_or_default();
+            let picked = response
+                .first()
+                .and_then(|a| a.labels.first().cloned())
+                .unwrap_or_else(|| "none".into());
+            let _ = tx
+                .send(Ok(AgentEvent::TextDelta {
+                    text: format!("picked {picked}"),
+                }))
+                .await;
+            let _ = tx.send(Ok(done(DoneStatus::Completed))).await;
+        });
+        Ok(futures::stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed())
+    }
+}
+
+/// The live question in the doc, with its request id.
+async fn wait_for_input_questions(
+    core: &EngineCore,
+) -> (String, Vec<zeron_proto::UserInputQuestion>) {
+    wait_for(
+        || {
+            entries_now(core).iter().any(|e| {
+                e.parts
+                    .iter()
+                    .any(|p| matches!(p, MessagePart::Input { resolved: false, .. }))
+            })
+        },
+        "input part in doc",
+    )
+    .await;
+    entries(core)
+        .iter()
+        .find_map(|e| {
+            e.parts.iter().find_map(|p| match p {
+                MessagePart::Input {
+                    request_id,
+                    questions,
+                    resolved: false,
+                    ..
+                } => Some((request_id.clone(), questions.clone())),
+                _ => None,
+            })
+        })
+        .expect("the live question")
+}
+
+/// SUR-239 review: the role must be read when the harness asks, not when the
+/// run starts. A chat promoted while its run is in flight must still make the
+/// run's next question the person's alone.
+#[tokio::test]
+async fn a_question_asked_after_a_mid_run_promotion_is_person_only() {
+    let dir = tempfile::tempdir().unwrap();
+    write_captains_roster(dir.path(), false);
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let core = assemble(
+        dir.path(),
+        Arc::new(GatedAskHarness {
+            started: started_tx,
+            release: release.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-promoted-mid-run",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    started_rx.recv().await.expect("the run started");
+    // Promoted while the run is in flight, before the harness asks.
+    write_captains_roster(dir.path(), true);
+    release.notify_one();
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    assert!(
+        questions[0].requires_person,
+        "a Captain promoted mid-run is the person's alone"
+    );
+    // Close it unanswered: the turn still settles with the harness's decline.
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-promoted",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// And the other direction: a Captain demoted mid-run must not stamp the
+/// questions its run asks afterwards.
+#[tokio::test]
+async fn a_question_asked_after_a_mid_run_demotion_is_not_person_only() {
+    let dir = tempfile::tempdir().unwrap();
+    write_captains_roster(dir.path(), true);
+    let (started_tx, mut started_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Notify::new());
+    let core = assemble(
+        dir.path(),
+        Arc::new(GatedAskHarness {
+            started: started_tx,
+            release: release.clone(),
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-demoted-mid-run",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    started_rx.recv().await.expect("the run started");
+    // Demoted while the run is in flight, before the harness asks.
+    write_captains_roster(dir.path(), false);
+    release.notify_one();
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    assert!(
+        !questions[0].requires_person,
+        "a Captain demoted mid-run is not stamped"
+    );
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-demoted",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+}
+
+/// The role gate the engine applies to a question asked in `CHAT`, for a
+/// roster file given verbatim. The question itself always arrives with
+/// `requires_person: false` — only the roster can make it person-only.
+async fn question_flag_for_roster(roster: &str) -> bool {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("captains.json"), roster).expect("captains.json");
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-roster",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    let (request_id, questions) = wait_for_input_questions(&core).await;
+    let flag = questions[0].requires_person;
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-close-roster",
+        SessionCommandPayload::RespondInput {
+            request_id,
+            answers: Vec::new(),
+            by: Some(zeron_proto::InputActor::Client),
+        },
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "closed unanswered",
+    )
+    .await;
+    core.shutdown().await;
+    flag
+}
+
+/// A demoted (archived) Captain is not live: its questions stay ordinary.
+#[tokio::test]
+async fn an_archived_captains_questions_are_not_person_only() {
+    let roster = r#"{"captains":[{"chatId":"chat-e2e","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":true,"crew":[]}]}"#;
+    assert!(
+        !question_flag_for_roster(roster).await,
+        "an archived Captain must not stamp its questions"
+    );
+}
+
+/// The role belongs to the Captain's own chat: a crew chat's questions are
+/// ordinary, even though its Captain is live.
+#[tokio::test]
+async fn a_crew_chats_questions_are_not_person_only() {
+    let roster = r#"{"captains":[{"chatId":"chat-cap","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["chat-e2e"]}]}"#;
+    assert!(
+        !question_flag_for_roster(roster).await,
+        "a crew chat must not stamp its questions"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Attachments (round 17): chunked upload → durable path → Run carrying both
 // the prompt-embedded refs (the persisted transport) and the staged paths.

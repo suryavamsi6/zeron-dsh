@@ -23,12 +23,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::{io::AsyncWriteExt, sync::mpsc};
 use zeron_proto::{
-    AccessMode, AgentEvent, DoneStatus, HarnessId, Model, ModelOption, ModelOptionChoice,
+    AccessMode, AgentEvent, DoneStatus, HarnessId, InputActor, Model, ModelOption, ModelOptionChoice,
     ReasoningLevel, RunRequest, SandboxLevel, SlashCommand, SteeringMode, UserInputQuestion,
 };
 
 use crate::{
-    Harness, HarnessError, ModelCatalog, ModelContext, RunControls,
+    Harness, HarnessError, InputResponse, ModelCatalog, ModelContext, RunControls,
     process::{Command, Stdio},
 };
 
@@ -753,17 +753,7 @@ async fn run_child(
                                 let response = (controls.request_input)(questions.clone());
                                 answers.push(Box::pin(async move {
                                     let response = response.await.unwrap_or_default();
-                                    if response.len() != questions.len() { return (id, json!({"cancelled":true})) }
-                                    let mut encoded = Vec::new();
-                                    for question in questions {
-                                        let Some(answer) = response.iter().find(|a| a.question_id == question.id) else { return (id, json!({"cancelled":true})) };
-                                        let selected: Vec<_> = answer.labels.iter().filter(|s| question.options.contains(s)).collect();
-                                        let custom = answer.labels.iter().filter(|s| !question.options.contains(s)).cloned().collect::<Vec<_>>().join("\n");
-                                        let mut answer = json!({"id":question.id,"selected":selected});
-                                        if !custom.is_empty() { answer["custom"] = custom.into(); }
-                                        encoded.push(answer);
-                                    }
-                                    (id, json!({"answers":encoded}))
+                                    (id, question_result(questions, response))
                                 }));
                             } else {
                                 write(&mut stdin, json!({"type":"answer","id":id,"result":{"cancelled":true}})).await?;
@@ -808,6 +798,38 @@ async fn run_child(
     stderr_task.abort();
     let _ = stderr_task.await;
     result
+}
+
+fn question_result(questions: Vec<UserInputQuestion>, response: InputResponse) -> Value {
+    let actor = serde_json::to_value(response.by.clone().unwrap_or(InputActor::Unattributed))
+        .unwrap_or_else(|_| json!({"kind":"unattributed"}));
+    if response.len() != questions.len() {
+        return json!({"cancelled":true, "by":actor});
+    }
+    let mut encoded = Vec::new();
+    for question in questions {
+        let Some(answer) = response.iter().find(|a| a.question_id == question.id) else {
+            return json!({"cancelled":true, "by":actor.clone()});
+        };
+        let selected: Vec<_> = answer
+            .labels
+            .iter()
+            .filter(|s| question.options.contains(s))
+            .collect();
+        let custom = answer
+            .labels
+            .iter()
+            .filter(|s| !question.options.contains(s))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut answer = json!({"id":question.id,"selected":selected});
+        if !custom.is_empty() {
+            answer["custom"] = custom.into();
+        }
+        encoded.push(answer);
+    }
+    json!({"answers":encoded, "by":actor})
 }
 
 fn host_questions(params: &Value) -> Result<Vec<UserInputQuestion>, HarnessError> {
