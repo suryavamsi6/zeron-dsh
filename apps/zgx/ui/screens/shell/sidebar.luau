@@ -941,12 +941,20 @@ local captain_names = ui.state("shell_captains_names", {} :: { [string]: string 
 -- the Captains in its project (the engine's own rule, said before it is
 -- broken). Stale by a menu's animation at worst: the roster is read as each
 -- menu opens, and the engine's refusal is what decides.)
+-- A mutation invalidates reads already in flight; one that finishes with a
+-- pre-mutation roster must not overwrite the role the mutation just saved.
+-- While a read is open another is queued, so the success path below does not
+-- depend on whether the first menu's read happened to settle in time.
+local captains_revision = 0
 local captains_reading = false
+local captains_reread = false
 local function read_captains()
 	if captains_reading then
+		captains_reread = true
 		return
 	end
 	captains_reading = true
+	local revision = captains_revision
 	local ok, promise = pcall(function(): any
 		return M.roster()
 	end)
@@ -956,6 +964,13 @@ local function read_captains()
 	end
 	promise:after(function(answer: any)
 		captains_reading = false
+		if revision ~= captains_revision then
+			if captains_reread then
+				captains_reread = false
+				read_captains()
+			end
+			return
+		end
 		local found: { [string]: boolean } = {}
 		local names: { [string]: string } = {}
 		local crews: { [string]: string } = {}
@@ -1011,11 +1026,24 @@ local function read_captains()
 				captain_asleep:set(asleep)
 			end
 		end)
+		if captains_reread then
+			captains_reread = false
+			read_captains()
+		end
 	end, function()
 		captains_reading = false
+		if captains_reread then
+			captains_reread = false
+			read_captains()
+		end
 	end)
 end
 M.read_captains = read_captains
+
+local function captains_changed()
+	captains_revision += 1
+	read_captains()
+end
 
 -- The Captains and their crews for the sidebar's own group (SUR-89): each
 -- Captain in the roster's order, its crew as the sessions the list draws (so
@@ -1924,14 +1952,14 @@ function M.archive_captain(id: string)
 	if not chat(id) then
 		return
 	end
-	local ok, failed = captain_settled(read_captains, "shell.sidebar.captains.archive_failed", id)
+	local ok, failed = captain_settled(captains_changed, "shell.sidebar.captains.archive_failed", id)
 	M.archive_captain_call(id):after(ok, failed)
 end
 
 function M.unarchive_captain(id: string)
 	-- (No live-chat guard: an asleep Captain's chat is archived, so `chat`
 	-- has nothing for it — and it is exactly the row this is asked from.)
-	local ok, failed = captain_settled(read_captains, "shell.sidebar.captains.unarchive_failed", id)
+	local ok, failed = captain_settled(captains_changed, "shell.sidebar.captains.unarchive_failed", id)
 	M.unarchive_captain_call(id):after(ok, failed)
 end
 
@@ -1969,7 +1997,7 @@ function M.move_crew(captain_id: string, chat_id: string)
 		return
 	end
 	promise:after(function()
-		read_captains()
+		captains_changed()
 	end, function(err: any)
 		crew_toast(locale.s("shell.sidebar.captains.move_failed", { name = captain_name_of(chat_id), captain = captain_name_of(captain_id) }), why_of(err))
 	end)
@@ -1988,7 +2016,7 @@ function M.release(chat_id: string)
 		return
 	end
 	promise:after(function()
-		read_captains()
+		captains_changed()
 	end, function(err: any)
 		crew_toast(locale.s("shell.sidebar.captains.remove_failed", { name = captain_name_of(chat_id) }), why_of(err))
 	end)
@@ -2004,10 +2032,10 @@ local function promote_dialog(): Node
 			return
 		end
 		M.promote_call(id, string.sub(name, 1, 200)):after(function(answer: any)
-			-- (The role is the engine's: read the roster back first, so the
-			-- menu offers Demote, then say what the bundle could not, if the
-			-- engine names it.)
-			read_captains()
+			-- (The role is the engine's: invalidate any roster read already
+			-- in flight and read the roster back first, so the menu offers
+			-- Demote, then say what the bundle could not, if the engine names it.)
+			captains_changed()
 			local warning = if type(answer) == "table" then answer.pluginError else nil
 			if type(warning) == "string" and warning ~= "" then
 				captains_toast(locale.s("shell.sidebar.captains.promoted_warning", { name = name }), warning)
@@ -2044,7 +2072,7 @@ local function demote_dialog(): Node
 			return
 		end
 		M.demote_call(id):after(function()
-			read_captains()
+			captains_changed()
 		end, function(err: any)
 			captains_toast(locale.s("shell.sidebar.captains.demote_failed", { name = captain_name_of(id) }), why_of(err))
 		end)
@@ -2070,7 +2098,7 @@ local function delete_captain_dialog(): Node
 		if not id then
 			return
 		end
-		M.delete_captain_call(id):after(read_captains, function(err: any)
+		M.delete_captain_call(id):after(captains_changed, function(err: any)
 			captains_toast(locale.s("shell.sidebar.captains.delete_failed", { name = captain_name_of(id) }), why_of(err))
 		end)
 	end

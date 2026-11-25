@@ -18,10 +18,22 @@ local roster = ui.shared("test_captains_roster", {} :: { [string]: string })
 local calls = ui.shared("test_captain_calls", "" :: string)
 local refuse = ui.shared("test_captains_refuse", false)
 local archived = ui.shared("test_captains_archived", {} :: { [string]: boolean })
+local hold_roster = ui.shared("test_captains_hold_roster", false)
+local release_roster = ui.shared("test_captains_release_roster", false)
 
--- Each call answered on the next tick, as the host's is.
+-- Each call answered on the next tick, as the host's is. A roster read can
+-- additionally be held open, so a test can put a promotion inside its
+-- in-flight window as a slower engine would.
 local due: { () -> () } = {}
+local held_roster: { () -> () } = {}
 ui.every(16, function()
+	if release_roster:peek() and #held_roster > 0 then
+		local now = held_roster
+		held_roster = {}
+		for _, settle in now do
+			settle()
+		end
+	end
 	if #due > 0 then
 		local now = due
 		due = {}
@@ -54,6 +66,19 @@ local function settle(value: any, err: string?): any
 	}
 end
 
+local function deferred(value: any): any
+	return {
+		await = function(_): any
+			return value
+		end,
+		after = function(_, ok: (any) -> (), _fail: ((any) -> ())?)
+			table.insert(held_roster, function()
+				ok(value)
+			end)
+		end,
+	}
+end
+
 local function note(what: string)
 	local now = calls:peek()
 	calls:set(if now == "" then what else `{now},{what}`)
@@ -66,7 +91,11 @@ sidebar.roster = function(): any
 		-- reads that row as no Captain at all.)
 		table.insert(captains, { chatId = chat, name = name, archived = archived:peek()[chat] == true, drivePath = `/drive/{chat}` })
 	end
-	return settle({ captains = captains })
+	local answer = { captains = captains }
+	if hold_roster:peek() and not release_roster:peek() then
+		return deferred(answer)
+	end
+	return settle(answer)
 end
 
 sidebar.promote_call = function(chat: string, name: string): any
