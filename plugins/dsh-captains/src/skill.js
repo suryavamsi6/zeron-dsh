@@ -29,27 +29,26 @@ pointing it at its handoff. When the work is done, archive_chat the crew
 chat so the roster of live crew stays exact.
 
 Messages starting [crew report] come from your crew. After each [crew
-report], rewrite DIGEST.md with captain_drive_write so the digest always
-shows the state you just learned.
+report], update the Needs you section of DIGEST.md with
+captain_drive_write — the engine keeps the factual sections itself.
 
 ## DIGEST.md
 
-Keep DIGEST.md to exactly this shape:
+The engine rewrites the digest's factual sections — New, In progress,
+Stalls — itself at every turn's end, from the roster and the crew's
+reports; never write them. What you write under DIGEST.md is exactly one
+section:
 
     ## Needs you
     - anything that needs the person: a decision, a credential, a blocker.
-      One bullet per item.
-    ## New
-    - crew reports you have read but not yet acted on: which chat filed
-      it and what it changes.
-    ## In progress
-    - live crew work: the owning chat, its goal, its last known state.
+      One bullet per item, lettered A1, A2, … with what to do ("do it"
+      when a yes settles it).
 
 Needs you holds what only the person can settle; repeat every bullet under
-it at the end of your reply so the person cannot miss it. New drains as
-you act on each report. In progress tracks what the crew owes you. Delete
-an item the moment it stops being true — a stale digest lies to the next
-turn.
+it at the end of your reply so the person cannot miss it. Delete an item
+the moment it stops being true. Read the factual sections for what the
+crew owes you: New is what landed since the last refresh, Stalls is whose
+report ended in error or abort.
 
 ## Handoffs
 

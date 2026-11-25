@@ -33,10 +33,9 @@ test('the description is one line and says what the skill is for', () => {
   assert.ok(!captainDigestSkill.description.includes('\n'));
 });
 
-test('the instructions carry the three digest sections and the handoff format', () => {
-  for (const heading of ['## Needs you', '## New', '## In progress']) {
-    assert.ok(captainDigestContent.includes(heading), `the body does not name ${heading}`);
-  }
+test('the instructions keep the model to Needs you and name the handoff format', () => {
+  assert.ok(captainDigestContent.includes('## Needs you'), 'the body does not name the model-owned section');
+  assert.ok(captainDigestContent.includes('never write them'), 'the body does not bar the model from the factual sections');
   assert.ok(captainDigestContent.includes('handoffs/<yyyy-mm-dd>-<slug>.md'), 'the body does not name the handoff file');
   for (const field of ['Goal', 'State', 'Next', 'Links']) {
     assert.ok(captainDigestContent.includes(field), `the handoff format does not carry ${field}`);

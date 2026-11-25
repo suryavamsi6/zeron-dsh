@@ -638,6 +638,197 @@ fn write_starter(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+// ── SUR-205: the digest's factual sections are the engine's, not the model's ──
+
+/// The freshness marker ending a synthesized digest: the RFC 3339 second
+/// the sections were written at, as an HTML comment so it never renders.
+/// The next refresh reads it back to decide which reports are new.
+const REFRESHED: &str = "<!-- refreshed ";
+
+/// One crew chat as the digest synthesis sees it: the roster id, the
+/// workspace row's title, and whether the row is live — present and not
+/// archived. A crew that is not live, or no longer on the roster at all,
+/// leaves the digest at the next refresh: an archived or released row
+/// never lingers because the model forgot to delete its bullet.
+pub struct DigestCrew {
+    pub chat_id: String,
+    pub title: String,
+    pub live: bool,
+}
+
+/// The facts one report file carries for the digest: the outcome word, the
+/// filing second and the body's first line.
+struct ReportFact {
+    word: String,
+    at: DateTime<Utc>,
+    first_line: String,
+}
+
+/// Parse `<drive>/reports/<chat_id>.md` — the file `crew_reports::write_report`
+/// writes. Absent, unreadable or headerless files are no fact at all; the
+/// digest never fails over one malformed report.
+fn report_fact(drive: &Path, chat_id: &str) -> Option<ReportFact> {
+    let path = crate::crew_reports::report_path(drive, chat_id)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut word = None;
+    let mut at = None;
+    for line in text.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if let Some(value) = line.strip_prefix("- Status: ") {
+            word = Some(value.trim().to_owned());
+        }
+        if let Some(value) = line.strip_prefix("- At: ") {
+            at = DateTime::parse_from_rfc3339(value.trim())
+                .ok()
+                .map(|parsed| parsed.with_timezone(&Utc));
+        }
+    }
+    let first_line = text
+        .split("\n\n")
+        .nth(1)
+        .and_then(|body| body.lines().next())
+        .unwrap_or_default()
+        .trim()
+        .chars()
+        .take(120)
+        .collect();
+    Some(ReportFact {
+        word: word?,
+        at: at?,
+        first_line,
+    })
+}
+
+/// The bullet one crew earns in whichever section lists it: its title (the
+/// short id when untitled), its short id, then its report's outcome — or
+/// that it has filed nothing yet.
+fn digest_bullet(crew: &DigestCrew, report: Option<&ReportFact>) -> String {
+    let short: String = crew.chat_id.chars().take(8).collect();
+    let title = if crew.title.is_empty() {
+        format!("crew {short}")
+    } else {
+        crew.title.clone()
+    };
+    match report {
+        None => format!("- {title} ({short}): no report yet"),
+        Some(report) if report.first_line.is_empty() => format!(
+            "- {title} ({short}): {} at {}",
+            report.word,
+            report.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        ),
+        Some(report) => format!(
+            "- {title} ({short}): {} at {} — {}",
+            report.word,
+            report.at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            report.first_line
+        ),
+    }
+}
+
+/// The `## Needs you` section of `digest` exactly as written, heading line
+/// included, or an empty string when the digest has none. Everything of the
+/// digest outside this section is the engine's: the synthesis rewrites the
+/// factual sections wholesale, so prose the model adds under them does not
+/// survive — only Needs you is the model's.
+fn needs_you_section(digest: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    let mut inside = false;
+    for line in digest.lines() {
+        if line.starts_with("## ") || line.starts_with(REFRESHED) {
+            if inside {
+                break;
+            }
+            inside = line.trim_end() == "## Needs you";
+        }
+        if inside {
+            kept.push(line);
+        }
+    }
+    while kept.last().is_some_and(|line| line.trim().is_empty()) {
+        kept.pop();
+    }
+    kept.join("\n")
+}
+
+/// The previous freshness timestamp of `digest`, for the New cutoff: a
+/// report is new when it was filed after the last synthesis.
+fn previous_refresh(digest: &str) -> Option<DateTime<Utc>> {
+    let start = digest.find(REFRESHED)? + REFRESHED.len();
+    let end = digest[start..].find(" -->")? + start;
+    DateTime::parse_from_rfc3339(digest[start..end].trim())
+        .ok()
+        .map(|parsed| parsed.with_timezone(&Utc))
+}
+
+/// Rewrite the factual sections of `<drive>/DIGEST.md` deterministically
+/// (SUR-205) — `## New`, `## In progress`, `## Stalls` and the freshness
+/// timestamp — from the crew facts the seam gathered and the reports on
+/// disk, preserving the model-written `## Needs you` intact. The write is
+/// atomic (temp file in the drive, then rename): the sections and their
+/// timestamp move as one, so a reader never sees a new timestamp over old
+/// bullets. Any section the model wrote outside `## Needs you` is replaced,
+/// which is the point: the factual sections cannot drift from what the
+/// roster, the rows and the reports actually say.
+///
+/// New holds reports filed since the previous synthesis; In progress the
+/// live crew whose latest report completed (or who filed nothing yet);
+/// Stalls the live crew whose latest report ended in error or abort. All
+/// three skip a crew that is not live or no longer on the roster.
+pub fn refresh_digest(
+    drive: &Path,
+    crew: &[DigestCrew],
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let path = drive.join("DIGEST.md");
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+    let since = previous_refresh(&existing);
+    let mut new_items: Vec<String> = Vec::new();
+    let mut in_progress: Vec<String> = Vec::new();
+    let mut stalls: Vec<String> = Vec::new();
+    for member in crew.iter().filter(|member| member.live) {
+        let report = report_fact(drive, &member.chat_id);
+        if let Some(fact) = report.as_ref()
+            && since.is_none_or(|cutoff| fact.at > cutoff)
+        {
+            new_items.push(digest_bullet(member, report.as_ref()));
+        }
+        match report.as_ref().map(|fact| fact.word.as_str()) {
+            Some("error") | Some("aborted") => stalls.push(digest_bullet(member, report.as_ref())),
+            _ => in_progress.push(digest_bullet(member, report.as_ref())),
+        }
+    }
+    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut out = needs_you_section(&existing);
+    out.push_str("\n\n## New\n");
+    for line in &new_items {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("\n## In progress\n");
+    for line in &in_progress {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str("\n## Stalls\n");
+    for line in &stalls {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("\n{REFRESHED}{stamp} -->\n"));
+    let mut temp = tempfile::NamedTempFile::new_in(drive)
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    temp.write_all(out.as_bytes())
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    temp.persist(&path)
+        .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
+    Ok(())
+}
+
 /// The environment override for the bundled Captains plugin's directory.
 pub const PLUGIN_DIR_ENV: &str = "ZERON_CAPTAINS_PLUGIN_DIR";
 
@@ -6556,5 +6747,267 @@ mod tests {
         assert!(outcomes[0].reason.contains("must not stamp VERSION"), "{}", outcomes[0].reason);
         assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
+    }
+
+    // ── SUR-205: helm_digest_, the deterministic factual sections ─────────
+
+    /// A drive seeded with `digest` as its DIGEST.md, in a tempdir that
+    /// outlives the test.
+    fn digest_drive(digest: &str) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path().join("drive");
+        std::fs::create_dir_all(&drive).unwrap();
+        std::fs::write(drive.join("DIGEST.md"), digest).unwrap();
+        (dir, drive)
+    }
+
+    /// A report file as `crew_reports::write_report` writes it.
+    fn seed_report(drive: &Path, chat_id: &str, word: &str, at: &str, body: &str) {
+        std::fs::create_dir_all(drive.join("reports")).unwrap();
+        std::fs::write(
+            drive.join("reports").join(format!("{chat_id}.md")),
+            format!("# Crew report: {chat_id}\n- Status: {word}\n- At: {at}\n\n{body}\n"),
+        )
+        .unwrap();
+    }
+
+    fn digest_crew(chat_id: &str, title: &str, live: bool) -> DigestCrew {
+        DigestCrew {
+            chat_id: chat_id.to_string(),
+            title: title.to_string(),
+            live,
+        }
+    }
+
+    /// The lines under one `##` heading of a digest, for assertions that do
+    /// not care about the order the bullets are written in.
+    fn section_lines<'a>(digest: &'a str, heading: &str) -> Vec<&'a str> {
+        let mut lines = Vec::new();
+        let mut inside = false;
+        for line in digest.lines() {
+            if line.starts_with("## ") {
+                if inside {
+                    break;
+                }
+                inside = line.trim_end() == heading;
+                continue;
+            }
+            if line.starts_with(REFRESHED) {
+                break;
+            }
+            if inside && !line.trim().is_empty() {
+                lines.push(line);
+            }
+        }
+        lines
+    }
+
+    #[test]
+    fn helm_digest_the_factual_sections_carry_what_the_reports_say() {
+        let (_dir, drive) = digest_drive("## Needs you\n- approve the deploy\n");
+        seed_report(
+            &drive,
+            "crew-b",
+            "completed",
+            "2026-11-25T10:00:00Z",
+            "Invoices reconciled.",
+        );
+        let at = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        refresh_digest(&drive, &[digest_crew("crew-b", "Billing", true)], at).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(
+            section_lines(&digest, "## Needs you"),
+            vec!["- approve the deploy"],
+            "the model's Needs you survives: {digest}"
+        );
+        assert_eq!(
+            section_lines(&digest, "## In progress"),
+            vec!["- Billing (crew-b): completed at 2026-11-25T10:00:00Z — Invoices reconciled."],
+            "the crew's report facts: {digest}"
+        );
+        assert_eq!(
+            section_lines(&digest, "## New"),
+            vec!["- Billing (crew-b): completed at 2026-11-25T10:00:00Z — Invoices reconciled."],
+            "a first refresh has no cutoff, so the report is new: {digest}"
+        );
+        assert!(
+            section_lines(&digest, "## Stalls").is_empty(),
+            "a completed report is no stall: {digest}"
+        );
+        assert!(
+            digest.contains("<!-- refreshed 2026-11-25T11:00:00Z -->"),
+            "the ISO freshness timestamp: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_archived_and_released_rows_disappear_immediately() {
+        let (_dir, drive) = digest_drive("## Needs you\n- keep\n");
+        seed_report(&drive, "crew-b", "completed", "2026-11-25T10:00:00Z", "done");
+        seed_report(&drive, "crew-c", "completed", "2026-11-25T10:00:00Z", "done");
+        let at = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // First pass: both live, both listed.
+        refresh_digest(
+            &drive,
+            &[digest_crew("crew-b", "Billing", true), digest_crew("crew-c", "Support", true)],
+            at,
+        )
+        .unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(section_lines(&digest, "## In progress").len(), 2, "{digest}");
+
+        // crew-b's row is archived (live: false) and crew-c left the roster
+        // entirely — the next refresh mentions neither.
+        refresh_digest(&drive, &[digest_crew("crew-b", "Billing", false)], at).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert!(
+            !digest.contains("Billing") && !digest.contains("Support"),
+            "archived and released rows leave every section: {digest}"
+        );
+        assert!(
+            section_lines(&digest, "## In progress").is_empty()
+                && section_lines(&digest, "## New").is_empty(),
+            "no factual bullets survive: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_needs_you_prose_is_preserved_intact_across_refreshes() {
+        let prose = "## Needs you\nA1. approve the deploy — do it\n- pick a name\n";
+        let (_dir, drive) = digest_drive(prose);
+        let at = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        for _ in 0..3 {
+            refresh_digest(&drive, &[], at).unwrap();
+        }
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(
+            section_lines(&digest, "## Needs you"),
+            vec!["A1. approve the deploy — do it", "- pick a name"],
+            "lettered prose survives every refresh verbatim: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_stalls_hold_the_error_and_aborted_reports() {
+        let (_dir, drive) = digest_drive("## Needs you\n");
+        seed_report(&drive, "crew-b", "error", "2026-11-25T10:00:00Z", "the build is red");
+        seed_report(&drive, "crew-c", "aborted", "2026-11-25T10:00:00Z", "stopped halfway");
+        seed_report(&drive, "crew-d", "completed", "2026-11-25T10:00:00Z", "fine");
+        let at = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        refresh_digest(
+            &drive,
+            &[
+                digest_crew("crew-b", "One", true),
+                digest_crew("crew-c", "Two", true),
+                digest_crew("crew-d", "Three", true),
+            ],
+            at,
+        )
+        .unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        let stalls = section_lines(&digest, "## Stalls");
+        assert_eq!(stalls.len(), 2, "{digest}");
+        assert!(stalls.iter().any(|line| line.contains("- One (")), "{digest}");
+        assert!(stalls.iter().any(|line| line.contains("- Two (")), "{digest}");
+        assert_eq!(
+            section_lines(&digest, "## In progress"),
+            vec!["- Three (crew-d): completed at 2026-11-25T10:00:00Z — fine"],
+            "a stalled crew leaves In progress: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_new_drains_once_the_refresh_that_listed_it_is_written() {
+        let (_dir, drive) = digest_drive("## Needs you\n");
+        seed_report(&drive, "crew-b", "completed", "2026-11-25T10:00:00Z", "done");
+        let first = DateTime::parse_from_rfc3339("2026-11-25T11:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let crew = [digest_crew("crew-b", "Billing", true)];
+        refresh_digest(&drive, &crew, first).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert_eq!(section_lines(&digest, "## New").len(), 1, "{digest}");
+
+        // The next refresh, after the filing: the report predates the
+        // previous synthesis, so New has drained.
+        let later = DateTime::parse_from_rfc3339("2026-11-25T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        refresh_digest(&drive, &crew, later).unwrap();
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).unwrap();
+        assert!(
+            section_lines(&digest, "## New").is_empty(),
+            "a report filed before the last refresh is no longer new: {digest}"
+        );
+        assert!(
+            digest.contains("<!-- refreshed 2026-11-25T12:00:00Z -->"),
+            "the freshness timestamp moved: {digest}"
+        );
+        assert_eq!(
+            section_lines(&digest, "## In progress").len(),
+            1,
+            "the crew itself stays listed: {digest}"
+        );
+    }
+
+    #[test]
+    fn helm_digest_the_write_is_atomic_under_concurrent_refreshes() {
+        let (_dir, drive) = digest_drive("## Needs you\n- keep\n");
+        seed_report(&drive, "crew-b", "completed", "2026-11-25T10:00:00Z", "done");
+        let drive = Arc::new(drive);
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut writers = Vec::new();
+        for index in 0..4 {
+            let drive = drive.clone();
+            writers.push(std::thread::spawn(move || {
+                for round in 0..50 {
+                    let at = Utc::now();
+                    refresh_digest(&drive, &[digest_crew("crew-b", "Billing", true)], at)
+                        .unwrap_or_else(|error| panic!("writer {index} round {round}: {error}"));
+                }
+            }));
+        }
+        let reader_drive = drive.clone();
+        let reader_stop = stop.clone();
+        let reader = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !reader_stop.load(Ordering::Relaxed) {
+                if let Ok(digest) = std::fs::read_to_string(reader_drive.join("DIGEST.md"))
+                    && !digest.is_empty()
+                    && digest != "## Needs you\n- keep\n"
+                {
+                    // Anything but the pristine seed is a synthesized digest,
+                    // and it is complete or the write was not atomic.
+                    assert!(
+                        digest.contains("## Needs you")
+                            && digest.contains("## New")
+                            && digest.contains("## Stalls")
+                            && digest.contains("<!-- refreshed "),
+                        "every read is a complete digest: {}",
+                        &digest[..digest.len().min(200)]
+                    );
+                }
+            }
+        });
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().unwrap();
+        // No temp file outlives the renames.
+        let leftovers: Vec<_> = std::fs::read_dir(drive.as_ref())
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "no temp files linger: {leftovers:?}");
     }
 }
