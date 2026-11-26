@@ -160,7 +160,13 @@ export function shipReadyReceipt(drive, args) {
     slug,
   };
   const rel = `state/ready/${crewId}.json`;
-  const { realTarget } = resolveInDrive(drive, rel);
+  const { realTarget, realDrive } = resolveInDrive(drive, rel);
+  // A symlinked state/ or state/ready/ must not carry the receipt into
+  // another engine-owned file: the resolved destination is checked the same
+  // way captain_drive_write checks it.
+  if (!isMergeReadyInput(path.relative(realDrive, realTarget).split(path.sep))) {
+    throw new Error(`'${rel}' does not resolve to the merge-queue receipt folder`);
+  }
   writeAtomic(realTarget, JSON.stringify(receipt, null, 2) + '\n');
   return receipt;
 }

@@ -326,3 +326,13 @@ test('captain_ship_ready refuses a checkout that is not the reviewed commit', as
   t.after(() => { delete process.env.DSH_PERMISSION_MODE; });
   await assert.rejects(ship.execute(shipArgs(repo)), /read-only/);
 });
+
+test('captain_ship_ready refuses a receipt path redirected into engine state', async t => {
+  const root = await drive(t);
+  const repo = await crewCheckout(t);
+  await mkdir(join(root, 'state', 'merge-queue', 'results'), { recursive: true });
+  await symlink(join(root, 'state', 'merge-queue', 'results'), join(root, 'state', 'ready'));
+  const { ship } = tools(root);
+  await assert.rejects(ship.execute(shipArgs(repo)), /merge-queue receipt folder/);
+  assert.deepEqual(await readdir(join(root, 'state', 'merge-queue', 'results')), []);
+});
