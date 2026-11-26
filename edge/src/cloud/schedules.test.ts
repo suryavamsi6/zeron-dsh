@@ -33,6 +33,13 @@ describe("parseRrule/nextAfter (parity with crates/engine/src/schedules.rs)", ()
     expect(() => parseRrule("DTSTART;TZID=America/New_York:20260101T090000\nRRULE:FREQ=DAILY")).toThrow(/named zones/);
   });
 
+  it("impossible dates are refused, not rolled into a different day", () => {
+    // 2027 is not a leap year: Date.UTC would roll this to March 1 and
+    // silently move the whole schedule.
+    expect(() => parseRrule("DTSTART:20270229T090000Z\nRRULE:FREQ=DAILY")).toThrow(/not a real date-time/);
+    expect(() => parseRrule("DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;UNTIL=20260230T090000Z")).toThrow(/not a real date-time/);
+  });
+
   it("COUNT and UNTIL end the rule", () => {
     const count = "DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY;COUNT=3";
     expect(next(count, "2026-01-03T08:00:00Z")).toBe("2026-01-03T09:00:00Z");

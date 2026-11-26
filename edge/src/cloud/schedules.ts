@@ -47,7 +47,18 @@ const parseNaive = (value: string, what: string): number => {
   if (!m) throw new Error(`${what} must be YYYYMMDDTHHMMSS`);
   const [, y, mo, d, h, mi, s] = m;
   // Wall time represented as if UTC: all period math happens in this frame.
-  return Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
+  // Date.UTC rolls impossible dates forward (2027-02-29 → Mar 1), silently
+  // moving the whole schedule — round-trip the components and refuse instead,
+  // as chrono's strict parse does in the engine's copy of this subset.
+  const ms = Date.UTC(+y, +mo - 1, +d, +h, +mi, +s);
+  const back = new Date(ms);
+  if (
+    back.getUTCFullYear() !== +y || back.getUTCMonth() !== +mo - 1 || back.getUTCDate() !== +d ||
+    back.getUTCHours() !== +h || back.getUTCMinutes() !== +mi || back.getUTCSeconds() !== +s
+  ) {
+    throw new Error(`${what} is not a real date-time`);
+  }
+  return ms;
 };
 
 const wallParts = (
