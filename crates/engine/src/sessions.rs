@@ -1630,8 +1630,41 @@ impl SessionsEngine {
         // problem now (`session/load` falls back to `session/new` internally),
         // and starting the retry fresh silently dropped a good conversation.
         // An id the provider has rejected is skipped wherever it comes from.
+        //
+        // SUR-208: a Helm Captain whose session has spent the context ceiling
+        // rolls over instead — no resume, so the harness opens a fresh SDK
+        // session, and the prompt opens with the rollover bootstrap pointing
+        // at the Drive that carries the continuity. The growth is priced out
+        // of the scorecard, so the check survives an engine restart; the
+        // marker written here rebases it, so exactly one dispatch per ceiling
+        // rolls over.
+        let mut rollover = false;
+        if harness_id == HarnessId::DeepSeek {
+            let stamp = request
+                .env
+                .get(CAPTAINS_ENV)
+                .and_then(|stamp| serde_json::from_str::<serde_json::Value>(stamp).ok());
+            if let Some(stamp) = stamp
+                && stamp["role"].as_str() == Some("captain")
+                && let Some(drive) = stamp["driveRoot"].as_str().filter(|drive| !drive.is_empty())
+            {
+                let drive = std::path::PathBuf::from(drive);
+                if let Some(cumulative) = crate::captains::rollover_due(
+                    &drive,
+                    chat_id,
+                    crate::captains::HELM_CONTEXT_CEILING_TOKENS,
+                ) {
+                    rollover = true;
+                    let name = stamp["captainName"].as_str().unwrap_or("Captain");
+                    request.prompt =
+                        format!("{}{}", crate::captains::rollover_bootstrap(name, &drive), request.prompt);
+                    crate::captains::mark_rollover(&drive, cumulative);
+                    tracing::info!(chat = %chat_id, cumulative, "captain context rollover: fresh session");
+                }
+            }
+        }
         let mut resume_injected = false;
-        if request.resume.is_none() {
+        if request.resume.is_none() && !rollover {
             let live = |id: &String| !self.inner.resume_was_rejected(chat_id, id);
             request.resume = self
                 .inner
@@ -9429,6 +9462,142 @@ mod tests {
             "the new row parses: {}",
             lines[1]
         );
+    }
+
+    // ── SUR-208: the Helm context rollover ──────────────────────────
+
+    /// A Captain engine wired with the Capture harness, so the test reads
+    /// the exact request a dispatch hands the harness.
+    fn rollover_engine(
+        dir: &std::path::Path,
+    ) -> (SessionsEngine, std::path::PathBuf, Arc<Mutex<Option<RunRequest>>>) {
+        use super::*;
+        let seen = Arc::new(Mutex::new(None));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(CaptureHarness { seen: seen.clone() }));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), NEEDS_YOU_REGISTRY).expect("registry");
+        let home = dir.join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.join("journals")).expect("journal")),
+            Arc::new(registry),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.join("docs")).expect("store"));
+        sessions.set_doc_host(DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::DeepSeek,
+                edge: None,
+            },
+        ));
+        (sessions, crate::captains::drive_dir(&home, "cap-a"), seen)
+    }
+
+    fn rollover_score_row(drive: &std::path::Path, turn: &str, tokens_in: u64) {
+        crate::captains::append_scorecard_entry(
+            drive,
+            &crate::captains::ScorecardEntry {
+                chat_id: "cap-a".into(),
+                role: "captain".into(),
+                turn_id: turn.into(),
+                tokens_in,
+                tokens_cached: None,
+                tokens_out: 10,
+                cost_usd: None,
+                duration_s: 1,
+                outcome: "completed".into(),
+            },
+        )
+        .expect("row");
+    }
+
+    /// The acceptance pin: a Captain whose session crossed the input-token
+    /// ceiling is dispatched with no resume — the harness opens a fresh SDK
+    /// session — and the prompt opens with the rollover bootstrap, while the
+    /// chat, the Drive and the marker stay exactly where they were.
+    #[tokio::test]
+    async fn helm_rollover_a_captain_past_the_ceiling_starts_a_fresh_session() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, drive, seen) = rollover_engine(dir.path());
+        rollover_score_row(&drive, "t1", 150_000);
+        rollover_score_row(&drive, "t2", 120_000);
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let captured = seen.lock().unwrap().clone().expect("the harness ran");
+        assert!(captured.resume.is_none(), "a rolled-over session resumes nothing: {:?}", captured.resume);
+        assert!(
+            captured.prompt.starts_with("[context rollover]"),
+            "the prompt opens with the bootstrap: {}",
+            &captured.prompt[..captured.prompt.len().min(120)]
+        );
+        assert!(captured.prompt.contains("AGENTS.md") && captured.prompt.contains("NOTES.md"));
+        // The same Zeron chat and Drive throughout: the stamp still names
+        // cap-a's drive, and the rollover marker recorded the rebase point.
+        assert!(drive.join("state").join(crate::captains::ROLLOVER_FILE).exists());
+        let baseline = std::fs::read_to_string(drive.join("state").join(crate::captains::ROLLOVER_FILE)).unwrap();
+        assert!(baseline.contains("270000"), "the marker holds the rollover cumulative: {baseline}");
+        sessions.shutdown().await;
+    }
+
+    /// And its complement: under the ceiling the same dispatch carries no
+    /// bootstrap and writes no marker — the resume machinery is untouched.
+    #[tokio::test]
+    async fn helm_rollover_a_captain_under_the_ceiling_dispatches_untouched() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, drive, seen) = rollover_engine(dir.path());
+        rollover_score_row(&drive, "t1", 100_000);
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let captured = seen.lock().unwrap().clone().expect("the harness ran");
+        assert!(!captured.prompt.starts_with("[context rollover]"));
+        assert!(!drive.join("state").join(crate::captains::ROLLOVER_FILE).exists());
+        sessions.shutdown().await;
+    }
+
+    /// The ceiling is per crew member, not per drive: a crew chat's spend
+    /// does not roll the Captain over, and a crew turn never rolls over at
+    /// all — a crew chat is short-lived by construction.
+    #[tokio::test]
+    async fn helm_rollover_a_crews_spend_does_not_roll_the_captain_over() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, drive, seen) = rollover_engine(dir.path());
+        crate::captains::append_scorecard_entry(
+            &drive,
+            &crate::captains::ScorecardEntry {
+                chat_id: "crew-b".into(),
+                role: "crew".into(),
+                turn_id: "t1".into(),
+                tokens_in: 900_000,
+                tokens_cached: None,
+                tokens_out: 10,
+                cost_usd: None,
+                duration_s: 1,
+                outcome: "completed".into(),
+            },
+        )
+        .expect("row");
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let captured = seen.lock().unwrap().clone().expect("the harness ran");
+        assert!(!captured.prompt.starts_with("[context rollover]"));
+        sessions.shutdown().await;
     }
 
     /// The presence pin (SUR-197): every other case drives `turn_end_writes`

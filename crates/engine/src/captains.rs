@@ -2505,6 +2505,85 @@ pub fn append_scorecard_entry(drive: &Path, entry: &ScorecardEntry) -> Result<bo
     Ok(true)
 }
 
+// ── Helm context rollover (SUR-208) ────────────────────────────────────────
+//
+// A long-lived Captain's SDK session grows without bound — gstack recorded
+// one parent Captain at 1.36B tokens. The scorecard already writes every
+// turn's input spend to the Drive, so the engine can price the session's
+// growth durably: when the input tokens accumulated since the last rollover
+// cross the ceiling, the next dispatch starts a fresh SDK session and the
+// Drive — AGENTS.md, NOTES.md and the digest — carries the continuity.
+
+/// The input-token ceiling one Helm session may accumulate before it rolls
+/// over. 250k is the issue's number: past it, a resumed turn prices more
+/// cache than a fresh one re-reads.
+pub const HELM_CONTEXT_CEILING_TOKENS: u64 = 250_000;
+
+/// `state/rollover.json` — one object, `{"cumulativeInputAt": N}`, written
+/// when the rollover dispatch happens so growth is measured from there.
+pub const ROLLOVER_FILE: &str = "rollover.json";
+
+/// The input tokens this chat's turns have ever spent, summed out of the
+/// scorecard — durable across engine restarts, which an in-memory counter
+/// would not survive. A missing or partial row is no spend.
+pub fn cumulative_input_tokens(drive: &Path, chat_id: &str) -> u64 {
+    let Ok(raw) = std::fs::read_to_string(drive.join("state").join(SCORECARD_FILE)) else {
+        return 0;
+    };
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<ScorecardEntry>(line).ok())
+        .filter(|row| row.chat_id == chat_id)
+        .map(|row| row.tokens_in)
+        .sum()
+}
+
+fn rollover_baseline(drive: &Path) -> u64 {
+    std::fs::read_to_string(drive.join("state").join(ROLLOVER_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["cumulativeInputAt"].as_u64())
+        .unwrap_or(0)
+}
+
+/// The chat's cumulative input spend when a rollover is due — the growth
+/// since the last rollover has reached `ceiling` — or `None` while the
+/// session is still cheap to resume.
+pub fn rollover_due(drive: &Path, chat_id: &str, ceiling: u64) -> Option<u64> {
+    let cumulative = cumulative_input_tokens(drive, chat_id);
+    (cumulative.saturating_sub(rollover_baseline(drive)) >= ceiling).then_some(cumulative)
+}
+
+/// Record that the rollover dispatch happened at this cumulative spend.
+/// Written best-effort: a lost write only means the next dispatch measures
+/// growth from the older baseline and rolls over slightly early.
+pub fn mark_rollover(drive: &Path, cumulative: u64) {
+    let state = drive.join("state");
+    if let Err(error) = std::fs::create_dir_all(&state) {
+        tracing::warn!(error = %error, "rollover state dir failed");
+        return;
+    }
+    let body = format!("{{\"cumulativeInputAt\":{cumulative}}}\n");
+    if let Err(error) = std::fs::write(state.join(ROLLOVER_FILE), body) {
+        tracing::warn!(error = %error, "rollover marker write failed");
+    }
+}
+
+/// The bootstrap a rolled-over session opens with (SUR-208): it is the same
+/// Captain with a fresh context, and the Drive is its memory. Deliberately
+/// explicit about reading before acting — a fresh session that answers from
+/// the message alone has quietly lost the crew's state.
+pub fn rollover_bootstrap(captain_name: &str, drive: &Path) -> String {
+    format!(
+        "[context rollover] You are {captain_name}, the same Captain, continuing after a \
+         context-token rollover: your previous session grew past the ceiling and this one \
+         starts fresh. Your memory is your Drive at {} — before replying, read AGENTS.md, \
+         NOTES.md and DIGEST.md with captain_drive_read; they carry your rules, your plan \
+         and the state of every crew. Do not tell the person you lost anything: nothing is \
+         lost, the Drive is the record. The person's message follows.\n\n",
+        drive.display()
+    )
+}
+
 // ── local merge queue (SUR-209) ────────────────────────────────────────────
 //
 // A Captain marks crew work landable by writing `state/ready/<crewId>.json`
@@ -7093,5 +7172,73 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "no temp files linger: {leftovers:?}");
+    }
+    // ── SUR-208: the Helm context rollover ──────────────────────────
+
+    fn score_row(drive: &Path, chat: &str, turn: &str, tokens_in: u64) {
+        append_scorecard_entry(
+            drive,
+            &ScorecardEntry {
+                chat_id: chat.into(),
+                role: "captain".into(),
+                turn_id: turn.into(),
+                tokens_in,
+                tokens_cached: None,
+                tokens_out: 10,
+                cost_usd: None,
+                duration_s: 1,
+                outcome: "completed".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn helm_rollover_the_cumulative_spend_sums_the_chats_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 100_000);
+        score_row(drive, "cap-a", "t2", 60_000);
+        score_row(drive, "crew-b", "t3", 999_999);
+        assert_eq!(cumulative_input_tokens(drive, "cap-a"), 160_000, "only the Captain's own rows count");
+    }
+
+    #[test]
+    fn helm_rollover_due_only_past_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 100_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), None, "under the ceiling the session resumes");
+        score_row(drive, "cap-a", "t2", 160_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), Some(260_000));
+    }
+
+    /// The marker is the rebase point: after a rollover at 260k, another
+    /// 100k of growth is under the ceiling again, and reaching the ceiling
+    /// once more rolls over exactly once more.
+    #[test]
+    fn helm_rollover_the_marker_rebases_the_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 260_000);
+        mark_rollover(drive, 260_000);
+        score_row(drive, "cap-a", "t2", 100_000);
+        assert_eq!(
+            rollover_due(drive, "cap-a", 250_000),
+            None,
+            "growth since the rollover is 100k, under the ceiling"
+        );
+        score_row(drive, "cap-a", "t3", 160_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), Some(520_000));
+    }
+
+    #[test]
+    fn helm_rollover_the_bootstrap_names_the_drive_and_the_reads() {
+        let text = rollover_bootstrap("Ada", Path::new("/home/u/captains/cap-a"));
+        assert!(text.contains("Ada"));
+        assert!(text.contains("/home/u/captains/cap-a"));
+        for read in ["AGENTS.md", "NOTES.md", "DIGEST.md"] {
+            assert!(text.contains(read), "the bootstrap points at {read}");
+        }
     }
 }
