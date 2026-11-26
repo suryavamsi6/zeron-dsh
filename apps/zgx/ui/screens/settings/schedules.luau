@@ -321,17 +321,22 @@ local function build_rrule(f: Fields, device: number): (string?, string?)
 	return `{dtstart}\nRRULE:{body}`, nil
 end
 
--- Where a save runs the prompt, `run_in` the editor's pick. An existing
--- session-targeted task keeps the chat it names; a new one uses the chat
--- open now. A `new`/`new_once` target keeps the
+-- Where a save runs the prompt, `run_in` the editor's pick. "This chat"
+-- is the chat open now — one edited while no chat is open keeps the one
+-- it names. A `new`/`new_once` target keeps the
 -- chat the engine recorded for it (`session`) and the folder it works
 -- in (`cwd`, else the open chat's or project's).
 local function target_for(run_in: string, existing: any): ({ [string]: any }?, string?)
 	if run_in == "session" then
 		local open = route.session:peek()
-		local id = if existing and type(existing.target) == "table" and type(existing.target.session) == "string" then existing.target.session
-			elseif open then open.id
+		local id = if open then open.id
+			elseif existing and type(existing.target) == "table" then existing.target.session
 			else nil
+		-- Edge ownership is fixed at creation, so an edge row never retargets
+		-- to whichever chat happens to be open behind Settings.
+		if existing and existing.origin == "edge" and type(existing.target) == "table" and type(existing.target.session) == "string" then
+			id = existing.target.session
+		end
 		if type(id) ~= "string" then
 			return nil, "run_in"
 		end
