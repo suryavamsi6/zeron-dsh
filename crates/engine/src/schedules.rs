@@ -1446,6 +1446,13 @@ mod tests {
             !deliver.pending(session, &row).unwrap(),
             "a wake turn after the answer is not the row's turn"
         );
+        core.sessions.seed_completed(session, "silent-turn");
+        core.sessions
+            .seed_status(session, zeron_proto::SessionStatus::Working);
+        assert!(
+            !deliver.pending(session, &row).unwrap(),
+            "a turn that completed without output answered it too"
+        );
         // A demoted Captain owes no wake: the next occurrence ends the task.
         core.captains.demote(session).expect("Captain demotes");
         assert!(!deliver.pending(session, &row).unwrap());

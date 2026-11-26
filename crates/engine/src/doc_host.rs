@@ -4700,9 +4700,9 @@ impl DocHost {
 
     /// Whether queued row `row` still owes `chat_id` its turn: waiting in the
     /// queue, or already the chat's latest user message (a dispatched row
-    /// keeps its id) while a turn runs that has not yet completed an answer
-    /// to it — a wake turn after the answer does not count; a recovered turn
-    /// that never finished does. Turn state is live (the host's fresh
+    /// keeps its id) while a turn runs and no turn has completed since it —
+    /// a wake turn after the answer does not count; a recovered turn that
+    /// never finished does. Turn state is live (the host's fresh
     /// session row when another device hosts the chat), so after a restart
     /// a dispatched row owes nothing.
     pub fn queued_row_pending(&self, chat_id: &str, row: &str) -> Result<bool, EngineError> {
@@ -4723,8 +4723,11 @@ impl DocHost {
         if entries[at].id != row {
             return Ok(false);
         }
+        // Answered unless the last completed turn is one from before the row
+        // (a silent turn leaves no entry, so one not found counts as after):
+        // when unsure, deliver rather than suppress.
         let answered = session.last_completed_turn.as_deref().is_some_and(|turn| {
-            entries[at + 1..]
+            !entries[..at]
                 .iter()
                 .any(|entry| entry.id == turn || entry.continuation_of.as_deref() == Some(turn))
         });
