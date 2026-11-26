@@ -243,23 +243,34 @@ pub async fn drain_wakeups(
     let wakeups = edge.pull_wakeups().await?;
     let mut landed = 0;
     for wakeup in wakeups {
-        // Idempotency: a crash after the doc write but before the ack is the
-        // one replay case, and the edge's retries re-send the same row. An
-        // identical prompt already waiting in the queue makes this one a
-        // no-op rather than a duplicate.
+        // Idempotency: the fire id is the row's durable identity. It becomes
+        // the queued row id, and promotion keeps that id on the user message,
+        // so both sides of a crash-before-ack replay are detectable. Prompt
+        // text is deliberately not a key: two schedules may share one.
         let already = doc_host
             .open(&wakeup.chat_id)
             .and_then(|handle| {
-                handle
+                let queued = handle
                     .doc()
                     .read_queue()
-                    .map_err(|err| EngineError::Other(err.to_string()))
+                    .map_err(|err| EngineError::Other(err.to_string()))?
+                    .iter()
+                    .any(|row| row.id == wakeup.fire_id);
+                let dispatched = handle
+                    .doc()
+                    .read_entries()
+                    .map_err(|err| EngineError::Other(err.to_string()))?
+                    .iter()
+                    .any(|row| row.id == wakeup.fire_id);
+                Ok::<bool, EngineError>(queued || dispatched)
             })
-            .map(|queue| queue.iter().any(|row| row.text == wakeup.prompt))
             .unwrap_or(false);
         if !already {
-            doc_host.queue_message(&wakeup.chat_id, &wakeup.prompt, Vec::new())?;
+            doc_host.queue_message_with_id(&wakeup.chat_id, &wakeup.prompt, &wakeup.fire_id)?;
         }
+        // Ack only after the queue write is in the store, not merely in the
+        // in-memory doc whose debounced snapshot may not have run yet.
+        doc_host.flush_write(&wakeup.chat_id)?;
         edge.ack_wakeup(&wakeup.fire_id).await?;
         landed += 1;
     }
@@ -288,4 +299,99 @@ pub fn spawn_wakeup_drain(
             tokio::time::sleep(REPOLL_EVERY).await;
         }
     })
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::doc_host::{DocHost, DocHostConfig};
+    use zeron_proto::HarnessId;
+    use zeron_rpc::StaticToken;
+    use zeron_sync::DocsStore;
+
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn edge_server(wakeups: &str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let wakeups = wakeups.to_string();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                let needed = loop {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break None;
+                    }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(head) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                        let text = String::from_utf8_lossy(&request[..head]);
+                        let len = text
+                            .lines()
+                            .find_map(|line| line.strip_prefix("content-length:").or_else(|| line.strip_prefix("Content-Length:")))
+                            .and_then(|line| line.trim().parse::<usize>().ok())
+                            .unwrap_or(0);
+                        if request.len() >= head + 4 + len {
+                            break Some(());
+                        }
+                    }
+                };
+                if needed.is_none() {
+                    continue;
+                }
+                let path = String::from_utf8_lossy(&request)
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap_or("")
+                    .to_string();
+                let body = if path == "/runner/wakeups" {
+                    wakeups.clone()
+                } else {
+                    "{\"acked\":true}".to_string()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .unwrap();
+            }
+        });
+        url
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wakeups_dedupe_by_fire_id_not_prompt_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(DocsStore::open(dir.path()).unwrap());
+        let host = DocHost::new(
+            store,
+            DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::Mock,
+                edge: None,
+            },
+        );
+        host.open_local("chat").unwrap();
+        let url = edge_server(
+            r#"{"wakeups":[
+                {"fire_id":"fire-1","schedule_id":"one","chat_id":"chat","occurrence_at":1,"prompt":"same prompt"},
+                {"fire_id":"fire-2","schedule_id":"two","chat_id":"chat","occurrence_at":2,"prompt":"same prompt"}
+            ]}"#,
+        );
+        let edge = EdgeSchedules::new(&url, "org", "chat", Arc::new(StaticToken("token".into())));
+        assert_eq!(drain_wakeups(&host, &edge).await.unwrap(), 2);
+        // A replay of the same rows acks again but does not queue duplicates.
+        assert_eq!(drain_wakeups(&host, &edge).await.unwrap(), 2);
+        let queue = host.open("chat").unwrap().doc().read_queue().unwrap();
+        assert_eq!(queue.len(), 2);
+        assert_eq!(queue[0].id, "fire-1");
+        assert_eq!(queue[1].id, "fire-2");
+        assert_eq!(queue[0].text, queue[1].text);
+    }
 }
