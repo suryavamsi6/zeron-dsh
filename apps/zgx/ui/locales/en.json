@@ -1871,7 +1871,7 @@
     "schedules": {
       "title": "Automation tasks",
       "terms": "automation tasks schedule schedules scheduled cron recurring reminders jobs timers routine automate",
-      "description": "Prompts run on a schedule, on this device — in a chat you pick, or a new one.",
+      "description": "Prompts run on a schedule — locally on this device, or at the edge for a cloud Captain. Local tasks fire only while this app is running; the latest missed run fires once when it starts again.",
       "tasks": "Tasks",
       "tasks_terms": "list scheduled tasks prompts",
       "new": "New task",
@@ -1941,6 +1941,10 @@
         "hourly": "Every {n, plural, one {hour} other {# hours}}",
         "minutely": "Every {n, plural, one {minute} other {# minutes}}",
         "custom": "Custom schedule"
+      },
+      "origin": {
+        "local": "On this device",
+        "edge": "At the edge"
       }
     },
     "projects": {

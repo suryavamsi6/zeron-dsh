@@ -261,8 +261,9 @@ local function plugin_run(over: any): any
 end
 
 -- The engine's scheduled tasks (crates/engine/src/schedules.rs), epoch
--- ms as it keeps them: one active daily in the chat open, one paused
--- weekly making a new chat once (its `session` the one it made).
+-- ms as it keeps them: one active daily in the chat open (no `origin`,
+-- the local shape), one paused edge-owned weekly making a new chat once
+-- (its `session` the one it made).
 local TASK_NOW = math.floor(os.time() * 1000)
 local task_store: { any } = {
 	{
@@ -282,6 +283,7 @@ local task_store: { any } = {
 		prompt = "Write the week's notes.",
 		rrule = "DTSTART:20261102T073000Z\nRRULE:FREQ=WEEKLY;BYDAY=MO;BYHOUR=7;BYMINUTE=30",
 		target = { kind = "new_once", cwd = "/work/atlas", session = "a2" },
+		origin = "edge",
 		active = false,
 		nextAt = nil,
 		lastRunAt = TASK_NOW - 7 * 86400 * 1000,
