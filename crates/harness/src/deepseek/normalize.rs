@@ -135,13 +135,18 @@ impl Normalizer {
                             .as_u64()
                             .unwrap_or(0)
                             .saturating_add(usage["cacheWriteTokens"].as_u64().unwrap_or(0));
+                        // Presence, not truthiness: a provider answering zero
+                        // cache use IS an answer — dropping it would read as
+                        // "not broken out" downstream.
+                        let cache_known = usage.get("cacheReadTokens").is_some()
+                            || usage.get("cacheWriteTokens").is_some();
                         let input = input
                             .saturating_add(usage["cacheReadTokens"].as_u64().unwrap_or(0))
                             .saturating_add(usage["cacheWriteTokens"].as_u64().unwrap_or(0));
                         result.push(AgentEvent::Usage {
                             input_tokens: input,
                             output_tokens: output,
-                            cached_input_tokens: (cached > 0).then_some(cached),
+                            cached_input_tokens: cache_known.then_some(cached),
                         });
                         result.push(AgentEvent::ContextUsage {
                             tokens: Some(input),
@@ -332,6 +337,32 @@ mod tests {
         assert!(matches!(&events[1], AgentEvent::TextDelta { text } if text == "a"));
         assert!(matches!(&events[2], AgentEvent::TextDelta { text } if text == "b"));
         assert!(normalizer.notification(&frame).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reported_zero_cache_use_is_an_answer_not_a_gap() {
+        let frame = |usage: Value| {
+            json!({"method":"session.event","params":{"sessionId":"root","event":{"type":"assistant/message","data":{"message":{"id":"m","content":[{"type":"text","text":"hi"}]},"usage":usage}}}})
+        };
+        // Zero cache reads/writes, reported: the cached share is known-zero,
+        // not missing.
+        let mut normalizer = Normalizer::new("root".into());
+        let events = normalizer
+            .notification(&frame(json!({"inputTokens":10,"outputTokens":2,"cacheReadTokens":0})))
+            .unwrap();
+        assert!(matches!(
+            events.iter().find(|e| matches!(e, AgentEvent::Usage { .. })),
+            Some(AgentEvent::Usage { cached_input_tokens: Some(0), .. })
+        ));
+        // No cache keys at all: unknown stays unknown.
+        let mut plain = Normalizer::new("root".into());
+        let events = plain
+            .notification(&frame(json!({"inputTokens":10,"outputTokens":2})))
+            .unwrap();
+        assert!(matches!(
+            events.iter().find(|e| matches!(e, AgentEvent::Usage { .. })),
+            Some(AgentEvent::Usage { cached_input_tokens: None, .. })
+        ));
     }
 
     fn tool_call(name: &str, arguments: Value) -> ToolCall {
