@@ -851,8 +851,30 @@ pub fn refresh_digest(
     temp.as_file()
         .sync_all()
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.persist(&path)
-        .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
+    // On Windows the rename cannot land while any reader holds DIGEST.md
+    // open (no delete sharing), so a polling reader — the UI, an editor —
+    // would otherwise fail the turn-end write outright. The collision is
+    // momentary: retry briefly before giving up.
+    let mut temp = Some(temp);
+    let mut attempt = 0;
+    loop {
+        let file = temp.take().expect("the temp file is consumed once");
+        match file.persist(&path) {
+            Ok(_) => break,
+            Err(error) => {
+                attempt += 1;
+                if attempt >= 20 {
+                    return Err(format!(
+                        "cannot write {}: {}",
+                        path.display(),
+                        error.error
+                    ));
+                }
+                temp = Some(error.file);
+                std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
+            }
+        }
+    }
     // The sidecar follows the digest, never leads it: a crash between the
     // two re-lists a report as new — noise — rather than losing it from
     // New before it was ever listed. Best effort: a failed sidecar write
