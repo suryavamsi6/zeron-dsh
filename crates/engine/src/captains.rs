@@ -798,61 +798,83 @@ pub fn refresh_digest(
 ) -> Result<(), String> {
     let _serialization = REFRESH_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let path = drive.join("DIGEST.md");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    // The cutoff is the engine-owned sidecar first: the model rewrites
-    // DIGEST.md whole, and a write that drops the freshness comment must
-    // not resurrect every report as new. The comment is the fallback for
-    // a drive whose state directory is gone.
-    let since = std::fs::read_to_string(drive.join("state").join(CUTOFF_FILE))
-        .ok()
-        .and_then(|text| {
-            DateTime::parse_from_rfc3339(text.trim())
-                .ok()
-                .map(|parsed| parsed.with_timezone(&Utc))
-        })
-        .or_else(|| previous_refresh(&existing));
-    let mut new_items: Vec<String> = Vec::new();
-    let mut in_progress: Vec<String> = Vec::new();
-    let mut stalls: Vec<String> = Vec::new();
-    for member in crew.iter().filter(|member| member.live) {
-        let report = report_fact(drive, &member.chat_id);
-        if let Some(fact) = report.as_ref()
-            && since.is_none_or(|cutoff| fact.at > cutoff)
-        {
-            new_items.push(digest_bullet(member, report.as_ref()));
+    // On Windows the rename cannot land while any reader holds DIGEST.md
+    // open (no delete sharing), so a polling reader — the UI, an editor —
+    // would otherwise fail the turn-end write outright. The collision is
+    // momentary: retry briefly before giving up. Every attempt rebuilds
+    // the digest from a fresh read: a captain_drive_write landing during
+    // the backoff carries a newer `## Needs you`, and persisting a digest
+    // built from the stale read would silently revert it.
+    let mut attempt = 0;
+    let stamp = loop {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        // The cutoff is the engine-owned sidecar first: the model rewrites
+        // DIGEST.md whole, and a write that drops the freshness comment must
+        // not resurrect every report as new. The comment is the fallback for
+        // a drive whose state directory is gone.
+        let since = std::fs::read_to_string(drive.join("state").join(CUTOFF_FILE))
+            .ok()
+            .and_then(|text| {
+                DateTime::parse_from_rfc3339(text.trim())
+                    .ok()
+                    .map(|parsed| parsed.with_timezone(&Utc))
+            })
+            .or_else(|| previous_refresh(&existing));
+        let mut new_items: Vec<String> = Vec::new();
+        let mut in_progress: Vec<String> = Vec::new();
+        let mut stalls: Vec<String> = Vec::new();
+        for member in crew.iter().filter(|member| member.live) {
+            let report = report_fact(drive, &member.chat_id);
+            if let Some(fact) = report.as_ref()
+                && since.is_none_or(|cutoff| fact.at > cutoff)
+            {
+                new_items.push(digest_bullet(member, report.as_ref()));
+            }
+            match report.as_ref().map(|fact| fact.word.as_str()) {
+                Some("error") | Some("aborted") => stalls.push(digest_bullet(member, report.as_ref())),
+                _ => in_progress.push(digest_bullet(member, report.as_ref())),
+            }
         }
-        match report.as_ref().map(|fact| fact.word.as_str()) {
-            Some("error") | Some("aborted") => stalls.push(digest_bullet(member, report.as_ref())),
-            _ => in_progress.push(digest_bullet(member, report.as_ref())),
+        let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut out = needs_you_section(&existing);
+        out.push_str("\n\n## New\n");
+        for line in &new_items {
+            out.push_str(line);
+            out.push('\n');
         }
-    }
-    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut out = needs_you_section(&existing);
-    out.push_str("\n\n## New\n");
-    for line in &new_items {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\n## In progress\n");
-    for line in &in_progress {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\n## Stalls\n");
-    for line in &stalls {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(&format!("\n{REFRESHED}{stamp} -->\n"));
-    let mut temp = tempfile::NamedTempFile::new_in(drive)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.write_all(out.as_bytes())
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.persist(&path)
-        .map_err(|error| format!("cannot write {}: {}", path.display(), error.error))?;
+        out.push_str("\n## In progress\n");
+        for line in &in_progress {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("\n## Stalls\n");
+        for line in &stalls {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!("\n{REFRESHED}{stamp} -->\n"));
+        let mut temp = tempfile::NamedTempFile::new_in(drive)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        temp.write_all(out.as_bytes())
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        temp.as_file()
+            .sync_all()
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        match temp.persist(&path) {
+            Ok(_) => break stamp,
+            Err(error) => {
+                attempt += 1;
+                if attempt >= 20 {
+                    return Err(format!(
+                        "cannot write {}: {}",
+                        path.display(),
+                        error.error
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
+            }
+        }
+    };
     // The sidecar follows the digest, never leads it: a crash between the
     // two re-lists a report as new — noise — rather than losing it from
     // New before it was ever listed. Best effort: a failed sidecar write
@@ -2503,6 +2525,85 @@ pub fn append_scorecard_entry(drive: &Path, entry: &ScorecardEntry) -> Result<bo
     file.write_all(line.as_bytes())
         .map_err(|e| format!("scorecard write: {e}"))?;
     Ok(true)
+}
+
+// ── Helm context rollover (SUR-208) ────────────────────────────────────────
+//
+// A long-lived Captain's SDK session grows without bound — gstack recorded
+// one parent Captain at 1.36B tokens. The scorecard already writes every
+// turn's input spend to the Drive, so the engine can price the session's
+// growth durably: when the input tokens accumulated since the last rollover
+// cross the ceiling, the next dispatch starts a fresh SDK session and the
+// Drive — AGENTS.md, NOTES.md and the digest — carries the continuity.
+
+/// The input-token ceiling one Helm session may accumulate before it rolls
+/// over. 250k is the issue's number: past it, a resumed turn prices more
+/// cache than a fresh one re-reads.
+pub const HELM_CONTEXT_CEILING_TOKENS: u64 = 250_000;
+
+/// `state/rollover.json` — one object, `{"cumulativeInputAt": N}`, written
+/// when the rollover dispatch happens so growth is measured from there.
+pub const ROLLOVER_FILE: &str = "rollover.json";
+
+/// The input tokens this chat's turns have ever spent, summed out of the
+/// scorecard — durable across engine restarts, which an in-memory counter
+/// would not survive. A missing or partial row is no spend.
+pub fn cumulative_input_tokens(drive: &Path, chat_id: &str) -> u64 {
+    let Ok(raw) = std::fs::read_to_string(drive.join("state").join(SCORECARD_FILE)) else {
+        return 0;
+    };
+    raw.lines()
+        .filter_map(|line| serde_json::from_str::<ScorecardEntry>(line).ok())
+        .filter(|row| row.chat_id == chat_id)
+        .map(|row| row.tokens_in)
+        .sum()
+}
+
+fn rollover_baseline(drive: &Path) -> u64 {
+    std::fs::read_to_string(drive.join("state").join(ROLLOVER_FILE))
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .and_then(|value| value["cumulativeInputAt"].as_u64())
+        .unwrap_or(0)
+}
+
+/// The chat's cumulative input spend when a rollover is due — the growth
+/// since the last rollover has reached `ceiling` — or `None` while the
+/// session is still cheap to resume.
+pub fn rollover_due(drive: &Path, chat_id: &str, ceiling: u64) -> Option<u64> {
+    let cumulative = cumulative_input_tokens(drive, chat_id);
+    (cumulative.saturating_sub(rollover_baseline(drive)) >= ceiling).then_some(cumulative)
+}
+
+/// Record that the rollover dispatch happened at this cumulative spend.
+/// Written best-effort: a lost write only means the next dispatch measures
+/// growth from the older baseline and rolls over slightly early.
+pub fn mark_rollover(drive: &Path, cumulative: u64) {
+    let state = drive.join("state");
+    if let Err(error) = std::fs::create_dir_all(&state) {
+        tracing::warn!(error = %error, "rollover state dir failed");
+        return;
+    }
+    let body = format!("{{\"cumulativeInputAt\":{cumulative}}}\n");
+    if let Err(error) = std::fs::write(state.join(ROLLOVER_FILE), body) {
+        tracing::warn!(error = %error, "rollover marker write failed");
+    }
+}
+
+/// The bootstrap a rolled-over session opens with (SUR-208): it is the same
+/// Captain with a fresh context, and the Drive is its memory. Deliberately
+/// explicit about reading before acting — a fresh session that answers from
+/// the message alone has quietly lost the crew's state.
+pub fn rollover_bootstrap(captain_name: &str, drive: &Path) -> String {
+    format!(
+        "[context rollover] You are {captain_name}, the same Captain, continuing after a \
+         context-token rollover: your previous session grew past the ceiling and this one \
+         starts fresh. Your memory is your Drive at {} — before replying, read AGENTS.md, \
+         NOTES.md and DIGEST.md with captain_drive_read; they carry your rules, your plan \
+         and the state of every crew. Do not tell the person you lost anything: nothing is \
+         lost, the Drive is the record. The person's message follows.\n\n",
+        drive.display()
+    )
 }
 
 // ── local merge queue (SUR-209) ────────────────────────────────────────────
@@ -7367,5 +7468,73 @@ mod tests {
             .filter(|entry| entry.file_name().to_string_lossy().starts_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "no temp files linger: {leftovers:?}");
+    }
+    // ── SUR-208: the Helm context rollover ──────────────────────────
+
+    fn score_row(drive: &Path, chat: &str, turn: &str, tokens_in: u64) {
+        append_scorecard_entry(
+            drive,
+            &ScorecardEntry {
+                chat_id: chat.into(),
+                role: "captain".into(),
+                turn_id: turn.into(),
+                tokens_in,
+                tokens_cached: None,
+                tokens_out: 10,
+                cost_usd: None,
+                duration_s: 1,
+                outcome: "completed".into(),
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn helm_rollover_the_cumulative_spend_sums_the_chats_own_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 100_000);
+        score_row(drive, "cap-a", "t2", 60_000);
+        score_row(drive, "crew-b", "t3", 999_999);
+        assert_eq!(cumulative_input_tokens(drive, "cap-a"), 160_000, "only the Captain's own rows count");
+    }
+
+    #[test]
+    fn helm_rollover_due_only_past_the_ceiling() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 100_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), None, "under the ceiling the session resumes");
+        score_row(drive, "cap-a", "t2", 160_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), Some(260_000));
+    }
+
+    /// The marker is the rebase point: after a rollover at 260k, another
+    /// 100k of growth is under the ceiling again, and reaching the ceiling
+    /// once more rolls over exactly once more.
+    #[test]
+    fn helm_rollover_the_marker_rebases_the_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let drive = dir.path();
+        score_row(drive, "cap-a", "t1", 260_000);
+        mark_rollover(drive, 260_000);
+        score_row(drive, "cap-a", "t2", 100_000);
+        assert_eq!(
+            rollover_due(drive, "cap-a", 250_000),
+            None,
+            "growth since the rollover is 100k, under the ceiling"
+        );
+        score_row(drive, "cap-a", "t3", 160_000);
+        assert_eq!(rollover_due(drive, "cap-a", 250_000), Some(520_000));
+    }
+
+    #[test]
+    fn helm_rollover_the_bootstrap_names_the_drive_and_the_reads() {
+        let text = rollover_bootstrap("Ada", Path::new("/home/u/captains/cap-a"));
+        assert!(text.contains("Ada"));
+        assert!(text.contains("/home/u/captains/cap-a"));
+        for read in ["AGENTS.md", "NOTES.md", "DIGEST.md"] {
+            assert!(text.contains(read), "the bootstrap points at {read}");
+        }
     }
 }
