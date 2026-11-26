@@ -33,6 +33,10 @@ export const runnerRefusal = (auth: Verified, method: string, url: URL): string 
     if (sessions && parts.length === 3 && method === "POST") return undefined;
     if (sessions && parts.length === 4 && method === "DELETE") return undefined;
     if (sessions && parts.length === 5 && method === "POST" && (parts[4] === "wake" || parts[4] === "sleep")) return undefined;
+    // Edge-owned Captain schedules on the chat its machine hosts (SUR-268):
+    // the CloudAccount re-checks every mutation is for its own chat.
+    if (sessions && parts.length === 5 && parts[4] === "schedules" && (method === "GET" || method === "POST")) return undefined;
+    if (sessions && parts.length === 6 && parts[4] === "schedules" && method === "DELETE") return undefined;
     return "runner tokens cannot manage the account";
   }
   if (LEGACY_ROOTS.has(root)) return "runner tokens cannot use the legacy rooms";
