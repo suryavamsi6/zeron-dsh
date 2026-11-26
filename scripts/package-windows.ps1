@@ -121,6 +121,15 @@ try {
         $env:ZERON_BETA_VERSION = $ZgxVersion
         Push-Location (Join-Path $root 'apps/zgx')
         try {
+            # ort-sys' copy-dylibs step fs::copy's the runtime's dlls into
+            # target/release/{examples,deps} when symlinking them fails (no
+            # developer mode), and the copy panics when the directory does not
+            # exist yet. In a cache-cold build nothing has made them at that
+            # point, so make them first; cargo fills them as it links.
+            foreach ($dir in @('target/release/examples', 'target/release/deps',
+                               'target/release/build/examples', 'target/release/build/deps')) {
+                New-Item -ItemType Directory -Force -Path $dir | Out-Null
+            }
             cargo build --release --locked --features beta --manifest-path Cargo.toml --target-dir target
         } finally { Pop-Location }
         if ($LASTEXITCODE -ne 0) { throw 'Windows build failed' }
