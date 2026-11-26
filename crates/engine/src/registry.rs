@@ -849,9 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn production_catalog_is_deepseek_only_and_rejects_legacy() {
+    fn production_catalog_is_deepseek_and_devin_and_rejects_legacy() {
         let registry = full_registry();
         assert!(registry.is_registered(HarnessId::DeepSeek));
+        assert!(registry.is_registered(HarnessId::Devin));
         for slug in ["codex", "claude-code", "cursor", "pi", "opencode", "grok", "muse", "acp.gemini"] {
             let id = HarnessId::from_slug(slug).unwrap();
             assert!(!registry.is_registered(id));
@@ -860,6 +861,7 @@ mod tests {
         }
         assert!(registry.descriptors().iter().all(|descriptor|
             descriptor.id == HarnessId::DeepSeek
+                || descriptor.id == HarnessId::Devin
                 || (descriptor.id == HarnessId::Mock && HarnessId::Mock.can_run())));
     }
 
