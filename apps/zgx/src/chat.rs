@@ -1773,7 +1773,7 @@ impl Chats {
             .filter(|h| {
                 let id = h["id"].as_str().unwrap_or_default();
                 if id == "mock" { return mock && cfg!(debug_assertions); }
-                if id != "deepseek" { return false; }
+                if !crate::agents::runnable(id) { return false; }
                 h["installed"].as_bool() != Some(false) && h["enabled"].as_bool() != Some(false)
             })
             .cloned()
@@ -3053,7 +3053,8 @@ impl View {
         }
         let config = merged_config(&chat["config"], &req);
         let harness = config["harness"].as_str();
-        if harness != Some("deepseek") && !(harness == Some("mock") && cfg!(debug_assertions) && std::env::var("ZERON_ZGX_MOCK").as_deref() == Ok("1")) {
+        let mock = harness == Some("mock") && cfg!(debug_assertions) && std::env::var("ZERON_ZGX_MOCK").as_deref() == Ok("1");
+        if !mock && !harness.is_some_and(crate::agents::runnable) {
             return Err("unsupported");
         }
         // A new chat shows the agent and model it's sent with at once, not
@@ -3555,7 +3556,7 @@ impl View {
         let id = args.field("id").map(text).unwrap_or_default();
         let chat = chats.chat(&id).ok_or("missing")?;
         let config = merged_config(&chats.shown_config(&id, &chat), &args);
-        if config["harness"].as_str() != Some("deepseek") { return Err("unsupported"); }
+        if !config["harness"].as_str().is_some_and(crate::agents::runnable) { return Err("unsupported"); }
         // Shown at once; the engine's word follows.
         if let Some(c) = chats.chats.borrow_mut().get_mut(&id) {
             c["config"] = config.clone();
@@ -7098,7 +7099,7 @@ fn waiting_value(items: &[Json]) -> Value {
 /// device, still offers only those it can run).
 fn offered(h: &Json, device: &str) -> bool {
     let session_machine = device.starts_with("cloud-");
-    h["id"].as_str() == Some("deepseek")
+    h["id"].as_str().is_some_and(crate::agents::runnable)
         && h["installed"].as_bool() != Some(false)
         && (session_machine || h["enabled"].as_bool() != Some(false))
 }
@@ -7674,6 +7675,24 @@ mod tests {
     /// has it): its sender knows it as it was made, its parent's agent and
     /// folder, never a config with no agent (which the engine refuses as
     /// bad params: the user's "Your message didn't send", Nov 2).
+    #[test]
+    fn devin_is_an_offered_and_sendable_agent() {
+        // The composer's gates admit the harnesses zeron runs, not DeepSeek
+        // alone: Devin installed+enabled is offered, and both gates' ids
+        // pass `runnable`.
+        assert!(crate::agents::runnable("devin"));
+        assert!(crate::agents::runnable("deepseek"));
+        assert!(!crate::agents::runnable("codex"));
+        let devin = serde_json::json!({ "id": "devin", "installed": true, "enabled": true });
+        assert!(super::offered(&devin, "local"));
+        let disabled = serde_json::json!({ "id": "devin", "installed": true, "enabled": false });
+        assert!(!super::offered(&disabled, "local"));
+        let uninstalled = serde_json::json!({ "id": "devin", "installed": false, "enabled": true });
+        assert!(!super::offered(&uninstalled, "local"));
+        let legacy = serde_json::json!({ "id": "codex", "installed": true, "enabled": true });
+        assert!(!super::offered(&legacy, "local"));
+    }
+
     #[test]
     fn a_gateway_model_keeps_the_route_it_is_served_from() {
         let model = serde_json::json!({

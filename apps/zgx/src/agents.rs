@@ -154,6 +154,12 @@ struct SignIn {
     methods: Vec<Json>,
 }
 
+/// Whether a harness id is one zeron runs chats with. Mock is a dev rig
+/// gated at its own call sites; everything legacy stays unlisted.
+pub(crate) fn runnable(id: &str) -> bool {
+    matches!(id, "deepseek" | "devin")
+}
+
 struct Agents {
     shared: RefCell<Vec<Shared>>,
     look: Cell<Look>,
@@ -746,7 +752,7 @@ impl Agents {
             .harnesses
             .borrow()
             .iter()
-            .filter(|h| h["id"].as_str() == Some("deepseek"))
+            .filter(|h| h["id"].as_str().is_some_and(runnable))
             .map(|h| {
                 let id = h["id"].as_str().unwrap_or_default();
                 let rows: Vec<Value> = accounts

@@ -548,7 +548,11 @@ impl HarnessRegistry {
         if !self.slots().contains_key(&id) {
             return Err(format!("unknown harness {id:?}"));
         }
-        if on && !auto_enabled(id) {
+        // Mock is a test rig the dev build opts in through `COMET_HARNESS`,
+        // never a Settings toggle; every other registered harness a user may
+        // switch on here even when detection alone would not (Devin is
+        // opt-in: enabling it points real chats at an external paid service).
+        if on && id == HarnessId::Mock {
             return Err(format!("{id:?} cannot be enabled from Settings"));
         }
         if on && !self.installed_for(id) {
