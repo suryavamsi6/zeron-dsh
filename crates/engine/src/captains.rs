@@ -2645,13 +2645,18 @@ mod tests {
         let home = Path::new("/deepseek-home");
         let mut registry = Registry::default();
         registry.promote("chat-1", "ada").unwrap();
+        let worktree = if cfg!(windows) {
+            "C:/worktrees/chat-2"
+        } else {
+            "/worktrees/chat-2"
+        };
         registry
             .add_crew_with_metadata(
                 "chat-1",
                 "chat-2",
                 CrewMeta {
                     owns: vec!["src/**".into(), "docs/*.md".into()],
-                    worktree: Some("/worktrees/chat-2".into()),
+                    worktree: Some(worktree.into()),
                 },
             )
             .unwrap();
@@ -2659,7 +2664,7 @@ mod tests {
         let stamp: serde_json::Value =
             serde_json::from_str(&captains_env(&registry, home, "chat-2").unwrap()).unwrap();
         assert_eq!(stamp["owns"], serde_json::json!(["src/**", "docs/*.md"]));
-        assert_eq!(stamp["worktree"], "/worktrees/chat-2");
+        assert_eq!(stamp["worktree"], worktree);
 
         let encoded = serde_json::to_string_pretty(&registry).unwrap();
         let loaded: Registry = serde_json::from_str(&encoded).unwrap();
