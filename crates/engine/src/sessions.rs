@@ -9327,6 +9327,61 @@ mod tests {
         );
     }
 
+    /// The presence pin (SUR-197): every other case drives `turn_end_writes`
+    /// by hand, so deleting the wire inside `drive_run`'s Done arm left the
+    /// suite green. Here a real dispatched run is fed to its Done, and the
+    /// snapshot must land — the wire is the only path that can write it.
+    #[tokio::test]
+    async fn a_run_driven_to_done_records_the_captains_needs_you_file() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (feed, rx) = mpsc::unbounded_channel();
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), NEEDS_YOU_REGISTRY).expect("registry");
+        let home = dir.path().join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).expect("journal")),
+            Arc::new(registry),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        let store = Arc::new(
+            zeron_sync::DocsStore::open(dir.path().join("docs")).expect("store"),
+        );
+        sessions.set_doc_host(DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::DeepSeek,
+                edge: None,
+            },
+        ));
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        feed.send(started()).expect("started");
+        feed.send(text("done!")).expect("text");
+        feed.send(done(DoneStatus::Completed)).expect("done");
+        let path = drive.join("state").join(crate::needs_you::FILE);
+        assert!(
+            wait_for(&path).await,
+            "the run's own Done finalization writes the snapshot: {}",
+            path.display()
+        );
+        let stored: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(stored["items"], serde_json::json!(["approve the deploy"]));
+        sessions.shutdown().await;
+    }
+
     #[tokio::test]
     async fn an_errored_captain_turn_keeps_the_last_good_list() {
         let dir = tempfile::tempdir().expect("tempdir");
