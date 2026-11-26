@@ -250,7 +250,12 @@ export function driveToolSpecs(cfg) {
           slug,
         };
         const rel = `state/ready/${crewId}.json`;
-        const { realTarget } = resolveInDrive(drive, rel);
+        const { realTarget, realDrive } = resolveInDrive(drive, rel);
+        // A symlinked state/ready must not redirect the receipt into another
+        // engine-owned file such as a merge result.
+        if (!isMergeReadyInput(path.relative(realDrive, realTarget).split(path.sep))) {
+          throw new Error(`'${rel}' resolves outside state/ready; the engine owns that path`);
+        }
         const dir = path.dirname(realTarget);
         fs.mkdirSync(dir, { recursive: true });
         const content = JSON.stringify(receipt, null, 2) + '\n';

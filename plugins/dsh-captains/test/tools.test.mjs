@@ -300,6 +300,20 @@ test('captain_ship_ready writes a receipt whose git fields come from the worktre
   assert.equal(receipt.pr, 100);
 });
 
+test('captain_ship_ready refuses a state/ready symlinked into engine-owned state', async t => {
+  const root = await drive(t);
+  const { dir, git } = await gitRepo(t);
+  const head = git(['rev-parse', 'HEAD']);
+  const results = join(root, 'state', 'merge-queue', 'results');
+  await mkdir(results, { recursive: true });
+  await symlink(results, join(root, 'state', 'ready'), 'dir');
+  await assert.rejects(shipReady(root).execute({
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: head,
+    baseSha: head, gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+  }), /resolves outside state\/ready/);
+  assert.deepEqual(await readdir(results), [], 'no forged merge result was written');
+});
+
 test('captain_ship_ready refuses a base that is not an ancestor of the tip', async t => {
   const root = await drive(t);
   const { dir, git } = await gitRepo(t);
