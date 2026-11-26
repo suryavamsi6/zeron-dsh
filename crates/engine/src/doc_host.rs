@@ -4700,23 +4700,49 @@ impl DocHost {
 
     /// Whether queued row `row` still owes `chat_id` its turn: waiting in the
     /// queue, or already the chat's latest user message (a dispatched row
-    /// keeps its id) while that turn is in flight. Turn state is this
-    /// engine's live view, so after a restart a dispatched row owes nothing.
+    /// keeps its id) answered by the turn running now — one that started
+    /// with it, not a later wake turn with no user message of its own. Turn
+    /// state is live (the host's session row when another device hosts the
+    /// chat), so after a restart a dispatched row owes nothing.
     pub fn queued_row_pending(&self, chat_id: &str, row: &str) -> Result<bool, EngineError> {
+        /// How far a turn's start may trail its user message's stamp.
+        const TURN_START_SLACK_MS: i64 = 5_000;
         let handle = self.open(chat_id)?;
         if handle.doc.read_queue()?.iter().any(|item| item.id == row) {
             return Ok(true);
         }
-        if !self.sessions().is_some_and(|s| s.turn_in_flight(chat_id)) {
+        let Some(started) = self.running_turn_started_ms(chat_id) else {
             return Ok(false);
-        }
+        };
         Ok(handle
             .doc
             .read_entries_shared()?
             .iter()
             .rev()
             .find(|entry| entry.role == MessageRole::User)
-            .is_some_and(|entry| entry.id == row))
+            .is_some_and(|entry| entry.id == row && started <= entry.created_at + TURN_START_SLACK_MS))
+    }
+
+    /// When the turn `chat_id` is running started (epoch ms), wherever the
+    /// chat is hosted: this engine's status, or the host device's session row.
+    fn running_turn_started_ms(&self, chat_id: &str) -> Option<i64> {
+        if self.is_host(chat_id) {
+            return self.sessions()?.turn_started_ms(chat_id);
+        }
+        self.workspace()?
+            .watch_session_rows()
+            .borrow()
+            .iter()
+            .filter(|session| {
+                session.chat_id == chat_id
+                    && matches!(
+                        session.status,
+                        zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+                    )
+            })
+            .filter_map(|session| session.started_at)
+            .map(|started| started.timestamp_millis())
+            .max()
     }
 
     /// Retype a queued message. Empty text deletes the row — emptying the box
