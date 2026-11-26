@@ -1061,6 +1061,18 @@ local function agents_of(target: string?): any
 					},
 				},
 			},
+			{
+				id = "devin",
+				name = "Devin",
+				mark = "devin",
+				installed = true,
+				can_install = true,
+				enabled = false,
+				version = "3000.6.14",
+				installing = false,
+				login = "idle",
+				accounts = {},
+			},
 		},
 	}
 end

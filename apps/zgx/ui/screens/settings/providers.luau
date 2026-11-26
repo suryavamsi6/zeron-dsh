@@ -60,7 +60,37 @@ local NAMES: { [string]: string } = {
 	opencode = "OpenCode Zen",
 	["opencode-go"] = "OpenCode Go",
 	mistral = "Mistral Vibe",
+	together = "Together AI",
+	["vercel-ai-gateway"] = "Vercel AI Gateway",
+	xiaomi = "Xiaomi",
+	zai = "Z.ai",
+	["zai-coding-cn"] = "Z.ai Coding CN",
+	qwen = "Qwen",
+	radius = "Radius",
+	baseten = "Baseten",
+	cerebras = "Cerebras",
+	fireworks = "Fireworks AI",
 }
+
+local function display_name(id: string, given: string?): string
+	if NAMES[id] then
+		return NAMES[id]
+	end
+	if given and given ~= id then
+		return given
+	end
+	local words = string.gsub(id, "[_-]+", " ")
+	local out = {}
+	for word in string.gmatch(words, "%S+") do
+		local lower = string.lower(word)
+		if lower == "ai" or lower == "api" or lower == "cn" or lower == "ams" or lower == "sgp" then
+			table.insert(out, string.upper(lower))
+		else
+			table.insert(out, string.upper(string.sub(lower, 1, 1)) .. string.sub(lower, 2))
+		end
+	end
+	return table.concat(out, " ")
+end
 
 -- Provider SVGs have white source ink; AgentMark's `src` path tints them
 -- with the theme's foreground on its quiet tile.
@@ -69,8 +99,15 @@ local MARKS: { [string]: string } = {
 	openrouter = "provider-openrouter", google = "provider-gemini",
 	gemini = "provider-gemini", xai = "provider-xai",
 	deepseek = "provider-deepseek", ["deepseek-official"] = "provider-deepseek",
-	mistral = "registry/mistral-vibe", ["kimi-coding"] = "registry/kimi",
-	["qwen-code"] = "registry/qwen-code",
+	mistral = "provider-mistral", ["kimi-coding"] = "provider-kimi",
+	["qwen-code"] = "provider-qwen", qwen = "provider-qwen",
+	["vercel-ai-gateway"] = "provider-vercel", xiaomi = "provider-xiaomi",
+}
+local GROUP_MARKS: { [string]: string } = {
+	["xiaomi-token-plan-ams"] = "provider-xiaomi",
+	["xiaomi-token-plan-cn"] = "provider-xiaomi",
+	["xiaomi-token-plan-sgp"] = "provider-xiaomi",
+	["qwen-token-plan-individual-cn"] = "provider-qwen",
 }
 -- Two products, one env name: pi-ai's catalog gives OpenCode Zen and OpenCode
 -- Go the same `OPENCODE_API_KEY`, but a Zen key is not a Go key. Zen gets a
@@ -91,7 +128,7 @@ local function route_of(entry: any): any?
 		and (entry.account == true or entry.auth == "account" or string.find(id, "deepseek") ~= nil)
 	return {
 		id = id,
-		name = NAMES[id] or (if type(entry.displayName) == "string" then entry.displayName else id),
+		name = display_name(id, if type(entry.displayName) == "string" then entry.displayName else nil),
 		settings_ns = entry.settingsNs,
 		key_ref = REFS[id] or (if type(env) == "string" then env elseif type(entry.apiKeyEnv) == "string" then entry.apiKeyEnv else nil),
 		chatgpt = chatgpt,
@@ -511,7 +548,7 @@ local function chatgpt_row(item: any, remote: () -> boolean): Node
 		}),
 		ui.show(function(): boolean return phase:get() ~= "signed_in" end, ds.Settings.Row {
 			compact = true,
-			label = function(): string return if #accounts:get() > 0 or phase:get() == "signed_in" then ui.t("settings.providers.accounts.add"):get() else ui.t("settings.providers.routes.sign_in.line"):get() end,
+			label = function(): string return if #accounts:get() > 0 or phase:get() == "signed_in" then ui.t("settings.providers.accounts.add"):get() else ui.t("settings.providers.routes.sign_in.line", { name = item.name }):get() end,
 			lead = route_lead("plus"), detail = function(): string? return note:get() or account_note:get() end,
 			control = ui.row {
 				gap = "$space.2", items = "center",
@@ -521,7 +558,7 @@ local function chatgpt_row(item: any, remote: () -> boolean): Node
 						return if phase:get() == "waiting" or phase:get() == "cancelling" then ui.t("settings.providers.routes.sign_in.cancel"):get()
 							elseif #accounts:get() > 0 or phase:get() == "signed_in" then ui.t("settings.providers.accounts.add"):get()
 							elseif tried:get() then ui.t("settings.providers.routes.sign_in.try_again"):get()
-							else ui.t("settings.providers.routes.sign_in.start"):get()
+							else ui.t("settings.providers.routes.sign_in.start", { name = item.name }):get()
 					end,
 					tone = "secondary", size = "sm", busy = function(): boolean return phase:get() == "starting" or phase:get() == "cancelling" end,
 					disabled = function(): boolean return remote() or busy:get() or ((phase:get() == "signed_in" or item.id == "openai-codex") and not accounts_loaded:get()) or phase:get() == "starting" or phase:get() == "cancelling" end,
@@ -756,7 +793,7 @@ oauth_row = function(item: any, remote: () -> boolean, on_authorized: () -> ()):
 					compact = true,
 					label = function(): string
 						return if #accounts:get() > 0 then ui.t("settings.providers.accounts.add"):get()
-							else ui.t("settings.providers.routes.sign_in.line"):get()
+							else ui.t("settings.providers.routes.sign_in.line", { name = item.name }):get()
 					end,
 					lead = route_lead("plus"),
 					detail = function(): string?
@@ -774,6 +811,58 @@ oauth_row = function(item: any, remote: () -> boolean, on_authorized: () -> ()):
 				},
 				ui.show(function(): boolean return prompt:get() ~= nil end, ui.row { w_full = true, pl = ui.raw(44, "authorization prompt indent"), prompt_control() }),
 			}
+	end)()
+end
+
+-- Devin is a Zeron harness rather than a DSH model route, so it is not in
+-- the gateway's configurable-provider catalog. Its card is synthetic here:
+-- it reflects the Devin CLI/harness state and enables the installed harness;
+-- sign-in itself stays the CLI's own browser flow (`devin auth login`).
+local function devin_row(remote: () -> boolean): Node
+	return ui.component(function(): Node
+		local busy = ui.use_state(false)
+		local function agent_of(): any?
+			for _, agent in agents.now:get().list or {} do
+				if agent.id == "devin" then
+					return agent
+				end
+			end
+			return nil
+		end
+		local function enable()
+			if remote() or busy:peek() then
+				return
+			end
+			busy:set(true)
+			agents.set_enabled("devin", true)
+			ui.sleep(300):after(function()
+				busy:set(false)
+				agents.load()
+			end)
+		end
+		return ds.Settings.Row {
+			compact = true,
+			label = "Devin CLI",
+			lead = route_lead("user-rounded"),
+			description = function(): string
+				local agent = agent_of()
+				if not agent or not agent.installed then
+					return "Install the Devin CLI, then sign in with `devin auth login` in a terminal."
+				end
+				if agent.enabled then
+					return "Enabled · sign in with `devin auth login` in a terminal."
+				end
+				return "Installed · enable Devin to offer it in the composer."
+			end,
+			control = ui.show(function(): boolean
+				local agent = agent_of()
+				return agent ~= nil and agent.installed == true and agent.enabled ~= true
+			end, ds.Button {
+				"Enable", size = "sm", tone = "secondary", busy = busy,
+				disabled = function(): boolean return remote() or busy:get() end,
+				on_click = enable,
+			}),
+		}
 	end)()
 end
 
@@ -934,6 +1023,7 @@ function M.body(): Node
 					table.insert(groups, { id = route.id, name = route.name, routes = { route } })
 				end
 			end
+			table.insert(groups, 1, { id = "devin-acp", name = "Devin ACP", routes = {}, devin = true })
 			return groups
 		end)
 		-- How many the catalog holds beyond what is shown.
@@ -965,7 +1055,7 @@ function M.body(): Node
 				local menu_open = ui.use_state(false)
 				local removing = ui.use_state(false)
 				local remove_error = ui.use_state(nil :: string?)
-				local item = group.routes[1]
+				local item = group.routes[1] or { id = "devin", name = "Devin ACP" }
 				local function active_account(): (any?, any?)
 					for _, route in group.routes do
 						if route.oauth or route.chatgpt then
@@ -1026,10 +1116,14 @@ function M.body(): Node
 					if n > 0 then table.insert(model_ids, route.id) end
 				end
 				local children = {}
-				for _, route in group.routes do
-					table.insert(children, ds.Settings.Rule())
+				if group.devin then
+					table.insert(children, devin_row(remote))
+				else
+					for _, route in group.routes do
+						table.insert(children, ds.Settings.Rule())
 
-					table.insert(children, route_row(route, remote, creds, function() res.reload() end))
+						table.insert(children, route_row(route, remote, creds, function() res.reload() end))
+					end
 				end
 				return ds.Settings.Group {
 					ui.column {
@@ -1039,8 +1133,8 @@ function M.body(): Node
 							px = ui.raw(15, "the provider card header inset"), gap = "$space.3", items = "center",
 							ds.AgentMark {
 								label = group.name,
-								mark = if item.id == "openai-codex" then "openai" elseif item.id == "opencode" or item.id == "opencode-go" then "opencode" else nil,
-								src = if MARKS[item.id] then `assets/icons/{MARKS[item.id]}.svg` else nil,
+								mark = if group.devin then "devin" elseif item.id == "openai-codex" then "openai" elseif item.id == "opencode" or item.id == "opencode-go" then "opencode" else nil,
+								src = if GROUP_MARKS[item.id] then `assets/icons/{GROUP_MARKS[item.id]}.svg` elseif MARKS[item.id] then `assets/icons/{MARKS[item.id]}.svg` else nil,
 								seed = `own.{item.id}`, size = 28,
 							},
 							ui.column {

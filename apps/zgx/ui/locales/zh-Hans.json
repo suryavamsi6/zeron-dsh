@@ -1737,7 +1737,7 @@
           "line": "API 密钥"
         },
         "sign_in": {
-          "start": "使用 ChatGPT 登录",
+          "start": "使用 {name} 登录",
           "description": "在浏览器中登录；授权会保存在存储中。",
           "waiting": "等待浏览器…",
           "cancel": "取消",
@@ -1745,7 +1745,7 @@
           "not_completed": "登录未完成。",
           "try_again": "重试",
           "failed": "登录未能开始：{says}",
-          "line": "ChatGPT 账户"
+          "line": "{name} 账户"
         },
         "in_use": "使用中",
         "show_all": "显示全部 {count} 个提供商",
