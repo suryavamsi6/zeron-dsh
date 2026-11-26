@@ -1198,7 +1198,9 @@ pub struct ToolDiff {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum InputActor {
-    /// No provenance was captured (events written before actors were recorded).
+    /// No resolver exists to attribute: the explicit harness-side fallback when
+    /// a question wait ends unanswered. Journaled `inputResolved` events use an
+    /// absent `by` for that case instead; this value is not written there.
     #[default]
     Unattributed,
     /// The person's own client: the desktop app's local IPC, the CLI, or their other device.
@@ -1401,8 +1403,9 @@ pub enum AgentEvent {
         /// recorded — nothing is known about them.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         answers: Option<Vec<UserInputAnswer>>,
-        /// Who resolved it; `None` for events written before actors were
-        /// recorded or for a closed-unanswered request.
+        /// Who resolved it. A resolver-initiated close is `Some` even when
+        /// `answers` is empty; `None` means the run stopped waiting with no
+        /// resolver, or the event predates actor recording.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<InputActor>,
     },

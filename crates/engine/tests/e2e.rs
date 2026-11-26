@@ -2470,6 +2470,48 @@ fn input_resolved_events(dir: &std::path::Path, chat: &str) -> Vec<serde_json::V
         .collect()
 }
 
+/// Queue one input response through the RPC dispatch boundary as the scoped
+/// agent caller, returning the accepted command id. `claimed_by` is what the
+/// payload tries to assert; the server-side stamp is the behavior under test.
+async fn queue_respond_input_as_agent(
+    core: &EngineCore,
+    request_id: &str,
+    answers: Vec<zeron_proto::UserInputAnswer>,
+    claimed_by: zeron_proto::InputActor,
+) -> String {
+    use zeron_rpc::RpcService as _;
+
+    let rpc = core.rpc_service();
+    let command = serde_json::to_value(SessionCommandPayload::RespondInput {
+        request_id: request_id.to_string(),
+        answers,
+        by: Some(claimed_by),
+    })
+    .unwrap();
+    let reply = zeron_rpc::with_caller(
+        zeron_rpc::Caller::Agent {
+            chat: Some("chat-other".into()),
+        },
+        async move {
+            rpc.handle(
+                zeron_rpc::methods::QUEUE_COMMAND,
+                serde_json::json!({"chatId": CHAT, "command": command}),
+            )
+            .await
+        },
+    )
+    .await
+    .expect("the response command queues");
+    match reply {
+        zeron_rpc::RpcReply::Value(value) => value["commandId"]
+            .as_str()
+            .expect("a command id")
+            .to_string(),
+        _ => panic!("unexpected queue reply"),
+    }
+}
+
+
 /// An agent answering a question from ANOTHER chat (through its scoped MCP
 /// server) is recorded on the journaled `inputResolved` as that agent — both
 /// when it names the chat by exact title and by a unique id prefix.
@@ -2635,6 +2677,171 @@ async fn respond_input_from_another_chat_records_who_answered() {
     assert_eq!(events.len(), 2, "both answers journaled: {events:?}");
     assert_eq!(
         events[1]["event"]["by"],
+        serde_json::json!({"kind": "agent", "chatId": "chat-other"})
+    );
+    core.shutdown().await;
+}
+
+/// The RPC boundary is the authority for who answered: even when an
+/// agent-scoped caller writes `Client` into the payload, the journaled
+/// resolution is stamped as that agent. Removing the overwrite in `rpc.rs`
+/// makes this fail by preserving the forged `client` claim.
+#[tokio::test]
+async fn an_agent_caller_cannot_claim_client_actor_at_the_rpc_boundary() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: false,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-agent-claim",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    let (request_id, _) = wait_for_input_questions(&core).await;
+
+    let command_id = queue_respond_input_as_agent(
+        &core,
+        &request_id,
+        vec![zeron_proto::UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec!["b".into()],
+        }],
+        zeron_proto::InputActor::Client,
+    )
+    .await;
+    wait_for(
+        || {
+            command_status(&core, &command_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the agent response command to settle",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, &command_id),
+        Some((SessionCommandStatus::Applied, None))
+    );
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1, "one inputResolved row: {events:?}");
+    assert_eq!(
+        events[0]["event"]["by"],
+        serde_json::json!({"kind": "agent", "chatId": "chat-other"}),
+        "the caller stamp wins over the payload's forged client claim"
+    );
+    core.shutdown().await;
+}
+
+/// A person-only card still refuses an agent's substantive answer, but an
+/// agent may close it without answering: empty answers are dismissal, not a
+/// decision, so the close applies and is journaled as the agent.
+#[tokio::test]
+async fn an_agent_can_close_but_not_answer_a_requires_person_card() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = assemble(
+        dir.path(),
+        Arc::new(EchoAnswerHarness {
+            requires_person: true,
+        }),
+    );
+    let handle = core.doc_host.open(CHAT).unwrap();
+    queue_as_viewer(
+        handle.doc(),
+        "cmd-run-agent-close",
+        SessionCommandPayload::Run {
+            request: run_request("ask me"),
+            message_id: "m-1".into(),
+        },
+    );
+    let (request_id, _) = wait_for_input_questions(&core).await;
+
+    let answer_id = queue_respond_input_as_agent(
+        &core,
+        &request_id,
+        vec![zeron_proto::UserInputAnswer {
+            question_id: "q1".into(),
+            labels: vec!["b".into()],
+        }],
+        zeron_proto::InputActor::Client,
+    )
+    .await;
+    wait_for(
+        || {
+            command_status(&core, &answer_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the agent's substantive answer to settle",
+    )
+    .await;
+    let (status, resolution) = command_status(&core, &answer_id).unwrap();
+    assert_eq!(status, SessionCommandStatus::Rejected);
+    assert!(
+        resolution
+            .as_deref()
+            .is_some_and(|text| text.contains("person")),
+        "the refusal names the person: {resolution:?}"
+    );
+    assert_eq!(
+        core.sessions.session_status(CHAT).map(|s| s.status),
+        Some(SessionStatus::AwaitingInput),
+        "the substantive answer left the card open"
+    );
+
+    let close_id = queue_respond_input_as_agent(
+        &core,
+        &request_id,
+        Vec::new(),
+        zeron_proto::InputActor::Client,
+    )
+    .await;
+    wait_for(
+        || {
+            command_status(&core, &close_id)
+                .is_some_and(|(status, _)| status != SessionCommandStatus::Pending)
+        },
+        "the agent's close to settle",
+    )
+    .await;
+    assert_eq!(
+        command_status(&core, &close_id),
+        Some((SessionCommandStatus::Applied, None)),
+        "empty answers close the card instead of needing the person"
+    );
+    wait_for(
+        || {
+            entries_now(&core).iter().any(|e| {
+                e.status == Some(MessageStatus::Complete)
+                    && e.parts.iter().any(
+                        |p| matches!(p, MessagePart::Text { text, .. } if text == "picked none"),
+                    )
+            })
+        },
+        "closed turn to complete",
+    )
+    .await;
+    wait_for(
+        || core.sessions.session_status(CHAT).map(|s| s.status) == Some(SessionStatus::Idle),
+        "session to settle idle",
+    )
+    .await;
+    assert_eq!(recorded_answers(&core), Some(vec![]));
+
+    let events = input_resolved_events(dir.path(), CHAT);
+    assert_eq!(events.len(), 1, "only the close lands: {events:?}");
+    assert_eq!(
+        events[0]["event"]["by"],
         serde_json::json!({"kind": "agent", "chatId": "chat-other"})
     );
     core.shutdown().await;
