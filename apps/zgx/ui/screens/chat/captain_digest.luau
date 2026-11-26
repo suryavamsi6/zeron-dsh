@@ -20,7 +20,7 @@ local store = require("@app/screens/chat/store")
 
 local M = {}
 
-export type Captain = { chatId: string, name: string, drivePath: string? }
+export type Captain = { chatId: string, name: string, drivePath: string?, archived: boolean?, userArchived: boolean? }
 export type NeedsYou = { version: number?, updatedAt: string?, items: { string } }
 export type Report = { name: string, text: string }
 export type Drive = { digest: string?, needsYou: NeedsYou?, reports: { Report } }
@@ -45,7 +45,8 @@ end
 M.captains = ui.state("captain_digest.captains", {} :: { [string]: Captain })
 M.drives = ui.state("captain_digest.drives", {} :: { [string]: Drive })
 
-local reading: { [string]: boolean } = {}
+local reading: { [string]: number } = {}
+local generations: { [string]: number } = {}
 local EMPTY: Drive = { reports = {} }
 
 -- The promise `make` answers, or nil when this host has no such action at all
@@ -60,27 +61,42 @@ end
 -- Read `chat`'s Drive again: whether it is a Captain (a chat that is not is
 -- drawn as nothing at all), and then what the Drive holds. One read of each
 -- at a time; a Drive not there yet — before the Captain's first turn — is
--- empty rather than an error.
+-- empty rather than an error. The generation stamp keeps a roster answer
+-- already in flight from repopulating chrome after `forget`.
 function M.reload(chat: string?)
-	if not chat or chat == "" or reading[chat] then
+	if not chat or chat == "" or reading[chat] ~= nil then
 		return
 	end
-	reading[chat] = true
+	local stamp = generations[chat] or 0
+	reading[chat] = stamp
+	local function fresh(): boolean
+		return (generations[chat] or 0) == stamp
+	end
+	local function finish()
+		if reading[chat] == stamp then
+			reading[chat] = nil
+		end
+	end
 	local roster = calling(M.roster)
 	if not roster then
-		reading[chat] = nil
+		finish()
 		return
 	end
 	roster:after(function(answer: any)
+		if not fresh() then
+			return
+		end
 		local captain: Captain? = nil
 		for _, found in (answer and answer.captains) or {} do
-			if found.chatId == chat then
+			-- The roster keeps a demoted Captain as an archived record; asleep
+			-- (`userArchived`) is not live chrome either. Both read as no Captain.
+			if found.chatId == chat and found.archived ~= true and found.userArchived ~= true then
 				captain = found
 				break
 			end
 		end
 		if not captain then
-			reading[chat] = nil
+			finish()
 			M.captains:set_key(chat, nil)
 			M.drives:set_key(chat, nil)
 			return
@@ -90,24 +106,46 @@ function M.reload(chat: string?)
 			return M.drive(chat)
 		end)
 		if not answer then
-			reading[chat] = nil
+			finish()
 			M.drives:set_key(chat, EMPTY)
 			return
 		end
 		answer:after(function(drive: any)
-			reading[chat] = nil
+			if not fresh() then
+				return
+			end
+			finish()
 			M.drives:set_key(chat, {
 				digest = if drive then drive.digest else nil,
 				needsYou = if drive then drive.needsYou else nil,
 				reports = if drive and drive.reports then drive.reports else {},
 			})
 		end, function()
-			reading[chat] = nil
+			if not fresh() then
+				return
+			end
+			finish()
 			M.drives:set_key(chat, EMPTY)
 		end)
 	end, function()
-		reading[chat] = nil
+		if fresh() then
+			finish()
+		end
 	end)
+end
+
+-- Forget one chat's cached roster/Drive read. Roster mutations do not arrive
+-- as chat messages, so the sidebar calls this when a demotion it wrote lands;
+-- the next mount reads again instead of drawing Captain chrome from the old
+-- answer.
+function M.forget(chat: string?)
+	if not chat or chat == "" then
+		return
+	end
+	generations[chat] = (generations[chat] or 0) + 1
+	reading[chat] = nil
+	M.captains:set_key(chat, nil)
+	M.drives:set_key(chat, nil)
 end
 
 -- The asks the strip shows: the first `M.ASKS`, blanks and anything that is
