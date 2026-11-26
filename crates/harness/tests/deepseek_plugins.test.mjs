@@ -265,7 +265,7 @@ assert.throws(() => plugin.apply({ on: () => {} },
   { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: 'relative' }), /driveRoot/);
 
 const registered = applyAs(captain, 'root');
-assert.deepEqual(registered.map(definition => definition.name).sort(), ['captain_drive_read', 'captain_drive_write']);
+assert.deepEqual(registered.map(definition => definition.name).sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
 const read = registered.find(definition => definition.name === 'captain_drive_read');
 const write = registered.find(definition => definition.name === 'captain_drive_write');
 const outside = /path is outside the Captain Drive/;
@@ -613,7 +613,7 @@ test('the captain row stays out of a native child session', { timeout: 300000 },
   // The Drive tools ride the same scope: the root advertises both, the child
   // neither. Removing the `agent/created` gate fails on this pair, not on a
   // timeout.
-  for (const tool of ['captain_drive_read', 'captain_drive_write']) {
+  for (const tool of ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']) {
     assert.ok(advertised(root).includes(tool), `the root session did not advertise ${tool}: ${advertised(root).join(', ')}`);
     assert.ok(!advertised(child).includes(tool), `a native child inherited the ${tool} tool`);
   }
