@@ -71,6 +71,18 @@ test("V4.1 Flash carrying a picture says nothing, Send sends", function()
 	expect(app:error()).to_be(nil)
 end)
 
+test("the qualified picker value for V4 Pro is still one that takes no picture", function()
+	for _, value in { "deepseek/deepseek-v4-pro", "deepseek/platform/deepseek-v4-pro" } do
+		local app = chat("s1")
+		app:set_state("chat_model", value)
+		app:set_state("chat.composer.cargo", { { id = "p1", kind = "image", name = "zgx.png", path = "zgx.png" } })
+		settle(app)
+		expect(said(app)).to_be(true)
+		app:set_state("chat.composer.cargo", {})
+		settle(app)
+	end
+end)
+
 test("the picture taken off clears it, Send back", function()
 	local app = chat("s2")
 	app:command("drop_pictures")

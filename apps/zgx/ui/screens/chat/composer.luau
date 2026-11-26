@@ -92,6 +92,12 @@ local DRAFTED: { [string]: boolean } = { model = true, effort = true, fast = tru
 -- refuses one on another ("This DeepSeek model does not support image
 -- input"), so a picture carried on one is said about before it's sent.
 local NO_IMAGES = { ["deepseek-v4-pro"] = true }
+-- The picker's value is qualified (`<harness>/<model>`, or
+-- `<harness>/<route>/<model>` where a route rides with it); the catalog
+-- rows above name their bare model ids.
+local function model_id(value: string): string
+	return string.match(value, "([^/]+)$") or value
+end
 -- Whether two choices are the same: the options' picks (tables) by their
 -- entries, none and an empty table alike; the rest by value.
 -- An agent's default model: the row its catalog marks, else its first
@@ -799,7 +805,7 @@ local function Composer(): Node
 	-- The model picked can't take a picture the draft carries: a send
 	-- would fail in the sidecar, so it's said and held back first.
 	local function image_blocked(): boolean
-		if not NO_IMAGES[model:get() or ""] then
+		if not NO_IMAGES[model_id(model:get() or "")] then
 			return false
 		end
 		for _, item in shared.cargo:get() do
