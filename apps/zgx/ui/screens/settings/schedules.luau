@@ -46,6 +46,7 @@ type Rule = {
 	hours: { number }?,
 	minutes: { number }?,
 	count: number?,
+	limited: boolean?,
 }
 
 type Fields = {
@@ -173,7 +174,10 @@ local function parse(src: any): Rule?
 			if rule.count == nil or rule.count < 1 or rule.count % 1 ~= 0 then
 				return nil
 			end
-		elseif k ~= "UNTIL" then
+			rule.limited = true
+		elseif k == "UNTIL" then
+			rule.limited = true
+		else
 			return nil -- a part this page doesn't write: not its own rule.
 		end
 	end
@@ -576,11 +580,11 @@ function M.view(): Node
 				f = "custom"
 			elseif rule.count == 1 then
 				f = "once"
-			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil and rule.count == nil then
+			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil and not rule.limited then
 				f = "daily"
-			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) and rule.count == nil then
+			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) and not rule.limited then
 				f = "weekdays"
-			elseif rule.freq == "WEEKLY" and rule.interval == 1 and rule.count == nil and (rule.days == nil or #rule.days == 1) then
+			elseif rule.freq == "WEEKLY" and rule.interval == 1 and not rule.limited and (rule.days == nil or #rule.days == 1) then
 				f = "weekly"
 			else
 				f = "custom"
