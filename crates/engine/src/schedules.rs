@@ -404,11 +404,22 @@ impl Rule {
 
 // ── store, delivery and the runner ──────────────────────────────────────────
 
+/// What one fired occurrence did. A lifecycle outcome is not a transport
+/// error: asleep Captains skip the occurrence, demoted Captains end the task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Delivery {
+    /// The prompt landed on this chat.
+    Delivered(String),
+    /// The target is a user-archived Captain: asleep, not dead.
+    SkippedAsleep,
+    /// The target is a demoted Captain: no live Captain remains to wake.
+    Ended,
+}
+
 /// One fired occurrence's delivery; the engine's [`SessionDeliver`] is what
 /// runs in production, tests substitute a recorder.
 pub trait Deliver: Send + Sync {
-    /// Returns the chat the prompt landed on.
-    fn deliver(&self, task: &Task) -> Result<String, EngineError>;
+    fn deliver(&self, task: &Task) -> Result<Delivery, EngineError>;
 }
 
 /// Queues a fired prompt on the target chat's doc — the row `QueueMessage`
@@ -417,12 +428,45 @@ pub trait Deliver: Send + Sync {
 pub struct SessionDeliver {
     pub doc_host: crate::doc_host::DocHost,
     pub workspace: crate::workspace_host::WorkspaceHost,
+    /// Captain roster location, read at fire time so archive/demote lands
+    /// without waiting for the engine process to restart.
+    pub data_dir: PathBuf,
+}
+
+impl SessionDeliver {
+    /// The Captain lifecycle for a direct `target.kind = "session"` delivery.
+    /// `queue_message` unarchives ordinary chats on send, so this decision has
+    /// to happen before that call: a hidden Captain is asleep and a demoted
+    /// Captain is no longer a Captain at all.
+    fn captain_outcome(&self, session: &str) -> Result<Option<Delivery>, EngineError> {
+        let registry =
+            crate::captains::Registry::load(&self.data_dir).map_err(EngineError::Other)?;
+        let Some(captain) = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == session)
+        else {
+            return Ok(None);
+        };
+        if captain.archived {
+            return Ok(Some(Delivery::Ended));
+        }
+        if captain.user_archived {
+            return Ok(Some(Delivery::SkippedAsleep));
+        }
+        Ok(None)
+    }
 }
 
 impl Deliver for SessionDeliver {
-    fn deliver(&self, task: &Task) -> Result<String, EngineError> {
+    fn deliver(&self, task: &Task) -> Result<Delivery, EngineError> {
         let session = match &task.target {
-            Target::Session { session } => session.clone(),
+            Target::Session { session } => {
+                if let Some(outcome) = self.captain_outcome(session)? {
+                    return Ok(outcome);
+                }
+                session.clone()
+            }
             Target::NewOnce {
                 session: Some(session),
                 ..
@@ -441,7 +485,7 @@ impl Deliver for SessionDeliver {
         };
         self.doc_host
             .queue_message(&session, &task.prompt, Vec::new())?;
-        Ok(session)
+        Ok(Delivery::Delivered(session))
     }
 }
 
@@ -543,7 +587,7 @@ impl Schedules {
                 continue;
             }
             match self.inner.deliver.deliver(task) {
-                Ok(session) => {
+                Ok(Delivery::Delivered(session)) => {
                     dirty = true;
                     if let Target::NewOnce { session: at, .. } | Target::New { session: at, .. } =
                         &mut task.target
@@ -563,7 +607,33 @@ impl Schedules {
                         wait = wait.min(to_dur(next - now_ms));
                     }
                 }
-                // `nextAt` stays: the next wake, at most POLL_CAP out, retries.
+                // A hidden Captain is asleep, not failed: consume this
+                // occurrence without touching lastRunAt and move to the next
+                // future one. `queue_message` never runs, so the archived row
+                // is not revived.
+                Ok(Delivery::SkippedAsleep) => {
+                    dirty = true;
+                    task.updated_at = now_ms;
+                    task.next_at = parse_rrule(&task.rrule)
+                        .ok()
+                        .and_then(|rule| rule.next_after(now))
+                        .map(|t| t.timestamp_millis());
+                    if task.next_at.is_none() {
+                        task.active = false;
+                    }
+                    if let Some(next) = task.next_at {
+                        wait = wait.min(to_dur(next - now_ms));
+                    }
+                }
+                // A demoted Captain is not a valid target for a later turn
+                // either. Ending the task is durable; a transport error, by
+                // contrast, keeps `nextAt` and retries within POLL_CAP.
+                Ok(Delivery::Ended) => {
+                    dirty = true;
+                    task.active = false;
+                    task.next_at = None;
+                    task.updated_at = now_ms;
+                }
                 Err(error) => {
                     tracing::warn!(schedule = %task.id, %error, "scheduled delivery failed")
                 }
@@ -653,11 +723,18 @@ impl Schedules {
             .iter_mut()
             .find(|t| t.id == id)
             .ok_or_else(|| RpcError::Failed(format!("no such schedule: {id}")))?;
-        let session = self
+        let delivery = self
             .inner
             .deliver
             .deliver(task)
             .map_err(|error| RpcError::Failed(error.to_string()))?;
+        let Delivery::Delivered(session) = delivery else {
+            return Err(RpcError::Failed(match delivery {
+                Delivery::SkippedAsleep => "the Captain is archived and asleep".into(),
+                Delivery::Ended => "the Captain has been demoted".into(),
+                Delivery::Delivered(_) => unreachable!(),
+            }));
+        };
         if let Target::NewOnce { session: at, .. } | Target::New { session: at, .. } =
             &mut task.target
         {
@@ -788,12 +865,12 @@ mod tests {
 
     struct Recorder(Mutex<Vec<String>>);
     impl Deliver for Recorder {
-        fn deliver(&self, task: &Task) -> Result<String, EngineError> {
+        fn deliver(&self, task: &Task) -> Result<Delivery, EngineError> {
             self.0
                 .lock()
                 .unwrap()
                 .push(format!("{}:{}", task.id, task.prompt));
-            Ok("chat-1".into())
+            Ok(Delivery::Delivered("chat-1".into()))
         }
     }
 
@@ -851,5 +928,186 @@ mod tests {
         assert_eq!(hits.0.lock().unwrap().len(), 1);
         store.tick(now + chrono::Duration::seconds(61));
         assert_eq!(hits.0.lock().unwrap().len(), 2);
+    }
+
+    #[derive(Clone, Copy)]
+    enum RosterSetup {
+        OrdinaryArchived,
+        LiveCaptain,
+        HiddenCaptain,
+        DemotedCaptain,
+    }
+
+    async fn boot_core(dir: &Path) -> crate::EngineCore {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("device-id"), "dev-schedules").unwrap();
+        let registry = crate::HarnessRegistry::new();
+        registry.register(Arc::new(zeron_harness::mock::MockHarness {
+            script: vec![zeron_proto::AgentEvent::Done {
+                status: zeron_proto::DoneStatus::Completed,
+                result: None,
+                error: None,
+                session_id: None,
+            }],
+        }));
+        let core = crate::EngineCore::assemble(
+            dir,
+            Arc::new(registry),
+            zeron_proto::HarnessId::Mock,
+            None,
+        )
+        .expect("engine core assembles");
+        core.sessions.set_no_ipc_port();
+        core
+    }
+
+    fn prompt_in_doc(core: &crate::EngineCore, chat: &str, prompt: &str) -> bool {
+        core.doc_host
+            .open(chat)
+            .ok()
+            .and_then(|h| h.doc().read_entries().ok())
+            .unwrap_or_default()
+            .iter()
+            .any(|entry| {
+                entry.role == zeron_doc::MessageRole::User
+                    && entry.parts.iter().any(|part| {
+                        matches!(part, zeron_doc::MessagePart::Text { text, .. } if text == prompt)
+                    })
+            })
+    }
+
+    async fn captain_lifecycle_case(setup: RosterSetup) -> (Task, bool, bool) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        let core = boot_core(&dir).await;
+        let session = "chat-scheduled-captain";
+        core.workspace
+            .create_chat(session, None, Some(&core.device_id), None, None)
+            .expect("target chat is created");
+        match setup {
+            RosterSetup::OrdinaryArchived => {
+                core.workspace
+                    .set_chat_archived(session, true)
+                    .expect("ordinary chat archives");
+            }
+            RosterSetup::LiveCaptain => {
+                core.captains
+                    .promote(session, "Ada")
+                    .expect("Captain promotes");
+            }
+            RosterSetup::HiddenCaptain => {
+                core.captains
+                    .promote(session, "Ada")
+                    .expect("Captain promotes");
+                core.captains
+                    .archive(session, |_| false)
+                    .expect("Captain hides");
+                core.workspace
+                    .set_chat_archived(session, true)
+                    .expect("Captain chat archives");
+            }
+            RosterSetup::DemotedCaptain => {
+                core.captains
+                    .promote(session, "Ada")
+                    .expect("Captain promotes");
+                core.captains.demote(session).expect("Captain demotes");
+            }
+        }
+
+        let schedules = Schedules::open(
+            &dir,
+            Arc::new(SessionDeliver {
+                doc_host: core.doc_host.clone(),
+                workspace: core.workspace.clone(),
+                data_dir: dir.clone(),
+            }),
+        );
+        let mut due = task("DTSTART:20260101T090000Z\nRRULE:FREQ=DAILY");
+        due.target = Target::Session {
+            session: session.into(),
+        };
+        due.next_at = Some(utc("2026-11-18T09:00:00Z").timestamp_millis());
+        *schedules.tasks() = vec![due];
+        let now = utc("2026-11-18T09:00:00Z");
+        schedules.tick(now);
+        let stored = schedules.list().remove(0);
+        let expects_delivery = matches!(
+            setup,
+            RosterSetup::OrdinaryArchived | RosterSetup::LiveCaptain
+        );
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(1);
+        let mut delivered = prompt_in_doc(&core, session, "go");
+        while !delivered && tokio::time::Instant::now() < deadline {
+            if !expects_delivery {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            delivered = prompt_in_doc(&core, session, "go");
+        }
+        if !expects_delivery {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            delivered = prompt_in_doc(&core, session, "go");
+        }
+        let row_archived = core
+            .workspace
+            .chat(session)
+            .expect("workspace row reads")
+            .expect("workspace row exists")
+            .archived;
+        core.shutdown().await;
+        (stored, delivered, row_archived)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_live_captain_receives_a_scheduled_wake() {
+        let (stored, delivered, _) = captain_lifecycle_case(RosterSetup::LiveCaptain).await;
+        assert!(delivered, "the live Captain's prompt is queued");
+        assert!(stored.active);
+        assert_eq!(
+            stored.last_run_at,
+            Some(utc("2026-11-18T09:00:00Z").timestamp_millis())
+        );
+        assert!(
+            stored.next_at.unwrap() > utc("2026-11-18T09:00:00Z").timestamp_millis(),
+            "the recurrence advances after delivery"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hidden_captain_skips_the_occurrence_without_unarchiving() {
+        let (stored, delivered, row_archived) =
+            captain_lifecycle_case(RosterSetup::HiddenCaptain).await;
+        assert!(!delivered, "a hidden Captain is not queued");
+        assert!(row_archived, "the Captain chat row stays archived");
+        assert!(stored.active, "sleep does not end the schedule");
+        assert_eq!(stored.last_run_at, None, "nothing ran");
+        assert!(
+            stored.next_at.unwrap() > utc("2026-11-18T09:00:00Z").timestamp_millis(),
+            "the skipped occurrence is consumed"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_demoted_captain_ends_the_schedule() {
+        let (stored, delivered, _) = captain_lifecycle_case(RosterSetup::DemotedCaptain).await;
+        assert!(
+            !delivered,
+            "a demoted Captain is not queued as an ordinary chat"
+        );
+        assert!(!stored.active, "the schedule ends durably");
+        assert_eq!(stored.next_at, None);
+        assert_eq!(stored.last_run_at, None, "nothing ran");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ordinary_archived_session_still_delivers_and_unarchives() {
+        let (stored, delivered, row_archived) =
+            captain_lifecycle_case(RosterSetup::OrdinaryArchived).await;
+        assert!(delivered, "ordinary session behavior is unchanged");
+        assert!(
+            !row_archived,
+            "queue_message still unarchives ordinary chats"
+        );
+        assert!(stored.active);
     }
 }

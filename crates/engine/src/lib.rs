@@ -520,6 +520,7 @@ impl EngineCore {
             Arc::new(schedules::SessionDeliver {
                 doc_host: doc_host.clone(),
                 workspace: workspace.clone(),
+                data_dir: data_dir.to_path_buf(),
             }),
         );
         schedules.start();

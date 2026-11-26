@@ -737,14 +737,14 @@ impl Bridge {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schedules::Deliver;
+    use crate::schedules::{Deliver, Delivery};
 
     /// Delivery goes nowhere in tests: the tools are exercised against the
     /// store, never a fired occurrence.
     struct Recorder;
     impl Deliver for Recorder {
-        fn deliver(&self, _task: &Task) -> Result<String, crate::EngineError> {
-            Ok("chat-x".into())
+        fn deliver(&self, _task: &Task) -> Result<Delivery, crate::EngineError> {
+            Ok(Delivery::Delivered("chat-x".into()))
         }
     }
 
