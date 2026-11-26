@@ -303,6 +303,19 @@ impl WorkspaceFiles {
         (session_project.as_deref() == Some(space.id.as_str())).then(|| checkout.path.clone())
     }
 
+    /// A live crew member's assigned worktree, when SUR-206 metadata gives it
+    /// one. The file surface follows the same checkout the run is stamped into,
+    /// rather than the chat's original folder.
+    fn crew_worktree(&self, chat_id: &str) -> Option<String> {
+        match crate::captains::Registry::load(self.inner.repos.data_dir()).ok()?.run_role(chat_id) {
+            crate::captains::RunRole::Crew {
+                worktree: Some(worktree),
+                ..
+            } => Some(worktree),
+            _ => None,
+        }
+    }
+
     pub(crate) async fn resolve_target(
         &self,
         target: &WorkspaceTarget,
@@ -330,12 +343,14 @@ impl WorkspaceFiles {
                         "chat belongs to another device".into(),
                     ));
                 }
+                let crew_worktree = self.crew_worktree(chat_id);
+                let chat_cwd = crew_worktree.as_deref().or(chat.cwd.as_deref());
                 let Some(space_id) = chat.space_id else {
                     // The chat's cwd is the browsing boundary, even when it
                     // happens to be a subdirectory of a Git checkout.
                     let cwd = PathBuf::from(
                         crate::repos::resolve_chat_cwd(
-                            chat.cwd.as_deref().unwrap_or("~"),
+                            chat_cwd.unwrap_or("~"),
                             &self.inner.repos.scratch_root(),
                         )
                         .map_err(|error| WorkspaceFilesError::NotFound(error.to_string()))?,
@@ -358,7 +373,7 @@ impl WorkspaceFiles {
                         root,
                     });
                 };
-                let cwd = chat.cwd.map(PathBuf::from).ok_or_else(|| {
+                let cwd = chat_cwd.map(PathBuf::from).ok_or_else(|| {
                     WorkspaceFilesError::NotFound("chat has no workspace folder".into())
                 })?;
                 let space = self
@@ -3646,6 +3661,79 @@ mod tests {
         let mut subscription = watch.subscribe(Weak::<WorkspaceFilesInner>::new());
         assert!(subscription.recv().await.unwrap().resync_required);
         watch.cancel.cancel();
+    }
+}
+
+#[cfg(test)]
+mod crew_workspace_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_crew_chat_browses_its_assigned_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let original = dir.path().join("original");
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir(&original).unwrap();
+        std::fs::create_dir(&worktree).unwrap();
+        let host = WorkspaceHost::open(
+            Arc::new(zeron_sync::DocsStore::open(&dir.path().join("docs")).unwrap()),
+            crate::workspace_host::WorkspaceHostConfig {
+                device_id: "device".into(),
+                device_name: "Device".into(),
+                platform: "test".into(),
+                org_id: "org".into(),
+                user_id: "user".into(),
+                edge: None,
+                local_only: true,
+            },
+        )
+        .unwrap();
+        host.create_chat_hosted(
+            "crew-chat",
+            None,
+            None,
+            Some("device"),
+            None,
+            Some(original.to_string_lossy().into_owned()),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let data = dir.path().join("data");
+        std::fs::create_dir(&data).unwrap();
+        let mut registry = crate::captains::Registry::default();
+        registry.promote("captain", "Ada").unwrap();
+        registry
+            .add_crew_with_metadata(
+                "captain",
+                "crew-chat",
+                crate::captains::CrewMeta {
+                    owns: vec!["src/**".into()],
+                    worktree: Some(worktree.to_string_lossy().into_owned()),
+                },
+            )
+            .unwrap();
+        std::fs::write(
+            data.join("captains.json"),
+            serde_json::to_string_pretty(&registry).unwrap(),
+        )
+        .unwrap();
+
+        let files = WorkspaceFiles::new(
+            Repos::new(&data, "device"),
+            host,
+            "device",
+        );
+        let resolved = files
+            .resolve_target(&WorkspaceTarget {
+                chat_id: Some("crew-chat".into()),
+                space_id: None,
+                checkout_path: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(resolved.root, std::fs::canonicalize(&worktree).unwrap());
     }
 }
 

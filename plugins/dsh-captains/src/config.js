@@ -7,12 +7,18 @@ export function normalizeConfig(raw) {
   // The bundle loads in every chat, so a row stays inert until the engine
   // stamps a role into it; anything the schema does not know throws before a
   // single registration can run.
-  const { role = 'none', chatId, captainId, captainName, driveRoot } = raw ?? {};
+  const { role = 'none', chatId, captainId, captainName, driveRoot, owns = [], worktree } = raw ?? {};
   if (!roles.has(role)) {
     throw new Error('zeron-captains: unknown role');
   }
   if (role === 'none') {
     return { role, chatId, captainId, captainName, driveRoot };
+  }
+  if (!Array.isArray(owns) || owns.some(glob => typeof glob !== 'string' || glob === '')) {
+    throw new Error('zeron-captains: owns must be an array of non-empty glob strings');
+  }
+  if (worktree !== undefined && (typeof worktree !== 'string' || !isAbsolute(worktree))) {
+    throw new Error('zeron-captains: worktree must be an absolute path');
   }
   if (typeof chatId !== 'string' || !idPattern.test(chatId)) {
     throw new Error('zeron-captains: chatId must be 1-128 characters of [A-Za-z0-9_-]');
@@ -33,5 +39,9 @@ export function normalizeConfig(raw) {
   if (role === 'captain' && captainId !== chatId) {
     throw new Error('zeron-captains: captainId must equal chatId when role is captain');
   }
-  return { role, chatId, captainId, captainName, driveRoot };
+  return {
+    role, chatId, captainId, captainName, driveRoot,
+    ...(owns.length > 0 ? { owns } : {}),
+    ...(worktree === undefined ? {} : { worktree }),
+  };
 }

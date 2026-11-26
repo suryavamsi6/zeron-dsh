@@ -20,6 +20,95 @@ export function assertRoute(options) {
   }
 }
 
+
+const workspaceEdits = new Set(['write', 'edit', 'apply_patch']);
+const shells = new Set(['bash', 'persistent-bash', 'persistent-pwsh']);
+
+function normalizeOwnedPath(path) {
+  const text = String(path);
+  return (process.platform === 'win32' ? text.replace(/\\/g, '/') : text).replace(/^\.\/+/, '');
+}
+
+function globRegex(glob) {
+  const source = normalizeOwnedPath(glob);
+  let out = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '*') {
+      if (source[i + 1] === '*') {
+        if (source[i + 2] === '/') {
+          out += '(?:.*/)?';
+          i += 2;
+        } else {
+          out += '.*';
+          i += 1;
+        }
+      } else out += '[^/]*';
+    } else if (char === '?') out += '[^/]';
+    else out += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+  }
+  return new RegExp(`^${out}$`);
+}
+
+function patchPaths(input) {
+  if (typeof input !== 'string') return [];
+  const paths = [];
+  let operation;
+  let hunkStarted = false;
+  const trimEnd = value => value.replace(/\p{White_Space}+$/u, '');
+  const trim = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+  for (const line of trim(input).split(/\r?\n/u)) {
+    // dsh-fs-patch trims both ends outside an update, but only the end inside
+    // one: a leading space is what makes a quoted header ordinary context.
+    const header = operation === 'update' ? trimEnd(line) : trim(line);
+    const target = header.startsWith('*** Add File: ') || header.startsWith('*** Update File: ')
+      || header.startsWith('*** Delete File: ');
+    if (target) {
+      const path = header.slice(header.indexOf(': ') + 2);
+      paths.push(path);
+      operation = header.startsWith('*** Add File: ') ? 'add'
+        : header.startsWith('*** Delete File: ') ? 'delete' : 'update';
+      hunkStarted = false;
+      continue;
+    }
+    if (operation === 'update' && !hunkStarted && header.startsWith('*** Move to: ')) {
+      paths.push(header.slice('*** Move to: '.length));
+      continue;
+    }
+    if (operation === 'update' && (header === '@@' || header.startsWith('@@ '))) hunkStarted = true;
+  }
+  return paths;
+}
+
+function editPaths(exec) {
+  const args = exec.arguments;
+  if (typeof args !== 'object' || args === null) return [];
+  if ((exec.name === 'write' || exec.name === 'edit') && typeof args.file_path === 'string') return [args.file_path];
+  if (exec.name === 'apply_patch') return patchPaths(args.input);
+  return [];
+}
+
+// SUR-206: a crew member's `owns` globs are a hard pre-dispatch gate. Paths
+// are session-relative, matching the fs tools' own addressing; absolute or
+// parent-traversing paths can never be made safe by comparing glob text, so
+// they are outside every crew scope. The member's own report remains the one
+// unconditional writeback.
+export function ownsDenial(exec, captains) {
+  if (captains?.role !== 'crew' || !Array.isArray(captains.owns) || captains.owns.length === 0) return undefined;
+  if (shells.has(exec.name)) return `Crew member ${captains.chatId} may not use shell commands outside ownership-checked file tools`;
+  if (!workspaceEdits.has(exec.name)) return undefined;
+  const paths = editPaths(exec).map(normalizeOwnedPath);
+  if (exec.name === 'apply_patch' && typeof exec.arguments?.input === 'string' && paths.length === 0)
+    return 'Crew ownership cannot verify the files in this patch';
+  if (paths.length === 0) return undefined;
+  const report = `reports/${captains.chatId}.md`;
+  const globs = captains.owns.filter(glob => typeof glob === 'string' && glob !== '').map(globRegex);
+  const outside = paths.find(path => path.startsWith('/') || /^[A-Za-z]:\//.test(path) || path.split('/').includes('..')
+    || (path !== report && !globs.some(glob => glob.test(path))));
+  return outside === undefined ? undefined
+    : `Crew member ${captains.chatId} may not edit ${outside}: outside its owns globs`;
+}
+
 export function requiresApproval(access, name) {
   if (!['supervised', 'auto-accept-edits', 'full-access'].includes(access)) {
     throw new Error('Unknown DeepSeek access mode');
@@ -37,7 +126,10 @@ export function apply(ctx, config) {
   const approved = new WeakSet();
   ctx.on('tools/pre-execute', async (exec, next) => {
     const decision = await next();
-    if (decision.kind !== 'allow' || !requiresApproval(config.access, exec.name)) return decision;
+    if (decision.kind !== 'allow') return decision;
+    const outside = ownsDenial(exec, config.captains);
+    if (outside !== undefined) return { kind: 'deny', reason: outside };
+    if (!requiresApproval(config.access, exec.name)) return decision;
     if (exec.signal.aborted) return { kind: 'cancel' };
     if (!exec.agent) return { kind: 'deny', reason: 'No agent owns this approval' };
     const outcome = await ctx.approval.request({
@@ -50,7 +142,8 @@ export function apply(ctx, config) {
     approved.add(exec.token);
     return { kind: 'allow' };
   });
-  ctx.tools.guard(exec => requiresApproval(config.access, exec.name) && !approved.has(exec.token)
-    ? 'Zeron requires explicit approval for this tool invocation' : undefined);
+  ctx.tools.guard(exec => ownsDenial(exec, config.captains)
+    ?? (requiresApproval(config.access, exec.name) && !approved.has(exec.token)
+      ? 'Zeron requires explicit approval for this tool invocation' : undefined));
   ctx.provide('zeronPolicy', { ready: true });
 }

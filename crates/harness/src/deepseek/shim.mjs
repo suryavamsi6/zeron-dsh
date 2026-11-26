@@ -164,7 +164,7 @@ async function start(config) {
       defaultPreset: 'zeron-managed',
     } },
     { id: 'sdk-jsonrpc-server', inject: ['sdkAppStartup', 'loader', 'zeronPolicy'] },
-    { insert: [{ id: 'zeron-policy', name: pathToFileURL(policyPath).href, config: { access: config.access } }] },
+    { insert: [{ id: 'zeron-policy', name: pathToFileURL(policyPath).href, config: { access: config.access, captains: config.captains } }] },
   ];
   let yaml = patch.map(row => `- ${JSON.stringify(row)}`).join('\n') + '\n';
   const names = new Set();
