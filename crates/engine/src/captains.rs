@@ -2620,14 +2620,26 @@ const MERGE_CLAIMS_DIR: &str = "claims";
 const MERGE_RESULTS_DIR: &str = "results";
 const MERGE_LOCK_FILE: &str = "captains-merge.lock";
 
-/// A crew branch's ready receipt (SUR-207). `headSha` is the branch tip the
-/// Captain reviewed and `treeSha` that commit's tree; the queue rebases that
-/// exact commit, publishes the rebased tip, and requires GitHub to match that
-/// tip when the PR lands. `baseSha` is the merge base the gate ran against,
-/// `gateCommand` the gate commands that ran, `diffTier` the change's review
-/// tier, and `failedOrSkipped` every test the gate failed or skipped. Any
-/// later commit moves `headSha` or `treeSha`, so [`validate_ready_receipt`]
-/// refuses a receipt that no longer names the checkout it was written for.
+/// How much of the gate a crew branch's diff must survive (SUR-207): docs
+/// fragments skip the test gates, standard diffs run them, and an `s1` diff
+/// touches a stamped surface and is priced accordingly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffTier {
+    Docs,
+    Standard,
+    S1,
+}
+
+/// A crew branch's ready receipt, written by the plugin's
+/// `captain_ship_ready` so every git-derived field is machine-exact rather
+/// than model-asserted (SUR-207). `headSha`/`treeSha` are the branch tip the
+/// Captain reviewed and that commit's tree — a receipt stops counting the
+/// moment the worktree moves past either. `baseSha` is the commit the branch
+/// built on; `gateCommand`, `diffTier` and `failedOrSkipped` record what the
+/// gate ran and what it did not. The queue rebases that exact commit,
+/// publishes the rebased tip, and requires GitHub to match that tip when the
+/// PR lands.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ReadyReceipt {
@@ -2638,20 +2650,10 @@ pub struct ReadyReceipt {
     pub head_sha: String,
     pub tree_sha: String,
     pub base_sha: String,
-    pub gate_command: Vec<String>,
+    pub gate_command: String,
     pub diff_tier: DiffTier,
     pub failed_or_skipped: Vec<String>,
     pub slug: String,
-}
-
-/// How much review a crew diff needs: `docs` touches documentation only,
-/// `s1` is a severity-one change, and `standard` is everything else.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DiffTier {
-    Docs,
-    Standard,
-    S1,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2728,36 +2730,6 @@ fn valid_slug(value: &str) -> bool {
         && !value.ends_with('-')
 }
 
-fn valid_receipt_line(value: &str) -> bool {
-    !value.trim().is_empty() && value.len() <= 512 && !value.chars().any(char::is_control)
-}
-
-/// Check `receipt` and bind it to `checkout`: the receipt must be well formed
-/// and its `headSha` / `treeSha` must equal the checkout's `git rev-parse
-/// HEAD` / `HEAD^{tree}`. A commit made after the receipt was written moves
-/// both, so the stale receipt is refused rather than shipping unreviewed work.
-pub fn validate_ready_receipt(receipt: &ReadyReceipt, checkout: &Path) -> Result<(), String> {
-    let receipt = receipt.clone().validate()?;
-    let (head, tree) = ShellMergeRunner.checkout_head(checkout)?;
-    receipt_binding_failure(&receipt, &head, &tree).map_or(Ok(()), Err)
-}
-
-fn receipt_binding_failure(receipt: &ReadyReceipt, head: &str, tree: &str) -> Option<String> {
-    if head != receipt.head_sha {
-        return Some(format!(
-            "ready receipt headSha {} does not match HEAD {head}",
-            receipt.head_sha
-        ));
-    }
-    if tree != receipt.tree_sha {
-        return Some(format!(
-            "ready receipt treeSha {} does not match HEAD^{{tree}} {tree}",
-            receipt.tree_sha
-        ));
-    }
-    None
-}
-
 impl ReadyReceipt {
     fn validate(self) -> Result<Self, String> {
         if !bare_file_name(&self.crew_id) {
@@ -2776,22 +2748,56 @@ impl ReadyReceipt {
             return Err("headSha must be a full commit SHA".into());
         }
         if !valid_sha(&self.tree_sha) {
-            return Err("treeSha must be a full tree SHA".into());
+            return Err("treeSha must be a full commit SHA".into());
         }
         if !valid_sha(&self.base_sha) {
             return Err("baseSha must be a full commit SHA".into());
         }
-        if self.gate_command.is_empty() || !self.gate_command.iter().all(|command| valid_receipt_line(command)) {
-            return Err("gateCommand must list each gate command that ran, one line each".into());
-        }
-        if !self.failed_or_skipped.iter().all(|test| valid_receipt_line(test)) {
-            return Err("failedOrSkipped must name one test per entry".into());
+        if self.gate_command.trim().is_empty() {
+            return Err("gateCommand must name the gate the branch survived".into());
         }
         if !valid_slug(&self.slug) {
             return Err("slug must be lowercase letters, digits and dashes".into());
         }
         Ok(self)
     }
+}
+
+/// Machine validation of a receipt against the crew worktree it names
+/// (SUR-207): the receipt only counts while the worktree still sits on the
+/// reviewed commit, so `git rev-parse HEAD` must be its `headSha` and
+/// `git rev-parse HEAD^{tree}` its `treeSha`. Any commit — or amend — past
+/// the reviewed one moves both answers and invalidates the receipt, which is
+/// what forces a re-review instead of landing unreviewed work.
+pub fn validate_ready_receipt(repo: &Path, receipt: &ReadyReceipt) -> Result<(), String> {
+    let rev_parse = |spec: &str| -> Result<String, String> {
+        let dir = repo.to_string_lossy().into_owned();
+        let output = std::process::Command::new("git")
+            .args(["-C", dir.as_str(), "rev-parse", spec])
+            .output()
+            .map_err(|error| format!("could not start git: {error}"))?;
+        if output.status.success() {
+            return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(format!(
+            "git rev-parse {spec} failed: {}",
+            if stderr.is_empty() { format!("exit {:?}", output.status.code()) } else { stderr }
+        ))
+    };
+    let head = rev_parse("HEAD")?;
+    if head != receipt.head_sha {
+        return Err(format!(
+            "the worktree sits on {}, not the reviewed {}",
+            &head[..head.len().min(12)],
+            &receipt.head_sha[..receipt.head_sha.len().min(12)]
+        ));
+    }
+    let tree = rev_parse("HEAD^{tree}")?;
+    if tree != receipt.tree_sha {
+        return Err("the worktree's tree no longer matches the reviewed tree".into());
+    }
+    Ok(())
 }
 
 /// The operations the queue cannot perform in-process. Tests substitute a
@@ -2805,8 +2811,6 @@ pub(crate) trait MergeRunner: Send + Sync {
     fn pull_request_head(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
     fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String>;
-    /// The crew checkout's `HEAD` and `HEAD^{tree}`: a receipt binds both.
-    fn checkout_head(&self, repo: &Path) -> Result<(String, String), String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
     /// publish the rebased branch tip without overwriting a newer remote tip,
     /// and return that tip.
@@ -2820,6 +2824,9 @@ pub(crate) trait MergeRunner: Send + Sync {
         before_publish: &dyn Fn(&str) -> Result<(), String>,
     ) -> Result<String, String>;
     fn land(&self, repo: &Path, pr: u64, head: &str) -> Result<String, String>;
+    /// The worktree check a receipt must survive at intake (SUR-207) — on the
+    /// seam so a test drives a stale worktree deterministically.
+    fn validate_receipt(&self, repo: &Path, receipt: &ReadyReceipt) -> Result<(), String>;
 }
 
 struct ShellMergeRunner;
@@ -2952,12 +2959,6 @@ impl MergeRunner for ShellMergeRunner {
         })
     }
 
-    fn checkout_head(&self, repo: &Path) -> Result<(String, String), String> {
-        let head = Self::git(repo, &["rev-parse".into(), "--verify".into(), "HEAD^{commit}".into()])?;
-        let tree = Self::git(repo, &["rev-parse".into(), "--verify".into(), "HEAD^{tree}".into()])?;
-        Ok((head, tree))
-    }
-
     fn rebase_gate_publish(
         &self,
         repo: &Path,
@@ -3053,6 +3054,10 @@ impl MergeRunner for ShellMergeRunner {
         } else {
             Err(format!("gh pr merge did not land the pull request; its state is {state}"))
         }
+    }
+
+    fn validate_receipt(&self, repo: &Path, receipt: &ReadyReceipt) -> Result<(), String> {
+        validate_ready_receipt(repo, receipt)
     }
 }
 
@@ -3260,14 +3265,6 @@ fn perform_merge(
         if remote_is_self_published && !published_heads.iter().any(|head| head == &remote_head) {
             published_heads.push(remote_head.clone());
         }
-        // The receipt is bound to the crew checkout: a commit made there after
-        // shipping, pushed or not, invalidates it before the gate and again
-        // before the rebased head is pushed over the crew branch.
-        let bound = || {
-            let (head, tree) = runner.checkout_head(repo)?;
-            receipt_binding_failure(receipt, &head, &tree).map_or(Ok(()), Err)
-        };
-        bound()?;
         let files = runner.changed_files(repo, &before, &receipt.head_sha)?;
         let fragment = format!("changelog.d/{}.md", receipt.slug);
         let fragment_exists = runner.file_exists_at(repo, &receipt.head_sha, &fragment)?;
@@ -3278,7 +3275,6 @@ fn perform_merge(
             head
         } else {
             let before_publish = |rebased_head: &str| {
-                bound()?;
                 write_merge_progress(
                     &progress_path,
                     &receipt.head_sha,
@@ -3384,6 +3380,15 @@ fn process_ready_claim(
                 .map_err(|error| format!("invalid ready receipt: {error}"))
         })
         .and_then(ReadyReceipt::validate)
+        // SUR-207: a receipt only counts while the worktree still sits on
+        // the reviewed commit; anything committed since invalidates it
+        // before the queue invests a gate in the stale tip.
+        .and_then(|receipt| {
+            runner
+                .validate_receipt(Path::new(&receipt.repo), &receipt)
+                .map(|_| receipt)
+                .map_err(|error| format!("stale ready receipt: {error}"))
+        })
     {
         Ok(receipt) if receipt.crew_id != crew_id => MergeOutcome {
             crew_id: crew_id.to_string(),
@@ -6478,15 +6483,14 @@ mod tests {
         pr_head: Mutex<String>,
         remote_head: Mutex<String>,
         files: Vec<String>,
-        checkout: Mutex<(String, String)>,
         on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         active: std::sync::atomic::AtomicUsize,
         max_active: std::sync::atomic::AtomicUsize,
         rebase_calls: std::sync::atomic::AtomicUsize,
         release: std::sync::atomic::AtomicUsize,
         land_calls: std::sync::atomic::AtomicUsize,
-        publish_calls: std::sync::atomic::AtomicUsize,
         move_target: std::sync::atomic::AtomicBool,
+        receipt_error: Mutex<Option<String>>,
     }
 
     impl FakeMergeRunner {
@@ -6498,15 +6502,14 @@ mod tests {
                 pr_head: Mutex::new("c".repeat(40)),
                 remote_head: Mutex::new("c".repeat(40)),
                 files: files.iter().map(|file| file.to_string()).collect(),
-                checkout: Mutex::new(("c".repeat(40), "d".repeat(40))),
                 on_rebase: Mutex::new(None),
                 active: std::sync::atomic::AtomicUsize::new(0),
                 max_active: std::sync::atomic::AtomicUsize::new(0),
                 rebase_calls: std::sync::atomic::AtomicUsize::new(0),
                 release: std::sync::atomic::AtomicUsize::new(0),
                 land_calls: std::sync::atomic::AtomicUsize::new(0),
-                publish_calls: std::sync::atomic::AtomicUsize::new(0),
                 move_target: std::sync::atomic::AtomicBool::new(false),
+                receipt_error: Mutex::new(None),
             }
         }
     }
@@ -6544,10 +6547,6 @@ mod tests {
             Ok(true)
         }
 
-        fn checkout_head(&self, _repo: &Path) -> Result<(String, String), String> {
-            Ok(self.checkout.lock().unwrap().clone())
-        }
-
         fn rebase_gate_publish(
             &self,
             _repo: &Path,
@@ -6575,13 +6574,19 @@ mod tests {
             bytes[39] = b'0' + (call as u8 % 10);
             let new_head = String::from_utf8(bytes).unwrap();
             before_publish(&new_head)?;
-            self.publish_calls.fetch_add(1, Ordering::SeqCst);
             Ok(new_head)
         }
 
         fn land(&self, _repo: &Path, _pr: u64, _head: &str) -> Result<String, String> {
             self.land_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok("merged".into())
+        }
+
+        fn validate_receipt(&self, _repo: &Path, _receipt: &ReadyReceipt) -> Result<(), String> {
+            match &*self.receipt_error.lock().unwrap() {
+                Some(error) => Err(error.clone()),
+                None => Ok(()),
+            }
         }
     }
 
@@ -6595,8 +6600,8 @@ mod tests {
             branch: format!("crew/{crew}"),
             head_sha: "c".repeat(40),
             tree_sha: "d".repeat(40),
-            base_sha: "a".repeat(40),
-            gate_command: vec!["cargo nextest run --locked".into(), "zgx test ui".into()],
+            base_sha: "e".repeat(40),
+            gate_command: "cargo nextest run -p zeron-engine --locked".into(),
             diff_tier: DiffTier::Standard,
             failed_or_skipped: Vec::new(),
             slug: format!("{crew}-change"),
@@ -6606,6 +6611,129 @@ mod tests {
             serde_json::to_string(&receipt).unwrap(),
         )
         .unwrap();
+    }
+
+    // ── SUR-207: machine-validated ready receipts ───────────────────
+
+    fn git_in(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .output()
+            .expect("git runs");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    fn receipt_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        git_in(dir.path(), &["init", "-q", "-b", "main"]);
+        git_in(dir.path(), &["config", "user.email", "crew@example.com"]);
+        git_in(dir.path(), &["config", "user.name", "Crew"]);
+        git_in(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("file.txt"), "one").unwrap();
+        git_in(dir.path(), &["add", "file.txt"]);
+        git_in(dir.path(), &["commit", "-q", "-m", "first"]);
+        dir
+    }
+
+    fn worktree_receipt(repo: &Path) -> ReadyReceipt {
+        ReadyReceipt {
+            crew_id: "crew-a".into(),
+            repo: repo.to_string_lossy().into_owned(),
+            pr: 100,
+            branch: "crew/crew-a".into(),
+            head_sha: git_in(repo, &["rev-parse", "HEAD"]),
+            tree_sha: git_in(repo, &["rev-parse", "HEAD^{tree}"]),
+            base_sha: git_in(repo, &["rev-parse", "HEAD"]),
+            gate_command: "cargo nextest run -p zeron-engine --locked".into(),
+            diff_tier: DiffTier::Standard,
+            failed_or_skipped: Vec::new(),
+            slug: "crew-a-change".into(),
+        }
+    }
+
+    /// The acceptance pin: a receipt the tool writes passes validation while
+    /// the worktree answers the same `git rev-parse HEAD` / `HEAD^{tree}`.
+    #[test]
+    fn helm_ready_receipt_a_valid_receipt_passes_against_matching_rev_parse() {
+        let repo = receipt_repo();
+        let receipt = worktree_receipt(repo.path());
+        validate_ready_receipt(repo.path(), &receipt).expect("a fresh receipt validates");
+    }
+
+    /// And its other half: one more commit — the worktree moving past the
+    /// reviewed tip — invalidates the receipt immediately.
+    #[test]
+    fn helm_ready_receipt_an_extra_commit_invalidates_the_receipt() {
+        let repo = receipt_repo();
+        let receipt = worktree_receipt(repo.path());
+        std::fs::write(repo.path().join("file.txt"), "two").unwrap();
+        git_in(repo.path(), &["add", "file.txt"]);
+        git_in(repo.path(), &["commit", "-q", "-m", "second"]);
+        let error = validate_ready_receipt(repo.path(), &receipt).expect_err("stale");
+        assert!(error.contains("not the reviewed"), "the reason names the drift: {error}");
+    }
+
+    /// A receipt edited to name the right commit but the wrong tree — what
+    /// an amend or a hand-written receipt produces — is rejected on the tree.
+    #[test]
+    fn helm_ready_receipt_a_mismatched_tree_invalidates_the_receipt() {
+        let repo = receipt_repo();
+        let mut receipt = worktree_receipt(repo.path());
+        receipt.tree_sha = "0".repeat(40);
+        let error = validate_ready_receipt(repo.path(), &receipt).expect_err("wrong tree");
+        assert!(error.contains("tree"), "the reason names the tree: {error}");
+    }
+
+    /// The machine-validation gate itself: a hand-written receipt in the old
+    /// shape — no `treeSha`, `baseSha` or gate record — does not parse, so it
+    /// can never reach the queue.
+    #[test]
+    fn helm_ready_receipt_the_old_shape_no_longer_parses() {
+        let old = serde_json::json!({
+            "crewId": "crew-a",
+            "repo": "/tmp/repo",
+            "pr": 100,
+            "branch": "crew/crew-a",
+            "headSha": "c".repeat(40),
+            "slug": "crew-a-change",
+        });
+        assert!(
+            serde_json::from_value::<ReadyReceipt>(old).is_err(),
+            "a receipt without the machine-written fields is not a receipt"
+        );
+    }
+
+    /// The queue wires the check: a receipt the runner declares stale is
+    /// failed at intake, never reaching the gate.
+    #[test]
+    fn helm_ready_receipt_a_stale_receipt_fails_before_the_gate() {
+        let root = tempfile::tempdir().unwrap();
+        let drive = root.path().join("captains").join("cap-a");
+        std::fs::create_dir_all(&drive).unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(&drive, "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.receipt_error.lock().unwrap() = Some("the worktree moved".into());
+        let outcomes = process_ready_receipts_with(&drive, &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(
+            outcomes[0].reason.contains("stale ready receipt"),
+            "the failure names the staleness: {}",
+            outcomes[0].reason
+        );
+        assert_eq!(
+            runner.rebase_calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "a stale receipt never enters the gate"
+        );
     }
 
     fn outcome_at(drive: &Path, crew: &str) -> MergeOutcome {
@@ -6975,187 +7103,6 @@ mod tests {
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
         assert!(outcomes[0].reason.contains("must not stamp VERSION"), "{}", outcomes[0].reason);
         assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
-    }
-
-    // ── SUR-207: helm_ready_receipt_, receipts bound to HEAD and its tree ──
-
-    fn receipt_git(repo: &Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .args(["-c", "user.name=crew", "-c", "user.email=crew@example.invalid", "-c", "commit.gpgsign=false"])
-            .args(args)
-            .current_dir(repo)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-
-    fn receipt_repo() -> tempfile::TempDir {
-        let repo = tempfile::tempdir().unwrap();
-        receipt_git(repo.path(), &["init", "--quiet"]);
-        std::fs::write(repo.path().join("a.txt"), "one\n").unwrap();
-        receipt_git(repo.path(), &["add", "a.txt"]);
-        receipt_git(repo.path(), &["commit", "--quiet", "-m", "base"]);
-        repo
-    }
-
-    /// A receipt for `repo`'s current HEAD, as `captain_ship_ready` writes it.
-    fn receipt_for_head(repo: &Path) -> ReadyReceipt {
-        ReadyReceipt {
-            crew_id: "crew-a".into(),
-            repo: repo.to_string_lossy().into_owned(),
-            pr: 7,
-            branch: "crew/crew-a".into(),
-            head_sha: receipt_git(repo, &["rev-parse", "HEAD"]),
-            tree_sha: receipt_git(repo, &["rev-parse", "HEAD^{tree}"]),
-            base_sha: receipt_git(repo, &["rev-parse", "HEAD"]),
-            gate_command: vec!["cargo nextest run --locked".into(), "zgx test ui".into()],
-            diff_tier: DiffTier::Standard,
-            failed_or_skipped: Vec::new(),
-            slug: "crew-a-change".into(),
-        }
-    }
-
-    /// The acceptance pin: a receipt written for HEAD validates against that
-    /// checkout's `git rev-parse HEAD` / `HEAD^{tree}`, and the next commit —
-    /// one that changes the tree — invalidates it immediately.
-    #[test]
-    fn helm_ready_receipt_binds_head_and_tree_until_the_next_commit() {
-        let repo = receipt_repo();
-        let receipt = receipt_for_head(repo.path());
-        validate_ready_receipt(&receipt, repo.path()).unwrap();
-
-        std::fs::write(repo.path().join("a.txt"), "two\n").unwrap();
-        receipt_git(repo.path(), &["commit", "--quiet", "-am", "after review"]);
-        let error = validate_ready_receipt(&receipt, repo.path()).unwrap_err();
-        assert!(error.contains("headSha"), "{error}");
-
-        // Rewriting headSha to the new tip does not launder the receipt: the
-        // tree it recorded is no longer HEAD's tree.
-        let forged = ReadyReceipt {
-            head_sha: receipt_git(repo.path(), &["rev-parse", "HEAD"]),
-            ..receipt.clone()
-        };
-        let error = validate_ready_receipt(&forged, repo.path()).unwrap_err();
-        assert!(error.contains("treeSha"), "{error}");
-        validate_ready_receipt(&receipt_for_head(repo.path()), repo.path()).unwrap();
-    }
-
-    /// An empty commit keeps the tree but still moves HEAD; the receipt names
-    /// the exact reviewed commit, so it is refused too.
-    #[test]
-    fn helm_ready_receipt_refuses_an_empty_commit_after_review() {
-        let repo = receipt_repo();
-        let receipt = receipt_for_head(repo.path());
-        receipt_git(repo.path(), &["commit", "--quiet", "--allow-empty", "-m", "empty"]);
-        assert_eq!(receipt.tree_sha, receipt_git(repo.path(), &["rev-parse", "HEAD^{tree}"]));
-        let error = validate_ready_receipt(&receipt, repo.path()).unwrap_err();
-        assert!(error.contains("headSha"), "{error}");
-    }
-
-    /// Field checks run before git: every SHA is a full hash, at least one
-    /// gate command is recorded, and each entry is a single line.
-    #[test]
-    fn helm_ready_receipt_rejects_malformed_fields() {
-        let repo = receipt_repo();
-        let good = receipt_for_head(repo.path());
-        let cases: Vec<(ReadyReceipt, &str)> = vec![
-            (ReadyReceipt { tree_sha: "abc".into(), ..good.clone() }, "treeSha"),
-            (ReadyReceipt { base_sha: String::new(), ..good.clone() }, "baseSha"),
-            (ReadyReceipt { gate_command: Vec::new(), ..good.clone() }, "gateCommand"),
-            (ReadyReceipt { gate_command: vec![" ".into()], ..good.clone() }, "gateCommand"),
-            (ReadyReceipt { failed_or_skipped: vec!["a\nb".into()], ..good.clone() }, "failedOrSkipped"),
-        ];
-        for (receipt, field) in cases {
-            let error = validate_ready_receipt(&receipt, repo.path()).unwrap_err();
-            assert!(error.contains(field), "{field}: {error}");
-        }
-    }
-
-    /// The JSON shape is closed: a receipt missing its tree binding, or naming
-    /// a diff tier outside docs / standard / s1, never reaches the merge gate.
-    #[test]
-    fn helm_ready_receipt_queue_refuses_unbound_receipts() {
-        use std::sync::atomic::Ordering;
-        let drive = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        let ready = drive.path().join("state").join(MERGE_READY_DIR);
-        std::fs::create_dir_all(&ready).unwrap();
-        let sha = "c".repeat(40);
-        let legacy = serde_json::json!({
-            "crewId": "crew-a", "repo": repo.path(), "pr": 100, "branch": "crew/crew-a",
-            "headSha": sha, "slug": "crew-a-change",
-        });
-        std::fs::write(ready.join("crew-a.json"), legacy.to_string()).unwrap();
-        let mut tiered = serde_json::to_value({
-            ready_receipt(drive.path(), "crew-b", repo.path());
-            serde_json::from_str::<ReadyReceipt>(&std::fs::read_to_string(ready.join("crew-b.json")).unwrap()).unwrap()
-        })
-        .unwrap();
-        tiered["diffTier"] = "trivial".into();
-        std::fs::write(ready.join("crew-b.json"), tiered.to_string()).unwrap();
-        assert_eq!(serde_json::to_value(DiffTier::S1).unwrap(), "s1");
-
-        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md", "changelog.d/crew-b-change.md"]);
-        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
-        assert_eq!(outcomes.len(), 2);
-        for crew in ["crew-a", "crew-b"] {
-            let outcome = outcome_at(drive.path(), crew);
-            assert_eq!(outcome.status, MergeOutcomeStatus::Failed, "{crew}");
-            assert!(outcome.reason.contains("invalid ready receipt"), "{crew}: {}", outcome.reason);
-        }
-        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
-    }
-
-    /// The queue re-reads the reviewed commit's tree: a receipt whose treeSha
-    /// is not that commit's tree fails before the gate runs.
-    #[test]
-    fn helm_ready_receipt_queue_refuses_a_tree_mismatch() {
-        use std::sync::atomic::Ordering;
-        let drive = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        ready_receipt(drive.path(), "crew-a", repo.path());
-        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
-        runner.checkout.lock().unwrap().1 = "e".repeat(40);
-        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
-        assert!(outcomes[0].reason.contains("treeSha"), "{}", outcomes[0].reason);
-        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
-    }
-
-    /// A commit made in the crew checkout after shipping invalidates the
-    /// receipt even while the remote branch still names the reviewed head:
-    /// before the gate, and again when it lands during the gate, before the
-    /// rebased head is pushed over the crew branch.
-    #[test]
-    fn helm_ready_receipt_queue_refuses_a_local_commit_after_shipping() {
-        use std::sync::atomic::Ordering;
-        let drive = tempfile::tempdir().unwrap();
-        let repo = tempfile::tempdir().unwrap();
-        ready_receipt(drive.path(), "crew-a", repo.path());
-        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
-        *runner.checkout.lock().unwrap() = ("f".repeat(40), "e".repeat(40));
-        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
-        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
-        assert!(outcomes[0].reason.contains("headSha"), "{}", outcomes[0].reason);
-        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
-
-        ready_receipt(drive.path(), "crew-a", repo.path());
-        let runner = Arc::new(FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]));
-        runner.release.store(1, Ordering::SeqCst);
-        let during = runner.clone();
-        *runner.on_rebase.lock().unwrap() = Some(Box::new(move || {
-            *during.checkout.lock().unwrap() = ("f".repeat(40), "e".repeat(40));
-        }));
-        let outcomes = process_ready_receipts_with(drive.path(), runner.as_ref(), None);
-        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
-        assert!(outcomes[0].reason.contains("headSha"), "{}", outcomes[0].reason);
-        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(runner.publish_calls.load(Ordering::SeqCst), 0);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
 

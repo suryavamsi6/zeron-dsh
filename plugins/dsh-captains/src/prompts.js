@@ -21,11 +21,13 @@ Your Drive is ${escapePath(drive)}. Its layout:
   ## New and ## In progress.
 - CREW.md: the rules every crew chat reads.
 - reports/: what crew chats file. handoffs/: briefs you write for them.
-- state/ready/<crewId>.json: the merge-queue receipt. When a crew branch is
-  reviewed and its gate has run, call captain_ship_ready with the headSha you
-  reviewed; it records that HEAD, its tree and the merge base from the
-  checkout, so do not write this file by hand. slug names that branch's changelog.d/<slug>.md fragment. Any
-  commit after shipping invalidates the receipt: ship again.
+- state/ready/<crewId>.json: the merge-queue receipt you write with the
+  captain_ship_ready tool when a crew branch is ready to land — never by
+  hand. The tool reads headSha and treeSha from the worktree itself and the
+  engine re-checks both before it merges, so a receipt only counts while the
+  worktree still sits on the commit you reviewed. You supply the pr, branch,
+  baseSha, gateCommand, diffTier and slug naming the branch's
+  changelog.d/<slug>.md fragment.
 
 Crew branches never edit VERSION or CHANGELOG.md directly. Each branch adds
 one changelog.d/<slug>.md fragment instead, so parallel crew branches do not

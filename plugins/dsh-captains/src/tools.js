@@ -1,6 +1,6 @@
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const OUTSIDE = 'path is outside the Captain Drive';
 const READ_CAP = 64 * 1024;
@@ -82,106 +82,6 @@ export function resolveInDrive(drive, rel) {
 
 let tmpCounter = 0;
 
-function writeAtomic(realTarget, content) {
-  // Resolution and I/O are not atomic: a symlink swapped between
-  // resolveInDrive and this rename can still redirect the write to
-  // wherever the new link points. Checking the real path narrows the
-  // window; it does not close it.
-  const dir = path.dirname(realTarget);
-  fs.mkdirSync(dir, { recursive: true });
-  const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
-  try {
-    fs.writeFileSync(tmp, content);
-    fs.renameSync(tmp, realTarget);
-  } catch (error) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // the temp file never landed or the rename already moved it
-    }
-    throw error;
-  }
-}
-
-export const DIFF_TIERS = ['docs', 'standard', 's1'];
-
-function git(repo, args) {
-  try {
-    // The checkout is model-selected: never let its config run an fsmonitor
-    // hook while the receipt is being read.
-    return execFileSync('git', ['-C', repo, '-c', 'core.fsmonitor=false', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-  } catch (error) {
-    const stderr = String(error.stderr ?? '').trim();
-    throw new Error(`git ${args.join(' ')} failed${stderr === '' ? '' : `: ${stderr}`}`);
-  }
-}
-
-const receiptLine = value => typeof value === 'string' && value.trim() !== '' && value.length <= 512
-  && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-
-// SUR-207: the receipt the engine's merge queue reads. HEAD and its tree are
-// read from the crew checkout itself, never typed by the model, so a later
-// commit — which moves both — leaves the receipt naming a commit that is no
-// longer the branch tip, and the engine refuses it.
-export function shipReadyReceipt(drive, args) {
-  const { crewId, repo, pr, branch, headSha, slug, diffTier, gateCommand, failedOrSkipped = [], base = 'origin/main' } = args;
-  if (typeof crewId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(crewId)) {
-    throw new Error('crewId must be letters, digits, dashes and underscores');
-  }
-  if (typeof repo !== 'string' || !path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
-  if (!Number.isInteger(pr) || pr <= 0) throw new Error('pr must be a pull request number');
-  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha)) {
-    throw new Error('headSha must be the full commit SHA that was reviewed');
-  }
-  if (typeof slug !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/.test(slug)) {
-    throw new Error('slug must be lowercase letters, digits and dashes');
-  }
-  if (!DIFF_TIERS.includes(diffTier)) throw new Error(`diffTier must be one of ${DIFF_TIERS.join(', ')}`);
-  if (!Array.isArray(gateCommand) || gateCommand.length === 0 || !gateCommand.every(receiptLine)) {
-    throw new Error('gateCommand must list each gate command that ran, one line each');
-  }
-  if (!Array.isArray(failedOrSkipped) || !failedOrSkipped.every(receiptLine)) {
-    throw new Error('failedOrSkipped must name one test per entry');
-  }
-  if (typeof base !== 'string' || base === '' || base.startsWith('-')) throw new Error('base must name a revision');
-  const current = git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
-  if (current !== branch) {
-    throw new Error(`the checkout at ${repo} is on ${current}, not ${branch}; ship the branch that was reviewed`);
-  }
-  if (git(repo, ['status', '--porcelain', '--untracked-files=no']) !== '') {
-    throw new Error(`the checkout at ${repo} has uncommitted changes; commit them before shipping`);
-  }
-  const head = git(repo, ['rev-parse', '--verify', 'HEAD^{commit}']);
-  // The gate results and the review belong to headSha; a commit made after
-  // the review must be reviewed before it can ship.
-  if (head !== headSha) {
-    throw new Error(`HEAD is ${head}, not the reviewed ${headSha}; review the new commits and ship again`);
-  }
-  const receipt = {
-    crewId,
-    repo,
-    pr,
-    branch,
-    headSha: head,
-    treeSha: git(repo, ['rev-parse', '--verify', 'HEAD^{tree}']),
-    baseSha: git(repo, ['merge-base', 'HEAD', base]),
-    gateCommand,
-    diffTier,
-    failedOrSkipped,
-    slug,
-  };
-  const rel = `state/ready/${crewId}.json`;
-  const { realTarget, realDrive } = resolveInDrive(drive, rel);
-  // A symlinked state/ or state/ready/ must not carry the receipt into
-  // another engine-owned file: the resolved destination is checked the same
-  // way captain_drive_write checks it.
-  if (!isMergeReadyInput(path.relative(realDrive, realTarget).split(path.sep))) {
-    throw new Error(`'${rel}' does not resolve to the merge-queue receipt folder`);
-  }
-  writeAtomic(realTarget, JSON.stringify(receipt, null, 2) + '\n');
-  return receipt;
-}
-
 export function driveToolSpecs(cfg) {
   const drive = driveDir(cfg);
   const output = {
@@ -247,32 +147,126 @@ export function driveToolSpecs(cfg) {
         if (bytes > WRITE_CAP) {
           throw new Error('content exceeds the 256 KB Captain Drive write limit');
         }
-        writeAtomic(realTarget, content);
+        // Resolution and I/O are not atomic: a symlink swapped between
+        // resolveInDrive and this rename can still redirect the write to
+        // wherever the new link points. Checking the real path narrows the
+        // window; it does not close it.
+        const dir = path.dirname(realTarget);
+        fs.mkdirSync(dir, { recursive: true });
+        const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
+        try {
+          fs.writeFileSync(tmp, content);
+          fs.renameSync(tmp, realTarget);
+        } catch (error) {
+          try {
+            fs.unlinkSync(tmp);
+          } catch {
+            // the temp file never landed or the rename already moved it
+          }
+          throw error;
+        }
         return `wrote ${display} (${bytes} bytes)`;
       },
     },
     {
       name: 'captain_ship_ready',
-      description: 'Mark a reviewed crew branch ready to land: reads HEAD, its tree and the merge base from the crew checkout and writes state/ready/<crewId>.json for the merge queue. Any later commit invalidates the receipt; ship again after it.',
+      description: 'Write the merge-queue receipt for a crew branch whose pull request is ready to land; the git-derived fields are read from the worktree itself, never taken on trust',
       parameters: {
-        crewId: { type: 'string', required: true, description: 'The crew chat id; names the receipt file' },
-        repo: { type: 'string', required: true, description: 'Absolute path of the crew checkout, with the reviewed branch checked out' },
-        pr: { type: 'integer', required: true, description: 'The pull request number' },
-        branch: { type: 'string', required: true, description: 'The crew branch; must be the checked-out branch' },
-        headSha: { type: 'string', required: true, description: 'The full commit SHA you reviewed; must still be HEAD' },
-        slug: { type: 'string', required: true, description: 'Names the branch\'s changelog.d/<slug>.md fragment' },
-        diffTier: { type: 'string', required: true, enum: DIFF_TIERS, description: 'docs, standard or s1' },
-        gateCommand: { type: 'array', required: true, items: { type: 'string' }, description: 'Each gate command that ran, e.g. cargo nextest run --locked, zgx test ui' },
-        failedOrSkipped: { type: 'array', items: { type: 'string' }, description: 'Every test the gate failed or skipped; empty when all passed' },
-        base: { type: 'string', description: 'Revision the merge base is taken against; defaults to origin/main' },
+        crewId: { type: 'string', required: true, description: 'The crew chat whose branch this is; names state/ready/<crewId>.json' },
+        repo: { type: 'string', required: true, description: 'Absolute path of the crew worktree the branch tip is read from' },
+        pr: { type: 'number', required: true, description: 'The pull request number' },
+        branch: { type: 'string', required: true, description: 'The branch the pull request is opened from' },
+        reviewedSha: { type: 'string', required: true, description: 'The commit you reviewed; the write is refused when the worktree has moved past it' },
+        baseSha: { type: 'string', required: true, description: 'The commit the branch built on; verified as an ancestor of the branch tip' },
+        gateCommand: { type: 'string', required: true, description: 'The gate the branch survived, e.g. "cargo nextest run" or "zgx test ui"' },
+        diffTier: { type: 'string', required: true, description: '"docs", "standard" or "s1"' },
+        failedOrSkipped: { type: 'array', description: 'Gate legs that failed or were skipped, if any' },
+        slug: { type: 'string', required: true, description: 'The changelog.d/<slug>.md fragment this branch adds' },
       },
       output,
-      async execute(args) {
+      async execute({ crewId, repo, pr, branch, reviewedSha, baseSha, gateCommand, diffTier, failedOrSkipped, slug }) {
         if (process.env.DSH_PERMISSION_MODE === 'read-only') {
           throw new Error('the Captain Drive is read-only in this run');
         }
-        const receipt = shipReadyReceipt(drive, args);
-        return `wrote state/ready/${receipt.crewId}.json for ${receipt.headSha} (tree ${receipt.treeSha})`;
+        // Every shape rule mirrors the engine's ReadyReceipt::validate — a
+        // receipt the engine would reject is refused here, at the write.
+        if (!/^[A-Za-z0-9_-]+$/.test(crewId)) throw new Error('crewId must be a bare file name');
+        if (!path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
+        if (!Number.isInteger(pr) || pr < 1) throw new Error('pr must be a pull request number');
+        // The same rule as the engine's valid_branch: alphanumerics, dots and
+        // the separators, none of git's metacharacters.
+        if (
+          typeof branch !== 'string' || branch.length < 1 || branch.length > 200
+          || branch.startsWith('-') || branch.startsWith('/') || branch.endsWith('/') || branch.endsWith('.lock')
+          || branch.includes('..') || branch.includes('@{')
+          || !/^[A-Za-z0-9._/-]+$/.test(branch)
+        ) {
+          throw new Error('branch is not a safe git branch name');
+        }
+        if (!/^[0-9a-f]{40}$/.test(reviewedSha)) throw new Error('reviewedSha must be a full commit SHA');
+        if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error('baseSha must be a full commit SHA');
+        if (typeof gateCommand !== 'string' || gateCommand.trim() === '') {
+          throw new Error('gateCommand must name the gate the branch survived');
+        }
+        if (!['docs', 'standard', 's1'].includes(diffTier)) throw new Error('diffTier must be "docs", "standard" or "s1"');
+        if (!/^[a-z0-9-]+$/.test(slug)) throw new Error('slug must be lowercase letters, digits and dashes');
+        const skipped = Array.isArray(failedOrSkipped) ? failedOrSkipped : [];
+        if (skipped.some(leg => typeof leg !== 'string')) throw new Error('failedOrSkipped must be a list of gate leg names');
+
+        // headSha and treeSha are read from the worktree, never taken as
+        // parameters: the receipt can only ever name the commit that is
+        // actually there, and the engine re-checks both before it merges.
+        const git = args => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+        let headSha, treeSha;
+        try {
+          headSha = git(['rev-parse', 'HEAD']);
+          treeSha = git(['rev-parse', 'HEAD^{tree}']);
+        } catch (error) {
+          throw new Error(`could not read the worktree's tip: ${error.message}`);
+        }
+        // The receipt covers the reviewed commit and nothing newer: a crew
+        // that pushed since the review moves the worktree's tip, and the
+        // write is refused until the new tip is reviewed.
+        if (headSha !== reviewedSha) {
+          throw new Error(`the worktree sits on ${headSha.slice(0, 12)}, not the reviewed ${reviewedSha.slice(0, 12)} — review the new tip first`);
+        }
+        try {
+          git(['merge-base', '--is-ancestor', baseSha, 'HEAD']);
+        } catch {
+          throw new Error('baseSha is not an ancestor of the branch tip — the branch was rebased since, or the base is wrong');
+        }
+
+        const receipt = {
+          crewId,
+          repo,
+          pr,
+          branch,
+          headSha,
+          treeSha,
+          baseSha,
+          gateCommand,
+          diffTier,
+          failedOrSkipped: skipped,
+          slug,
+        };
+        const rel = `state/ready/${crewId}.json`;
+        const { realTarget } = resolveInDrive(drive, rel);
+        const dir = path.dirname(realTarget);
+        fs.mkdirSync(dir, { recursive: true });
+        const content = JSON.stringify(receipt, null, 2) + '\n';
+        const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
+        try {
+          fs.writeFileSync(tmp, content);
+          fs.renameSync(tmp, realTarget);
+        } catch (error) {
+          try {
+            fs.unlinkSync(tmp);
+          } catch {
+            // the temp file never landed or the rename already moved it
+          }
+          throw error;
+        }
+        return `ready receipt written for ${crewId} at ${headSha.slice(0, 12)} (tree ${treeSha.slice(0, 12)})`;
       },
     },
   ];
