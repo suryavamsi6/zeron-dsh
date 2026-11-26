@@ -514,6 +514,8 @@ pub use catalog_failure::{CatalogFailure, CatalogFailureCode};
 pub use zeron_proto::redact;
 pub mod agent_ports;
 pub mod deepseek;
+pub mod devin;
+pub(crate) mod jsonrpc;
 pub(crate) mod executable;
 pub mod install;
 pub(crate) mod lossy_lines;

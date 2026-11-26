@@ -748,6 +748,7 @@ fn full_registry() -> HarnessRegistry {
     zeron_harness::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(zeron_harness::DeepSeekHarness::new()));
+    registry.register(Arc::new(zeron_harness::devin::DevinHarness::new()));
     if HarnessId::Mock.can_run() && std::env::var("COMET_HARNESS").as_deref() == Ok("mock") {
         registry.register(Arc::new(MockHarness {
             script: vec![AgentEvent::Done {
