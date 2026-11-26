@@ -1416,6 +1416,34 @@ impl SessionsEngine {
         // this send carries it too and a role change reads as a changed
         // launch configuration, never a steer.
         self.stamp_captain_role(chat_id, harness_id, &mut request);
+        // SUR-208: a Helm Captain whose session has spent the context ceiling
+        // rolls over. Computed once here because both routing seams need it:
+        // the parked-session veto below (a warm runtime otherwise accepts
+        // every follow-up into the same session and the ceiling never fires)
+        // and the fresh-run bootstrap further down. A slash command is never
+        // a rollover turn: prefixing it would strip the harness's native
+        // routing, so the command runs on the session it means and the next
+        // plain message rolls over instead.
+        let mut rollover: Option<(std::path::PathBuf, u64)> = None;
+        if harness_id == HarnessId::DeepSeek && !request.prompt.starts_with('/') {
+            let stamp = request
+                .env
+                .get(CAPTAINS_ENV)
+                .and_then(|stamp| serde_json::from_str::<serde_json::Value>(stamp).ok());
+            if let Some(stamp) = stamp
+                && stamp["role"].as_str() == Some("captain")
+                && let Some(drive) = stamp["driveRoot"].as_str().filter(|drive| !drive.is_empty())
+            {
+                let drive = std::path::PathBuf::from(drive);
+                if let Some(cumulative) = crate::captains::rollover_due(
+                    &drive,
+                    chat_id,
+                    crate::captains::HELM_CONTEXT_CEILING_TOKENS,
+                ) {
+                    rollover = Some((drive, cumulative));
+                }
+            }
+        }
         // Native-only catalog entries have no portable file fallback. Reject
         // cross-harness delivery before recording or routing the user turn.
         zeron_proto::invocation::validate_harness_invocations(&request.prompt, harness_id)
@@ -1464,9 +1492,21 @@ impl SessionsEngine {
             // A parked session started with another account (Cloud), from a
             // CLI binary since updated, or with native subagents since
             // switched: replace it.
-            let route = if self
-                .credential_changed(chat_id, harness_id, credential.as_deref())
-                .await
+            // The rollover veto is a parked-session replacement like the
+            // credential and binary ones, with their guards: never mid-turn,
+            // never with background work still on the session. Without it a
+            // warm Captain accepts every follow-up into the same session and
+            // the ceiling never fires.
+            let rollover_now = rollover.is_some()
+                && !self.turn_in_flight(chat_id)
+                && !self.holds_background_work(chat_id);
+            if rollover_now {
+                tracing::info!(chat = %chat_id, "context ceiling crossed; replacing the parked session");
+            }
+            let route = if rollover_now
+                || self
+                    .credential_changed(chat_id, harness_id, credential.as_deref())
+                    .await
                 || self
                     .binary_changed(chat_id, harness_id, live_harness, binary.as_deref())
                     .await
@@ -1638,33 +1678,23 @@ impl SessionsEngine {
         // of the scorecard, so the check survives an engine restart; the
         // marker written here rebases it, so exactly one dispatch per ceiling
         // rolls over.
-        let mut rollover = false;
-        if harness_id == HarnessId::DeepSeek {
+        let rolling = rollover.is_some();
+        if let Some((drive, cumulative)) = rollover {
             let stamp = request
                 .env
                 .get(CAPTAINS_ENV)
                 .and_then(|stamp| serde_json::from_str::<serde_json::Value>(stamp).ok());
-            if let Some(stamp) = stamp
-                && stamp["role"].as_str() == Some("captain")
-                && let Some(drive) = stamp["driveRoot"].as_str().filter(|drive| !drive.is_empty())
-            {
-                let drive = std::path::PathBuf::from(drive);
-                if let Some(cumulative) = crate::captains::rollover_due(
-                    &drive,
-                    chat_id,
-                    crate::captains::HELM_CONTEXT_CEILING_TOKENS,
-                ) {
-                    rollover = true;
-                    let name = stamp["captainName"].as_str().unwrap_or("Captain");
-                    request.prompt =
-                        format!("{}{}", crate::captains::rollover_bootstrap(name, &drive), request.prompt);
-                    crate::captains::mark_rollover(&drive, cumulative);
-                    tracing::info!(chat = %chat_id, cumulative, "captain context rollover: fresh session");
-                }
-            }
+            let name = stamp
+                .as_ref()
+                .and_then(|stamp| stamp["captainName"].as_str())
+                .unwrap_or("Captain");
+            request.prompt =
+                format!("{}{}", crate::captains::rollover_bootstrap(name, &drive), request.prompt);
+            crate::captains::mark_rollover(&drive, cumulative);
+            tracing::info!(chat = %chat_id, cumulative, "captain context rollover: fresh session");
         }
         let mut resume_injected = false;
-        if request.resume.is_none() && !rollover {
+        if request.resume.is_none() && !rolling {
             let live = |id: &String| !self.inner.resume_was_rejected(chat_id, id);
             request.resume = self
                 .inner
@@ -9545,6 +9575,148 @@ mod tests {
         assert!(drive.join("state").join(crate::captains::ROLLOVER_FILE).exists());
         let baseline = std::fs::read_to_string(drive.join("state").join(crate::captains::ROLLOVER_FILE)).unwrap();
         assert!(baseline.contains("270000"), "the marker holds the rollover cumulative: {baseline}");
+        sessions.shutdown().await;
+    }
+
+    /// A harness that feeds its first run by hand and serves every later
+    /// run an empty stream, recording each request it sees — so a test can
+    /// watch what a re-dispatch after the parked session's replacement
+    /// actually launched.
+    struct MultiCaptureHarness {
+        feed: Mutex<Option<mpsc::UnboundedReceiver<AgentEvent>>>,
+        seen: Arc<Mutex<Vec<RunRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Harness for MultiCaptureHarness {
+        fn id(&self) -> HarnessId {
+            HarnessId::DeepSeek
+        }
+        fn display_name(&self) -> &str {
+            "MultiCapture"
+        }
+        fn supports_steering(&self) -> bool {
+            true
+        }
+        fn steering_mode(&self) -> zeron_proto::SteeringMode {
+            zeron_proto::SteeringMode::StepBoundary
+        }
+        fn reasoning_levels(&self) -> &[zeron_proto::ReasoningLevel] {
+            &[zeron_proto::ReasoningLevel::Medium]
+        }
+        async fn models(&self) -> Result<Vec<zeron_proto::Model>, zeron_harness::HarnessError> {
+            Ok(vec![])
+        }
+        async fn run(
+            &self,
+            request: RunRequest,
+            _controls: RunControls,
+        ) -> Result<
+            futures::stream::BoxStream<'static, Result<AgentEvent, zeron_harness::HarnessError>>,
+            zeron_harness::HarnessError,
+        > {
+            self.seen.lock().unwrap().push(request);
+            let feed = self.feed.lock().unwrap().take();
+            match feed {
+                Some(mut feed) => {
+                    Ok(futures::stream::poll_fn(move |cx| feed.poll_recv(cx).map(|e| e.map(Ok))).boxed())
+                }
+                None => Ok(futures::stream::pending().boxed()),
+            }
+        }
+    }
+
+    /// The acceptance pin's warm-session half (SUR-208 review): a Captain
+    /// whose turn ended past the ceiling keeps a parked session, and the
+    /// next message must not steer into it — the veto replaces the runtime,
+    /// so the follow-up starts a fresh session carrying the bootstrap.
+    #[tokio::test]
+    async fn helm_rollover_a_follow_up_does_not_steer_into_the_ceilinged_session() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (feed_tx, feed_rx) = mpsc::unbounded_channel();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(MultiCaptureHarness {
+            feed: Mutex::new(Some(feed_rx)),
+            seen: seen.clone(),
+        }));
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), NEEDS_YOU_REGISTRY).expect("registry");
+        let home = dir.path().join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.path().join("journals")).expect("journal")),
+            Arc::new(registry),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.path().join("docs")).expect("store"));
+        sessions.set_doc_host(DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::DeepSeek,
+                edge: None,
+            },
+        ));
+        let drive = crate::captains::drive_dir(&home, "cap-a");
+
+        // Turn one: past the ceiling, run to Done — the runtime parks.
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the first run dispatches");
+        feed_tx.send(started()).expect("started");
+        feed_tx.send(usage(200_000, 500, None)).expect("usage 1");
+        feed_tx.send(usage(100_000, 500, None)).expect("usage 2");
+        feed_tx.send(done(DoneStatus::Completed)).expect("done");
+        let rows = scorecard_rows(&drive).await;
+        assert_eq!(rows.len(), 1, "the first turn is scored: {rows:?}");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The follow-up: the parked session is over the ceiling, so the veto
+        // replaces it — a fresh run with the bootstrap, never a steer.
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the follow-up dispatches");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let launches = seen.lock().unwrap().clone();
+        assert_eq!(launches.len(), 2, "the follow-up launched a fresh session rather than steering: {}", launches.len());
+        assert!(
+            launches[1].prompt.starts_with("[context rollover]"),
+            "the replacement carries the bootstrap: {}",
+            &launches[1].prompt[..launches[1].prompt.len().min(120)]
+        );
+        assert!(launches[1].resume.is_none(), "the replacement resumes nothing");
+        sessions.shutdown().await;
+    }
+
+    /// A slash command is never a rollover turn (SUR-208 review): the
+    /// harness routes `/compact` natively, and prefixing the bootstrap would
+    /// strip that routing — so the command runs untouched and the next plain
+    /// message rolls over instead.
+    #[tokio::test]
+    async fn helm_rollover_a_slash_command_is_never_rewritten() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, drive, seen) = rollover_engine(dir.path());
+        rollover_score_row(&drive, "t1", 300_000);
+        let mut slash = request();
+        slash.prompt = "/compact".into();
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, slash, None)
+            .await
+            .expect("the run dispatches");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let captured = seen.lock().unwrap().clone().expect("the harness ran");
+        assert_eq!(captured.prompt, "/compact", "the command reaches the harness verbatim");
+        assert!(
+            !drive.join("state").join(crate::captains::ROLLOVER_FILE).exists(),
+            "a command turn writes no marker — the rollover waits for a plain message"
+        );
         sessions.shutdown().await;
     }
 
