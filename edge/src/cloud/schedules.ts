@@ -385,10 +385,16 @@ export function planFire(row: CloudSchedule, now: number, pendingWakeup: boolean
   return { kind: "fire", occurrenceAt: row.next_fire_at ?? now, nextFireAt };
 }
 
+/** The ack window a wake-up at `attempts` retries gets before the next
+ * rewake — or, at the cap, before the occurrence drops. */
+export function wakeupWindowMs(w: CloudWakeup): number {
+  const backoff = Math.min(WAKEUP_RETRY_CAP_MS, WAKEUP_ACK_TIMEOUT_MS * 2 ** Math.min(w.attempts, 3));
+  return Math.max(WAKEUP_ACK_TIMEOUT_MS, backoff);
+}
+
 /** Whether an unacked wake-up should rewake its machine now, and the backoff. */
 export function wakeupRetryDue(w: CloudWakeup, now: number): boolean {
   if (w.state !== "pending" || w.attempts >= MAX_WAKEUP_ATTEMPTS) return false;
   const since = now - (w.nudged_at ?? w.created_at);
-  const backoff = Math.min(WAKEUP_RETRY_CAP_MS, WAKEUP_ACK_TIMEOUT_MS * 2 ** Math.min(w.attempts, 3));
-  return since >= Math.max(WAKEUP_ACK_TIMEOUT_MS, backoff);
+  return since >= wakeupWindowMs(w);
 }

@@ -131,6 +131,7 @@ import {
   parseRrule,
   planFire,
   wakeupRetryDue,
+  wakeupWindowMs,
   type CloudSchedule,
   type CloudWakeup
 } from "./schedules";
@@ -2163,21 +2164,25 @@ export class CloudAccount extends DurableObject<Env> {
     for (const w of pendings) {
       const s = this.sessions.get(w.chat_id);
       if (!s || s.pendingDelete || s.state === "deleting") {
-        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=?", w.fire_id);
+        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=? AND state='pending'", w.fire_id);
         continue;
       }
       // Past the attempt cap the occurrence is dropped, never backlogged —
       // and it must LEAVE pending: a row that stayed would coalesce every
-      // later occurrence of its schedule forever.
+      // later occurrence of its schedule forever. The last rewake still gets
+      // its ack window first, and the write is conditional on the row still
+      // being pending: the sweep's awaits interleave with ackWakeup, and a
+      // delivered wake-up must never read as dropped.
       if (w.attempts >= MAX_WAKEUP_ATTEMPTS) {
-        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=?", w.fire_id);
+        if (now - (w.nudged_at ?? w.created_at) < wakeupWindowMs(w)) continue;
+        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=? AND state='pending'", w.fire_id);
         sql.exec("UPDATE cloud_schedule SET last_error=?, updated_at=? WHERE id=?",
           "the machine never acknowledged the wake-up", now, w.schedule_id);
         continue;
       }
       if (!wakeupRetryDue(w, now)) continue;
       const attempts = w.attempts + 1;
-      sql.exec("UPDATE cloud_wakeup SET attempts=?, nudged_at=? WHERE fire_id=?", attempts, now, w.fire_id);
+      sql.exec("UPDATE cloud_wakeup SET attempts=?, nudged_at=? WHERE fire_id=? AND state='pending'", attempts, now, w.fire_id);
       await this.wake(s);
       await this.nudgeSessionDevice(s);
     }
