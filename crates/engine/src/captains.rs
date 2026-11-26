@@ -2488,14 +2488,20 @@ impl MergeRunner for ShellMergeRunner {
             repo,
             &[
                 "ls-tree".into(),
-                "-r".into(),
-                "--name-only".into(),
                 head.into(),
                 "--".into(),
                 path.into(),
             ],
         )
-        .map(|output| !output.is_empty())
+        .map(|output| {
+            output.lines().any(|line| {
+                let mut parts = line.split_whitespace();
+                parts.next().is_some()
+                    && parts.next() == Some("blob")
+                    && parts.next().is_some()
+                    && line.rsplit_once('\t').is_some_and(|(_, name)| name == path)
+            })
+        })
     }
 
     fn rebase_gate_publish(
