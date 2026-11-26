@@ -436,6 +436,7 @@
     },
     "sidebar": {
       "captains": "Captains",
+      "captain_badge": "Captain",
       "crew": "{n} crew",
       "unknown_device": "Unknown device",
       "pr": {

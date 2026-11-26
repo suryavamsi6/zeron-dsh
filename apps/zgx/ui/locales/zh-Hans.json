@@ -436,6 +436,7 @@
     },
     "sidebar": {
       "captains": "队长",
+      "captain_badge": "船长",
       "crew": "{n} 名船员",
       "unknown_device": "未知设备",
       "pr": {
