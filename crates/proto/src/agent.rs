@@ -142,13 +142,12 @@ impl<'de> Deserialize<'de> for HarnessId {
 impl HarnessId {
     /// Every built-in harness, in declaration order (a registry agent is
     /// one a device added: the engine's registry lists those).
-    pub const ALL: [HarnessId; 2] = [HarnessId::DeepSeek, HarnessId::Mock];
+    pub const ALL: [HarnessId; 3] = [HarnessId::DeepSeek, HarnessId::Devin, HarnessId::Mock];
 
-    const LEGACY: [HarnessId; 11] = [
+    const LEGACY: [HarnessId; 10] = [
         HarnessId::ClaudeCode,
         HarnessId::Codex,
         HarnessId::Cursor,
-        HarnessId::Devin,
         HarnessId::Grok,
         HarnessId::Hermes,
         HarnessId::Fx,
@@ -159,7 +158,7 @@ impl HarnessId {
     ];
 
     pub fn is_supported(self) -> bool {
-        matches!(self, HarnessId::DeepSeek | HarnessId::Mock)
+        matches!(self, HarnessId::DeepSeek | HarnessId::Devin | HarnessId::Mock)
     }
 
     /// Whether this build can actually run `self`: DeepSeek everywhere, Mock
@@ -174,6 +173,7 @@ impl HarnessId {
     /// `[dev-dependencies]`: test targets get it, shipped binaries do not.
     pub fn can_run(self) -> bool {
         self == HarnessId::DeepSeek
+            || self == HarnessId::Devin
             || (cfg!(feature = "mock-harness") && self == HarnessId::Mock)
     }
 

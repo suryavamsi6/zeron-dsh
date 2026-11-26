@@ -748,6 +748,7 @@ fn full_registry() -> HarnessRegistry {
     zeron_harness::shell_env::prewarm();
     let registry = HarnessRegistry::new();
     registry.register(Arc::new(zeron_harness::DeepSeekHarness::new()));
+    registry.register(Arc::new(zeron_harness::devin::DevinHarness::new()));
     if HarnessId::Mock.can_run() && std::env::var("COMET_HARNESS").as_deref() == Ok("mock") {
         registry.register(Arc::new(MockHarness {
             script: vec![AgentEvent::Done {
@@ -848,9 +849,10 @@ mod tests {
     }
 
     #[test]
-    fn production_catalog_is_deepseek_only_and_rejects_legacy() {
+    fn production_catalog_is_deepseek_and_devin_and_rejects_legacy() {
         let registry = full_registry();
         assert!(registry.is_registered(HarnessId::DeepSeek));
+        assert!(registry.is_registered(HarnessId::Devin));
         for slug in ["codex", "claude-code", "cursor", "pi", "opencode", "grok", "muse", "acp.gemini"] {
             let id = HarnessId::from_slug(slug).unwrap();
             assert!(!registry.is_registered(id));
@@ -859,6 +861,7 @@ mod tests {
         }
         assert!(registry.descriptors().iter().all(|descriptor|
             descriptor.id == HarnessId::DeepSeek
+                || descriptor.id == HarnessId::Devin
                 || (descriptor.id == HarnessId::Mock && HarnessId::Mock.can_run())));
     }
 
