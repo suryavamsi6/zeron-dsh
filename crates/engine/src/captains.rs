@@ -1831,8 +1831,7 @@ struct CrewParams {
 struct AddCrewParams {
     captain_id: String,
     chat_id: String,
-    #[serde(default)]
-    owns: Vec<String>,
+    owns: Option<Vec<String>>,
     #[serde(default)]
     worktree: Option<String>,
 }
@@ -2073,9 +2072,16 @@ impl CaptainsRpc<'_> {
                         params.chat_id
                     ));
                 }
+                let existing = registry
+                    .captain_of_crew(&params.chat_id)
+                    .filter(|owner| owner.chat_id == params.captain_id)
+                    .and_then(|_| registry.captain_of_crew(&params.chat_id))
+                    .and_then(|owner| owner.crew_meta.get(&params.chat_id))
+                    .cloned()
+                    .unwrap_or_default();
                 let meta = CrewMeta {
-                    owns: params.owns.clone(),
-                    worktree: params.worktree.clone(),
+                    owns: params.owns.clone().unwrap_or(existing.owns),
+                    worktree: params.worktree.clone().or(existing.worktree),
                 };
                 // A retried add commits nothing; the same call carrying
                 // ownership metadata updates that metadata. Crewing for

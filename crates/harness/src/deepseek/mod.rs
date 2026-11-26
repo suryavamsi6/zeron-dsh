@@ -395,7 +395,11 @@ fn configuration(request: &RunRequest, home: &Path, session: &str) -> Result<Val
             .ok_or_else(invalid)
         })
         .transpose()?;
-    let cwd = std::path::absolute(&request.cwd)?;
+    let crew_worktree = captains
+        .as_ref()
+        .filter(|blob| blob["role"].as_str() == Some("crew"))
+        .and_then(|blob| blob["worktree"].as_str());
+    let cwd = std::path::absolute(crew_worktree.unwrap_or(&request.cwd))?;
     let mut config = json!({
         "type": "start", "sessionId": session, "resume": request.resume.is_some(),
         "dshHome": home, "cwd": cwd, "model": model, "provider": provider,

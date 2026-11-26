@@ -22,9 +22,11 @@ export function assertRoute(options) {
 
 
 const workspaceEdits = new Set(['write', 'edit', 'apply_patch']);
+const shells = new Set(['bash', 'persistent-bash', 'persistent-pwsh']);
 
 function normalizeOwnedPath(path) {
-  return String(path).replace(/\\/g, '/').replace(/^\.\/+/, '');
+  const text = String(path);
+  return (process.platform === 'win32' ? text.replace(/\\/g, '/') : text).replace(/^\.\/+/, '');
 }
 
 function globRegex(glob) {
@@ -52,8 +54,8 @@ function patchPaths(input) {
   if (typeof input !== 'string') return [];
   const paths = [];
   for (const line of input.split('\n')) {
-    const file = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)?.[1]
-      ?? line.match(/^\*\*\* Move to: (.+)$/)?.[1];
+    const file = line.match(/^\s*\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$/)?.[1]
+      ?? line.match(/^\s*\*\*\* Move to: (.+?)\s*$/)?.[1];
     if (file) paths.push(file.trim());
   }
   return paths;
@@ -73,9 +75,12 @@ function editPaths(exec) {
 // they are outside every crew scope. The member's own report remains the one
 // unconditional writeback.
 export function ownsDenial(exec, captains) {
-  if (captains?.role !== 'crew' || !Array.isArray(captains.owns) || captains.owns.length === 0
-    || !workspaceEdits.has(exec.name)) return undefined;
+  if (captains?.role !== 'crew' || !Array.isArray(captains.owns) || captains.owns.length === 0) return undefined;
+  if (shells.has(exec.name)) return `Crew member ${captains.chatId} may not use shell commands outside ownership-checked file tools`;
+  if (!workspaceEdits.has(exec.name)) return undefined;
   const paths = editPaths(exec).map(normalizeOwnedPath);
+  if (exec.name === 'apply_patch' && typeof exec.arguments?.input === 'string' && paths.length === 0)
+    return 'Crew ownership cannot verify the files in this patch';
   if (paths.length === 0) return undefined;
   const report = `reports/${captains.chatId}.md`;
   const globs = captains.owns.filter(glob => typeof glob === 'string' && glob !== '').map(globRegex);
