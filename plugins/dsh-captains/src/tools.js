@@ -176,14 +176,15 @@ export function driveToolSpecs(cfg) {
         repo: { type: 'string', required: true, description: 'Absolute path of the crew worktree the branch tip is read from' },
         pr: { type: 'number', required: true, description: 'The pull request number' },
         branch: { type: 'string', required: true, description: 'The branch the pull request is opened from' },
+        reviewedSha: { type: 'string', required: true, description: 'The commit you reviewed; the write is refused when the worktree has moved past it' },
         baseSha: { type: 'string', required: true, description: 'The commit the branch built on; verified as an ancestor of the branch tip' },
         gateCommand: { type: 'string', required: true, description: 'The gate the branch survived, e.g. "cargo nextest run" or "zgx test ui"' },
         diffTier: { type: 'string', required: true, description: '"docs", "standard" or "s1"' },
-        failedOrSkipped: { type: 'array', required: false, description: 'Gate legs that failed or were skipped, if any' },
+        failedOrSkipped: { type: 'array', description: 'Gate legs that failed or were skipped, if any' },
         slug: { type: 'string', required: true, description: 'The changelog.d/<slug>.md fragment this branch adds' },
       },
       output,
-      async execute({ crewId, repo, pr, branch, baseSha, gateCommand, diffTier, failedOrSkipped, slug }) {
+      async execute({ crewId, repo, pr, branch, reviewedSha, baseSha, gateCommand, diffTier, failedOrSkipped, slug }) {
         if (process.env.DSH_PERMISSION_MODE === 'read-only') {
           throw new Error('the Captain Drive is read-only in this run');
         }
@@ -192,9 +193,17 @@ export function driveToolSpecs(cfg) {
         if (!/^[A-Za-z0-9_-]+$/.test(crewId)) throw new Error('crewId must be a bare file name');
         if (!path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
         if (!Number.isInteger(pr) || pr < 1) throw new Error('pr must be a pull request number');
-        if (!/^[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
+        // The same rule as the engine's valid_branch: alphanumerics, dots and
+        // the separators, none of git's metacharacters.
+        if (
+          typeof branch !== 'string' || branch.length < 1 || branch.length > 200
+          || branch.startsWith('-') || branch.startsWith('/') || branch.endsWith('/') || branch.endsWith('.lock')
+          || branch.includes('..') || branch.includes('@{')
+          || !/^[A-Za-z0-9._/-]+$/.test(branch)
+        ) {
           throw new Error('branch is not a safe git branch name');
         }
+        if (!/^[0-9a-f]{40}$/.test(reviewedSha)) throw new Error('reviewedSha must be a full commit SHA');
         if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error('baseSha must be a full commit SHA');
         if (typeof gateCommand !== 'string' || gateCommand.trim() === '') {
           throw new Error('gateCommand must name the gate the branch survived');
@@ -214,6 +223,12 @@ export function driveToolSpecs(cfg) {
           treeSha = git(['rev-parse', 'HEAD^{tree}']);
         } catch (error) {
           throw new Error(`could not read the worktree's tip: ${error.message}`);
+        }
+        // The receipt covers the reviewed commit and nothing newer: a crew
+        // that pushed since the review moves the worktree's tip, and the
+        // write is refused until the new tip is reviewed.
+        if (headSha !== reviewedSha) {
+          throw new Error(`the worktree sits on ${headSha.slice(0, 12)}, not the reviewed ${reviewedSha.slice(0, 12)} — review the new tip first`);
         }
         try {
           git(['merge-base', '--is-ancestor', baseSha, 'HEAD']);

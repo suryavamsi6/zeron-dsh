@@ -284,7 +284,7 @@ test('captain_ship_ready writes a receipt whose git fields come from the worktre
   const { dir, git } = await gitRepo(t);
   const head = git(['rev-parse', 'HEAD']);
   const result = await shipReady(root).execute({
-    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: head,
     baseSha: head, gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
   });
   assert.match(result, /ready receipt written for crew-a/);
@@ -302,13 +302,56 @@ test('captain_ship_ready writes a receipt whose git fields come from the worktre
 
 test('captain_ship_ready refuses a base that is not an ancestor of the tip', async t => {
   const root = await drive(t);
-  const { dir } = await gitRepo(t);
+  const { dir, git } = await gitRepo(t);
+  const head = git(['rev-parse', 'HEAD']);
   await assert.rejects(
     shipReady(root).execute({
-      crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+      crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: head,
       baseSha: '0'.repeat(40), gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
     }),
     /not an ancestor/,
+  );
+  assert.deepEqual((await readdir(root)), [], 'no receipt landed');
+});
+
+test('captain_ship_ready refuses when the worktree moved past the reviewed commit', async t => {
+  const root = await drive(t);
+  const { dir, git } = await gitRepo(t);
+  const reviewed = git(['rev-parse', 'HEAD']);
+  await writeFile(join(dir, 'file.txt'), 'two');
+  git(['add', 'file.txt']);
+  git(['commit', '-q', '-m', 'second']);
+  await assert.rejects(
+    shipReady(root).execute({
+      crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: reviewed,
+      baseSha: reviewed, gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+    }),
+    /not the reviewed/,
+  );
+  assert.deepEqual((await readdir(root)), [], 'the unreviewed tip earned no receipt');
+});
+
+test('captain_ship_ready accepts a dotted release branch the engine accepts', async t => {
+  const root = await drive(t);
+  const { dir, git } = await gitRepo(t);
+  const head = git(['rev-parse', 'HEAD']);
+  const result = await shipReady(root).execute({
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'feature/v1.2', reviewedSha: head,
+    baseSha: head, gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+  });
+  assert.match(result, /ready receipt written/);
+  assert.deepEqual(JSON.parse(await readFile(join(root, 'state', 'ready', 'crew-a.json'), 'utf8')).branch, 'feature/v1.2');
+});
+
+test('captain_ship_ready refuses a stale reviewedSha even before reading git state', async t => {
+  const root = await drive(t);
+  const { dir } = await gitRepo(t);
+  await assert.rejects(
+    shipReady(root).execute({
+      crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: '0'.repeat(40),
+      baseSha: '0'.repeat(40), gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+    }),
+    /not the reviewed/,
   );
   assert.deepEqual((await readdir(root)), [], 'no receipt landed');
 });
@@ -317,8 +360,9 @@ test('captain_ship_ready refuses a hand-asserted shape before touching git', asy
   const root = await drive(t);
   const { dir } = await gitRepo(t);
   const tool = shipReady(root);
+  const head = execFileSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
   const base = {
-    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a', reviewedSha: head,
     baseSha: 'a'.repeat(40), gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
   };
   await assert.rejects(tool.execute({ ...base, crewId: '../x' }), /bare file name/);
