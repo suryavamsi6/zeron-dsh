@@ -272,8 +272,12 @@ impl ScheduleMcp {
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let cloud = self.is_cloud_task(id).await;
-        let Some(task) = self.find(id).await else {
+        // One snapshot decides both origin and presence: two independent
+        // edge lookups could disagree (a hiccup in the first, success in
+        // the second) and a cloud task would then save through the local
+        // store as a duplicate under a new id.
+        let (cloud, found) = self.find_with_origin(id).await;
+        let Some(task) = found else {
             return Ok(json!({ "id": id, "code": "schedule_not_found" }));
         };
         if let Some(expected) = args.get("expectedUpdatedAt").and_then(Value::as_str)
@@ -363,6 +367,19 @@ impl ScheduleMcp {
                         .map_err(edge_error)?;
                     return Ok(model_task(&cloud_task(&row)));
                 }
+                if self.edge_for(&edited.target).is_some() {
+                    // Retargeted onto the hosted chat: the local copy could
+                    // never wake a sleeping machine, so the task moves to
+                    // the edge — create there, drop here.
+                    let edge = self.edge.clone().expect("edge_for implies the client");
+                    let row = edge
+                        .upsert(None, &edited.title, &edited.prompt, &edited.rrule, edited.active)
+                        .await
+                        .map_err(edge_error)?;
+                    schedules::call(&self.schedules, methods::SCHEDULE_DELETE, &json!({ "id": id }))
+                        .map_err(store_error)?;
+                    return Ok(model_task(&cloud_task(&row)));
+                }
                 let task = serde_json::to_value(&edited)
                     .map_err(|e| ("internal_error".to_owned(), e.to_string()))?;
                 self.save(&task).map(|task| model_task(&task))
@@ -398,17 +415,20 @@ impl ScheduleMcp {
             .find(|task| task.id == id)
     }
 
-    /// Whether `id` is one of the edge's rows — edits and deletes for it
-    /// forward rather than touching the local store.
-    async fn is_cloud_task(&self, id: &str) -> bool {
-        match &self.edge {
-            None => false,
-            Some(edge) => edge
-                .list()
-                .await
-                .map(|rows| rows.iter().any(|row| row.id == id))
-                .unwrap_or(false),
+    /// `find`, plus whether the task is the edge's — both from one edge
+    /// listing so the two answers can never disagree.
+    async fn find_with_origin(&self, id: &str) -> (bool, Option<Task>) {
+        if let Some(edge) = &self.edge
+            && let Ok(rows) = edge.list().await
+            && let Some(row) = rows.iter().find(|row| row.id == id)
+        {
+            return (true, Some(cloud_task(row)));
         }
+        let local: Vec<Task> = schedules::call(&self.schedules, methods::SCHEDULES, &json!({}))
+            .ok()
+            .and_then(|value| serde_json::from_value(value["tasks"].clone()).ok())
+            .unwrap_or_default();
+        (false, local.into_iter().find(|task| task.id == id))
     }
 
     /// `ScheduleSave`: the store validates title/prompt/rrule and recomputes
