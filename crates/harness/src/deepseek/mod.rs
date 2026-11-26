@@ -90,7 +90,7 @@ fn configured_path(name: &str, fallback: PathBuf) -> PathBuf {
     std::path::absolute(&path).unwrap_or(path)
 }
 
-fn node() -> Option<PathBuf> {
+pub(crate) fn node() -> Option<PathBuf> {
     crate::executable::find_on_paths_with(
         "node",
         vec![],
@@ -100,7 +100,7 @@ fn node() -> Option<PathBuf> {
     )
 }
 
-fn sdk_installed(root: &Path) -> bool {
+pub(crate) fn sdk_installed(root: &Path) -> bool {
     ["dsh-sdk-client", "dsh", "dsh-sdk-protocol"]
         .into_iter()
         .all(|package| {
