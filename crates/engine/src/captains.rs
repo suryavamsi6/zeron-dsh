@@ -2327,6 +2327,14 @@ pub struct MergeOutcome {
     pub landed_head: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MergeProgress {
+    original_head: String,
+    rebased_head: String,
+    target_sha: String,
+}
+
 /// A fresh roster check. The closure is evaluated both before the expensive
 /// gate and again immediately before landing, so removing a crew member while
 /// its merge is queued withdraws that merge.
@@ -2400,6 +2408,7 @@ impl ReadyReceipt {
 pub(crate) trait MergeRunner: Send + Sync {
     fn fetch(&self, repo: &Path, branch: &str) -> Result<(), String>;
     fn target_sha(&self, repo: &Path) -> Result<String, String>;
+    fn branch_sha(&self, repo: &Path, branch: &str) -> Result<String, String>;
     fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn pull_request_state(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
@@ -2412,7 +2421,9 @@ pub(crate) trait MergeRunner: Send + Sync {
         repo: &Path,
         branch: &str,
         head: &str,
+        lease: &str,
         scratch: &Path,
+        before_publish: &dyn Fn(&str) -> Result<(), String>,
     ) -> Result<String, String>;
     fn land(&self, repo: &Path, pr: u64, head: &str) -> Result<String, String>;
 }
@@ -2460,6 +2471,16 @@ impl MergeRunner for ShellMergeRunner {
 
     fn target_sha(&self, repo: &Path) -> Result<String, String> {
         Self::git(repo, &["rev-parse".into(), "origin/main".into()])
+    }
+
+    fn branch_sha(&self, repo: &Path, branch: &str) -> Result<String, String> {
+        Self::git(
+            repo,
+            &[
+                "rev-parse".into(),
+                format!("refs/remotes/origin/{branch}"),
+            ],
+        )
     }
 
     fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String> {
@@ -2526,7 +2547,9 @@ impl MergeRunner for ShellMergeRunner {
         repo: &Path,
         branch: &str,
         head: &str,
+        lease: &str,
         scratch: &Path,
+        before_publish: &dyn Fn(&str) -> Result<(), String>,
     ) -> Result<String, String> {
         let worktree = scratch.join("checkout");
         if worktree.exists() {
@@ -2557,12 +2580,13 @@ impl MergeRunner for ShellMergeRunner {
             )?;
             Self::command(&worktree.join("apps/zgx"), "zgx", &["test".into(), "ui".into()])?;
             let new_head = Self::command(&worktree, "git", &["rev-parse".into(), "HEAD".into()])?;
+            before_publish(&new_head)?;
             Self::command(
                 &worktree,
                 "git",
                 &[
                     "push".into(),
-                    "--force-with-lease".into(),
+                    format!("--force-with-lease=refs/heads/{branch}:{lease}"),
                     "origin".into(),
                     format!("HEAD:refs/heads/{branch}"),
                 ],
@@ -2697,6 +2721,33 @@ fn merge_fragment_failure(files: &[String], slug: &str, fragment_exists: bool) -
     None
 }
 
+fn write_merge_progress(
+    path: &Path,
+    original_head: &str,
+    rebased_head: &str,
+    target_sha: &str,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("could not create the merge progress directory: {error}"))?;
+    }
+    let progress = MergeProgress {
+        original_head: original_head.into(),
+        rebased_head: rebased_head.into(),
+        target_sha: target_sha.into(),
+    };
+    let json = serde_json::to_string(&progress)
+        .map_err(|error| format!("could not encode merge progress: {error}"))?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json)
+        .and_then(|()| std::fs::rename(&tmp, path))
+        .map_err(|error| format!("could not write merge progress: {error}"))
+}
+
+fn read_merge_progress(path: &Path) -> Option<MergeProgress> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
 fn perform_merge(
     receipt: &ReadyReceipt,
     scratch: &Path,
@@ -2731,14 +2782,63 @@ fn perform_merge(
         if base != "main" {
             return Err(format!("crew merge queue only lands pull requests targeting main, not {base}"));
         }
-        let before = runner.target_sha(repo)?;
+        let current_target = runner.target_sha(repo)?;
+        let remote_head = runner.branch_sha(repo, &receipt.branch)?;
+        let progress_path = scratch.join("progress.json");
+        let progress = read_merge_progress(&progress_path)
+            .filter(|progress| progress.original_head == receipt.head_sha);
+        let mut published = None;
+        let mut lease = receipt.head_sha.clone();
+        let mut before = current_target;
+        if let Some(progress) = &progress {
+            if remote_head == progress.rebased_head {
+                if progress.target_sha == before {
+                    published = Some(progress.rebased_head.clone());
+                    before = progress.target_sha.clone();
+                } else {
+                    // The published head is our own, but it was tested against
+                    // a main that has since moved. Re-rebase the reviewed head
+                    // and lease only that known self-published tip.
+                    lease = remote_head.clone();
+                }
+            } else if remote_head != receipt.head_sha {
+                return Err(format!(
+                    "crew branch tip {remote_head} matches neither the reviewed head {} nor the published head {}",
+                    receipt.head_sha, progress.rebased_head
+                ));
+            }
+        } else if remote_head != receipt.head_sha {
+            return Err(format!(
+                "crew branch tip {remote_head} no longer matches the reviewed head {}",
+                receipt.head_sha
+            ));
+        }
         let files = runner.changed_files(repo, &before, &receipt.head_sha)?;
         let fragment = format!("changelog.d/{}.md", receipt.slug);
         let fragment_exists = runner.file_exists_at(repo, &receipt.head_sha, &fragment)?;
         if let Some(reason) = merge_fragment_failure(&files, &receipt.slug, fragment_exists) {
             return Err(reason);
         }
-        let head = runner.rebase_gate_publish(repo, &receipt.branch, &receipt.head_sha, scratch)?;
+        let head = if let Some(head) = published {
+            head
+        } else {
+            let before_publish = |rebased_head: &str| {
+                write_merge_progress(
+                    &progress_path,
+                    &receipt.head_sha,
+                    rebased_head,
+                    &before,
+                )
+            };
+            runner.rebase_gate_publish(
+                repo,
+                &receipt.branch,
+                &receipt.head_sha,
+                &lease,
+                scratch,
+                &before_publish,
+            )?
+        };
         runner.fetch(repo, &receipt.branch)?;
         let after = runner.target_sha(repo)?;
         if after != before {
@@ -5918,6 +6018,7 @@ mod tests {
         target: Mutex<String>,
         base: Mutex<String>,
         state: Mutex<String>,
+        remote_head: Mutex<String>,
         files: Vec<String>,
         on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         active: std::sync::atomic::AtomicUsize,
@@ -5934,6 +6035,7 @@ mod tests {
                 target: Mutex::new("a".repeat(40)),
                 base: Mutex::new("main".into()),
                 state: Mutex::new("OPEN".into()),
+                remote_head: Mutex::new("c".repeat(40)),
                 files: files.iter().map(|file| file.to_string()).collect(),
                 on_rebase: Mutex::new(None),
                 active: std::sync::atomic::AtomicUsize::new(0),
@@ -5953,6 +6055,10 @@ mod tests {
 
         fn target_sha(&self, _repo: &Path) -> Result<String, String> {
             Ok(self.target.lock().unwrap().clone())
+        }
+
+        fn branch_sha(&self, _repo: &Path, _branch: &str) -> Result<String, String> {
+            Ok(self.remote_head.lock().unwrap().clone())
         }
 
         fn pull_request_base(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
@@ -5976,7 +6082,9 @@ mod tests {
             _repo: &Path,
             _branch: &str,
             head: &str,
+            _lease: &str,
             _scratch: &Path,
+            before_publish: &dyn Fn(&str) -> Result<(), String>,
         ) -> Result<String, String> {
             use std::sync::atomic::Ordering;
             let call = self.rebase_calls.fetch_add(1, Ordering::SeqCst) + 1;
@@ -5994,7 +6102,9 @@ mod tests {
             self.active.fetch_sub(1, Ordering::SeqCst);
             let mut bytes = head.as_bytes().to_vec();
             bytes[39] = b'0' + (call as u8 % 10);
-            Ok(String::from_utf8(bytes).unwrap())
+            let new_head = String::from_utf8(bytes).unwrap();
+            before_publish(&new_head)?;
+            Ok(new_head)
         }
 
         fn land(&self, _repo: &Path, _pr: u64, _head: &str) -> Result<String, String> {
@@ -6210,6 +6320,73 @@ mod tests {
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
         assert!(outcomes[0].reason.contains("removed"), "{}", outcomes[0].reason);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A published rebased head is durable merge progress. Recovery resumes
+    /// after publication with that exact head instead of rebasing again or
+    /// forcing over the queue's own update.
+    #[test]
+    fn helm_merge_queue_resumes_a_published_rebase() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let scratch = drive
+            .path()
+            .join("state")
+            .join(MERGE_QUEUE_DIR)
+            .join("crew-a");
+        let rebased = "d".repeat(40);
+        write_merge_progress(
+            &scratch.join("progress.json"),
+            &"c".repeat(40),
+            &rebased,
+            &"a".repeat(40),
+        )
+        .unwrap();
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.remote_head.lock().unwrap() = rebased.clone();
+        runner.release.store(1, Ordering::SeqCst);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
+        assert_eq!(outcomes[0].landed_head.as_deref(), Some(rebased.as_str()));
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A self-published head does not make the receipt unrecoverable when
+    /// main moved before the first landing attempt. Because the progress file
+    /// proves that tip is ours, recovery may re-rebase the original head and
+    /// lease exactly that stale tip.
+    #[test]
+    fn helm_merge_queue_rerebases_its_own_stale_publication() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let scratch = drive
+            .path()
+            .join("state")
+            .join(MERGE_QUEUE_DIR)
+            .join("crew-a");
+        let stale = "d".repeat(40);
+        write_merge_progress(
+            &scratch.join("progress.json"),
+            &"c".repeat(40),
+            &stale,
+            &"a".repeat(40),
+        )
+        .unwrap();
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.remote_head.lock().unwrap() = stale;
+        *runner.target.lock().unwrap() = "e".repeat(40);
+        runner.release.store(1, Ordering::SeqCst);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 1);
     }
 
     /// Recovery is idempotent across the most dangerous crash boundary: the
