@@ -17,7 +17,10 @@
 //! steps, joined by `|`:
 //! `gallery:composer|#gallery-demo@1240x820`. Steps are apart at `|`
 //! outside `"…"`, so a target or typed text may hold one, and a part no
-//! prefix claims is an error. `AUDIT_SCALE` (2) is the
+//! prefix claims is an error. A state's JSON may instead come from a file,
+//! `=<state>:@<path>`: a real payload the engine wrote (a stored task's)
+//! holds structural commas outside its strings, which the shot list's own
+//! comma split cannot survive inline. `AUDIT_SCALE` (2) is the
 //! pixels a point; `AUDIT_DARK=1` the dark scheme where the screen has one.
 //! What's transparent (the window's glass) is laid on `AUDIT_BACKDROP`
 //! (`#e9e9ee` light, `#1d1d22` dark), the same under both. `AUDIT_WAIT_MS`
@@ -155,10 +158,18 @@ fn parse(spec: &str, dark: bool) -> Shot {
             steps.push(Step::Command(command.to_string()));
         } else if let Some(rest) = part.strip_prefix('=') {
             let (state, json) = rest.split_once(':').expect("=<state>:<json>");
-            steps.push(Step::State(
-                state.to_string(),
-                serde_json::from_str(json).expect("a state's JSON"),
-            ));
+            // `@<path>` reads the payload from a file: a real stored
+            // answer's commas are structural, not a string's, so no inline
+            // JSON carrying them survives the shot list's comma split.
+            let value = match json.strip_prefix('@') {
+                Some(path) => {
+                    let text = std::fs::read_to_string(path)
+                        .unwrap_or_else(|error| panic!("a state file {path}: {error}"));
+                    serde_json::from_str(&text).expect("a state file's JSON")
+                }
+                None => serde_json::from_str(json).expect("a state's JSON"),
+            };
+            steps.push(Step::State(state.to_string(), value));
         } else if let Some(ms) = part.strip_prefix('+') {
             steps.push(Step::Wait(ms.parse().expect("+<milliseconds>")));
         } else if let Some(label) = part.strip_prefix('~') {
@@ -565,6 +576,25 @@ mod tests {
                 |step| matches!(step, Step::Click(target) if target == "role:button \"Save\"")
             ),
             "the step after the quoted text is still a step"
+        );
+    }
+
+    // A state's payload read from a file (`=<state>:@<path>`): structural
+    // commas and all, where the inline form's first one ends the shot.
+    #[test]
+    fn a_state_step_at_a_file_reads_its_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("tasks.json");
+        std::fs::write(&file, r#"{"tasks":[{"id":"t1","title":"Standup summary"}]}"#).unwrap();
+        let spec = format!("shell|=settings_stub_schedule_tasks:@{}", file.display());
+        let shot = parse(&spec, true);
+        let state = shot.steps.iter().find_map(|step| match step {
+            Step::State(name, value) if name == "settings_stub_schedule_tasks" => Some(value.clone()),
+            _ => None,
+        });
+        assert_eq!(
+            state,
+            Some(serde_json::json!({ "tasks": [{ "id": "t1", "title": "Standup summary" }] }))
         );
     }
 
