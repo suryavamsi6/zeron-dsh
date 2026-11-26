@@ -26,6 +26,7 @@
 //! accounting.
 
 pub mod normalize;
+pub mod subagent;
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,7 +46,8 @@ use crate::process::{Command, Stdio};
 use crate::process::owned as child;
 use crate::{Harness, HarnessError, RunControls};
 use child::Child;
-use normalize::{map_update, preferred_allow_option};
+use normalize::preferred_allow_option;
+use subagent::DevinTracker;
 
 /// Grace between `session/cancel` and SIGTERM on interrupt, then SIGKILL.
 const INTERRUPT_GRACE: Duration = Duration::from_secs(2);
@@ -170,6 +172,23 @@ fn session_mcp_servers(request: &RunRequest) -> Vec<Value> {
             })
         })
         .collect()
+}
+
+/// Whether a restore failure means the agent no longer HAS the session
+/// (missing/foreign: fall back to a fresh one) as opposed to a recoverable
+/// failure (timeout, transport, already-open) the next message should retry
+/// against the original id — starting fresh there would replace the stored
+/// session for good.
+fn session_unrestorable(error: &HarnessError) -> bool {
+    let HarnessError::Protocol(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("(code -32002)")
+        || message.contains("(code -32601)")
+        || message.contains("session not found")
+        || message.contains("unknown session")
+        || message.contains("no such session")
 }
 
 fn is_auth_required(error: &HarnessError) -> bool {
@@ -336,11 +355,45 @@ async fn spawn_devin(executable: &PathBuf, request: &RunRequest) -> Result<Child
     })
 }
 
-/// `session/new`, or `session/load` with the fresh-session fallback when a
-/// resume id is unrestorable (missing/foreign). A slow or interrupted
-/// restore is retried by the next message rather than replaced.
+/// Await one request while draining the incoming queue: permission
+/// requests get their auto-answer (a restore replay can carry them), and
+/// `session/update` notifications are DROPPED — during a load they are the
+/// replayed history the doc already holds, and the reader blocking on a
+/// full channel is the deadlock this draining exists to avoid.
+async fn request_draining(
+    client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
+    method: &'static str,
+    params: Value,
+) -> Result<Value, HarnessError> {
+    let mut fut = client.request_now(method, params);
+    loop {
+        tokio::select! {
+            res = &mut fut => return res,
+            inc = incoming.recv() => match inc {
+                Some(Incoming::Request { id, method, params }) => {
+                    answer_server_request(client, id, &method, &params);
+                }
+                Some(Incoming::Eof) | None => {
+                    return Err(HarnessError::Protocol(format!(
+                        "{method}: agent exited during setup"
+                    )));
+                }
+                // Notifications: replayed history + metadata, never live output.
+                _ => {}
+            },
+        }
+    }
+}
+
+/// `session/new`, or `session/load` with the fresh-session fallback when the
+/// agent no longer HAS the session (missing/foreign). Any other restore
+/// failure errors the run and keeps the id, so the next message retries the
+/// original session instead of replacing it. Replayed load traffic is
+/// drained away, never emitted.
 async fn open_session(
     client: &RpcClient,
+    incoming: &mut mpsc::Receiver<Incoming>,
     request: &RunRequest,
 ) -> Result<String, HarnessError> {
     let params = json!({
@@ -352,7 +405,7 @@ async fn open_session(
         restore["sessionId"] = Value::String(resume.clone());
         let restored = tokio::time::timeout(
             SESSION_LOAD_TIMEOUT,
-            client.request("session/load", restore),
+            request_draining(client, incoming, "session/load", restore),
         )
         .await
         .unwrap_or_else(|_| {
@@ -363,12 +416,17 @@ async fn open_session(
         match restored {
             Ok(_) => return Ok(resume.clone()),
             Err(err) if is_auth_required(&err) => return Err(err),
+            Err(err) if !session_unrestorable(&err) => {
+                return Err(HarnessError::Protocol(format!(
+                    "Devin could not restore session {resume}; the next message tries again: {err}"
+                )));
+            }
             Err(err) => {
                 tracing::debug!("session/load failed, starting fresh: {err}");
             }
         }
     }
-    let new = client.request("session/new", params).await?;
+    let new = request_draining(client, incoming, "session/new", params).await?;
     let session_id = new
         .get("sessionId")
         .and_then(Value::as_str)
@@ -444,21 +502,36 @@ async fn drive(
     };
 
     // ---- handshake --------------------------------------------------------
-    let setup = async {
-        let init = io.client.request("initialize", initialize_params()).await?;
-        let inline_images =
-            init["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true);
-        let session_id = open_session(&io.client, &request).await?;
-        Ok::<(String, bool), HarnessError>((session_id, inline_images))
-    };
-    let res = tokio::select! {
-        res = setup => res,
+    let res = {
+        let client = &io.client;
+        let incoming = &mut io.incoming;
+        let request_ref = &request;
+        let setup = async move {
+            let init = client.request("initialize", initialize_params()).await?;
+            let inline_images =
+                init["agentCapabilities"]["promptCapabilities"]["image"].as_bool() == Some(true);
+            let session_id = open_session(client, incoming, request_ref).await?;
+            Ok::<(String, bool), HarnessError>((session_id, inline_images))
+        };
+        tokio::select! {
+            res = setup => res,
         _ = tokio::time::sleep(HANDSHAKE_TIMEOUT) => Err(HarnessError::Protocol(format!(
             "Devin did not complete the ACP handshake within {}s (it may be waiting for a login — {SIGN_IN_HINT})",
             HANDSHAKE_TIMEOUT.as_secs()
         ))),
-        _ = interrupt.cancelled() => {
-            finish!(io, DoneStatus::Interrupted, None, None);
+            _ = interrupt.cancelled() => {
+                io.client.close_stdin_for_teardown();
+                io.child.shutdown(KILL_GRACE).await;
+                let _ = event_tx
+                    .send(Ok(AgentEvent::Done {
+                        status: DoneStatus::Interrupted,
+                        result: None,
+                        error: None,
+                        session_id: None,
+                    }))
+                    .await;
+                return;
+            }
         }
     };
     let (session_id, inline_images) = match res {
@@ -488,7 +561,8 @@ async fn drive(
     // One prompt in flight at a time. A mid-turn steer preempts: cancel,
     // then the steer becomes the next prompt once the cancel settles. Steers
     // arriving parked (between turns) prompt directly.
-    let mut queued_steer: Option<String> = None;
+    let mut subagents = DevinTracker::default();
+    let mut queued_steer: Option<crate::SteerMessage> = None;
     let mut prompt_fut: Option<futures::future::BoxFuture<'static, Result<Value, HarnessError>>> = {
         let content = prompt_content(&request.prompt, &request.attachments, inline_images);
         Some(io.client.request_now(
@@ -507,7 +581,7 @@ async fn drive(
                             && params.get("sessionId").and_then(Value::as_str) == Some(session_id.as_str())
                         {
                             if let Some(update) = params.get("update") {
-                                for event in map_update(update) {
+                                for event in subagents.map(update) {
                                     if !send_event(&event_tx, event).await {
                                         finish!(io, DoneStatus::Interrupted, None, Some(session_id.clone()));
                                     }
@@ -537,18 +611,24 @@ async fn drive(
                             // Preempt: cancel the generation; the steer goes
                             // out once the cancel settles.
                             preempting = true;
-                            queued_steer = Some(message.prompt);
+                            queued_steer = Some(message);
                             io.client.notify("session/cancel", Some(json!({ "sessionId": session_id })));
                         } else if prompt_fut.is_some() {
                             // Already preempting: fold into the queued steer.
                             match &mut queued_steer {
                                 Some(queued) => {
-                                    queued.push_str("\n\n");
-                                    queued.push_str(&message.prompt);
+                                    queued.prompt.push_str("\n\n");
+                                    queued.prompt.push_str(&message.prompt);
                                 }
-                                None => queued_steer = Some(message.prompt),
+                                None => queued_steer = Some(message),
                             }
                         } else {
+                            if !send_event(&event_tx, AgentEvent::Steered {
+                                assistant_message_id: message.message_id.clone(),
+                                next_assistant_message_id: Some(new_message_id()),
+                            }).await {
+                                finish!(io, DoneStatus::Interrupted, None, Some(session_id.clone()));
+                            }
                             let content = prompt_content(&message.prompt, &message.attachments, inline_images);
                             prompt_fut = Some(io.client.request_now(
                                 "session/prompt",
@@ -575,7 +655,13 @@ async fn drive(
                             // the run: the steer continues it.
                             if let Some(steer) = queued_steer.take() {
                                 preempting = false;
-                                let content = prompt_content(&steer, &[], inline_images);
+                                if !send_event(&event_tx, AgentEvent::Steered {
+                                    assistant_message_id: steer.message_id.clone(),
+                                    next_assistant_message_id: Some(new_message_id()),
+                                }).await {
+                                    finish!(io, DoneStatus::Interrupted, None, Some(session_id.clone()));
+                                }
+                                let content = prompt_content(&steer.prompt, &steer.attachments, inline_images);
                                 prompt_fut = Some(io.client.request_now(
                                     "session/prompt",
                                     json!({ "sessionId": session_id, "prompt": content }),
@@ -584,6 +670,31 @@ async fn drive(
                             }
                         }
                         preempting = false;
+                        // The reader resolves the prompt's response through
+                        // the pending map while the final updates sit in the
+                        // channel buffer ahead of it: drain everything already
+                        // forwarded or the Done would reach the engine first
+                        // and the tail of the answer would drop while parked.
+                        while let Ok(inc) = io.incoming.try_recv() {
+                            match inc {
+                                Incoming::Notification { method, params }
+                                    if method == "session/update"
+                                        && params.get("sessionId").and_then(Value::as_str) == Some(session_id.as_str()) =>
+                                {
+                                    if let Some(update) = params.get("update") {
+                                        for event in subagents.map(update) {
+                                            if !send_event(&event_tx, event).await {
+                                                finish!(io, DoneStatus::Interrupted, None, Some(session_id.clone()));
+                                            }
+                                        }
+                                    }
+                                }
+                                Incoming::Request { id, method, params } => {
+                                    answer_server_request(&io.client, id, &method, &params);
+                                }
+                                _ => {}
+                            }
+                        }
                         // Done is per TURN: the runtime parks between turns
                         // and the same stream carries the next one. Only the
                         // transport dying or the interrupt ends the stream.
