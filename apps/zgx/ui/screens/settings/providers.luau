@@ -851,7 +851,7 @@ local function devin_row(remote: () -> boolean): Node
 				if agent.enabled then
 					return "Enabled · sign in with `devin auth login` in a terminal."
 				end
-				return "Installed · enable Devin to offer it in the composer."
+				return "Installed · enable Devin, then sign in with `devin auth login`."
 			end,
 			control = ui.show(function(): boolean
 				local agent = agent_of()
