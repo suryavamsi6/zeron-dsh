@@ -10,6 +10,10 @@ Captains (SUR-97, plugin-first).
 - All product code was written by a coding agent from a short brief; the operator only
   reviewed, committed, opened PRs, and watched CI.
 - PR title ends with `(SUR-<n>)`. Merge (squash) when the **`CI result`** check is green.
+- For a Captain-reviewed PR, check the planned squash body before merging:
+  `python3 scripts/ci/check_squash_message.py suryavamsi6/zeron-dsh <pr> <message-file>`.
+  It reads the PR's newest `VERDICT: SHIP <nonce>` review and refuses unless the message carries
+  that review's exact `verdict <id> (SHIP <nonce>) pinned to <sha>` line.
 - After merging, add a close comment on the Linear issue: what changed, the PR link, the merge
   commit, and any follow-ups.
 - `gh` was always called with `-R suryavamsi6/zeron-dsh`. Never force-push `main`.
