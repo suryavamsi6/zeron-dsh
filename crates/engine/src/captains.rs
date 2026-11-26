@@ -2637,21 +2637,24 @@ fn valid_receipt_line(value: &str) -> bool {
 /// both, so the stale receipt is refused rather than shipping unreviewed work.
 pub fn validate_ready_receipt(receipt: &ReadyReceipt, checkout: &Path) -> Result<(), String> {
     let receipt = receipt.clone().validate()?;
-    let head = ShellMergeRunner::git(checkout, &["rev-parse".into(), "--verify".into(), "HEAD^{commit}".into()])?;
+    let (head, tree) = ShellMergeRunner.checkout_head(checkout)?;
+    receipt_binding_failure(&receipt, &head, &tree).map_or(Ok(()), Err)
+}
+
+fn receipt_binding_failure(receipt: &ReadyReceipt, head: &str, tree: &str) -> Option<String> {
     if head != receipt.head_sha {
-        return Err(format!(
+        return Some(format!(
             "ready receipt headSha {} does not match HEAD {head}",
             receipt.head_sha
         ));
     }
-    let tree = ShellMergeRunner::git(checkout, &["rev-parse".into(), "--verify".into(), "HEAD^{tree}".into()])?;
     if tree != receipt.tree_sha {
-        return Err(format!(
+        return Some(format!(
             "ready receipt treeSha {} does not match HEAD^{{tree}} {tree}",
             receipt.tree_sha
         ));
     }
-    Ok(())
+    None
 }
 
 impl ReadyReceipt {
@@ -2701,7 +2704,8 @@ pub(crate) trait MergeRunner: Send + Sync {
     fn pull_request_head(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
     fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String>;
-    fn commit_tree(&self, repo: &Path, commit: &str) -> Result<String, String>;
+    /// The crew checkout's `HEAD` and `HEAD^{tree}`: a receipt binds both.
+    fn checkout_head(&self, repo: &Path) -> Result<(String, String), String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
     /// publish the rebased branch tip without overwriting a newer remote tip,
     /// and return that tip.
@@ -2847,8 +2851,10 @@ impl MergeRunner for ShellMergeRunner {
         })
     }
 
-    fn commit_tree(&self, repo: &Path, commit: &str) -> Result<String, String> {
-        Self::git(repo, &["rev-parse".into(), "--verify".into(), format!("{commit}^{{tree}}")])
+    fn checkout_head(&self, repo: &Path) -> Result<(String, String), String> {
+        let head = Self::git(repo, &["rev-parse".into(), "--verify".into(), "HEAD^{commit}".into()])?;
+        let tree = Self::git(repo, &["rev-parse".into(), "--verify".into(), "HEAD^{tree}".into()])?;
+        Ok((head, tree))
     }
 
     fn rebase_gate_publish(
@@ -3153,13 +3159,14 @@ fn perform_merge(
         if remote_is_self_published && !published_heads.iter().any(|head| head == &remote_head) {
             published_heads.push(remote_head.clone());
         }
-        let tree = runner.commit_tree(repo, &receipt.head_sha)?;
-        if tree != receipt.tree_sha {
-            return Err(format!(
-                "reviewed head {} has tree {tree}, not the receipt's treeSha {}",
-                receipt.head_sha, receipt.tree_sha
-            ));
-        }
+        // The receipt is bound to the crew checkout: a commit made there after
+        // shipping, pushed or not, invalidates it before the gate and again
+        // before landing.
+        let bound = || {
+            let (head, tree) = runner.checkout_head(repo)?;
+            receipt_binding_failure(receipt, &head, &tree).map_or(Ok(()), Err)
+        };
+        bound()?;
         let files = runner.changed_files(repo, &before, &receipt.head_sha)?;
         let fragment = format!("changelog.d/{}.md", receipt.slug);
         let fragment_exists = runner.file_exists_at(repo, &receipt.head_sha, &fragment)?;
@@ -3200,6 +3207,7 @@ fn perform_merge(
         if !crew_is_live(live_crew, &receipt.crew_id) {
             return Err("crew member was removed while the merge gate ran".into());
         }
+        bound()?;
         runner.land(repo, receipt.pr, &head)?;
         Ok(MergeOutcome {
             crew_id: receipt.crew_id.clone(),
@@ -6369,7 +6377,7 @@ mod tests {
         pr_head: Mutex<String>,
         remote_head: Mutex<String>,
         files: Vec<String>,
-        tree: Mutex<String>,
+        checkout: Mutex<(String, String)>,
         on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         active: std::sync::atomic::AtomicUsize,
         max_active: std::sync::atomic::AtomicUsize,
@@ -6388,7 +6396,7 @@ mod tests {
                 pr_head: Mutex::new("c".repeat(40)),
                 remote_head: Mutex::new("c".repeat(40)),
                 files: files.iter().map(|file| file.to_string()).collect(),
-                tree: Mutex::new("d".repeat(40)),
+                checkout: Mutex::new(("c".repeat(40), "d".repeat(40))),
                 on_rebase: Mutex::new(None),
                 active: std::sync::atomic::AtomicUsize::new(0),
                 max_active: std::sync::atomic::AtomicUsize::new(0),
@@ -6433,8 +6441,8 @@ mod tests {
             Ok(true)
         }
 
-        fn commit_tree(&self, _repo: &Path, _commit: &str) -> Result<String, String> {
-            Ok(self.tree.lock().unwrap().clone())
+        fn checkout_head(&self, _repo: &Path) -> Result<(String, String), String> {
+            Ok(self.checkout.lock().unwrap().clone())
         }
 
         fn rebase_gate_publish(
@@ -7006,12 +7014,42 @@ mod tests {
         let repo = tempfile::tempdir().unwrap();
         ready_receipt(drive.path(), "crew-a", repo.path());
         let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
-        *runner.tree.lock().unwrap() = "e".repeat(40);
+        runner.checkout.lock().unwrap().1 = "e".repeat(40);
         let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
         assert!(outcomes[0].reason.contains("treeSha"), "{}", outcomes[0].reason);
         assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// A commit made in the crew checkout after shipping invalidates the
+    /// receipt even while the remote branch still names the reviewed head:
+    /// before the gate, and again when it lands during the gate.
+    #[test]
+    fn helm_ready_receipt_queue_refuses_a_local_commit_after_shipping() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.checkout.lock().unwrap() = ("f".repeat(40), "e".repeat(40));
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("headSha"), "{}", outcomes[0].reason);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
+
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = Arc::new(FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]));
+        runner.release.store(1, Ordering::SeqCst);
+        let during = runner.clone();
+        *runner.on_rebase.lock().unwrap() = Some(Box::new(move || {
+            *during.checkout.lock().unwrap() = ("f".repeat(40), "e".repeat(40));
+        }));
+        let outcomes = process_ready_receipts_with(drive.path(), runner.as_ref(), None);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("headSha"), "{}", outcomes[0].reason);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
 
