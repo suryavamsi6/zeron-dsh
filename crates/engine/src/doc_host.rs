@@ -4698,6 +4698,27 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Whether queued row `row` still owes `chat_id` its turn: waiting in the
+    /// queue, or already the chat's latest user message (a dispatched row
+    /// keeps its id) while that turn is in flight. Turn state is this
+    /// engine's live view, so after a restart a dispatched row owes nothing.
+    pub fn queued_row_pending(&self, chat_id: &str, row: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        if handle.doc.read_queue()?.iter().any(|item| item.id == row) {
+            return Ok(true);
+        }
+        if !self.sessions().is_some_and(|s| s.turn_in_flight(chat_id)) {
+            return Ok(false);
+        }
+        Ok(handle
+            .doc
+            .read_entries_shared()?
+            .iter()
+            .rev()
+            .find(|entry| entry.role == MessageRole::User)
+            .is_some_and(|entry| entry.id == row))
+    }
+
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
     pub fn update_queued_message(

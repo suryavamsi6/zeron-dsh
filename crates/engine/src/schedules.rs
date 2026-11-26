@@ -3,6 +3,14 @@
 //! task store (`{data_dir}/schedules.json`, atomic temp+rename writes) and
 //! fires each occurrence by queueing its prompt on a chat — the same internal
 //! row `QueueMessage` appends.
+//!
+//! A fired occurrence remembers its queued row (`inFlight`). While that row
+//! still waits in the target chat's queue, or is the turn the chat is running,
+//! a later occurrence of the same task on the same chat is coalesced into it
+//! (consumed, not queued again): a busy Captain gets one wake, not a backlog
+//! of copies. The marker is only ever checked against the chat's live state,
+//! and expires after [`IN_FLIGHT_MAX_MS`], so a crash cannot leave it
+//! suppressing later occurrences.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -37,6 +45,20 @@ pub struct Task {
     pub last_run_at: Option<i64>,
     #[serde(default)]
     pub updated_at: i64,
+    /// The last delivery's queued row; engine-owned (a save keeps the
+    /// stored one). Absent in stores written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_flight: Option<InFlight>,
+}
+
+/// One delivered occurrence's queued row on its chat.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InFlight {
+    pub session: String,
+    pub row: String,
+    /// Epoch ms the row was queued.
+    pub queued_at: i64,
 }
 
 fn on() -> bool {
@@ -408,8 +430,8 @@ impl Rule {
 /// error: asleep Captains skip the occurrence, demoted Captains end the task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Delivery {
-    /// The prompt landed on this chat.
-    Delivered(String),
+    /// The prompt landed on `session` as queued row `row`.
+    Delivered { session: String, row: String },
     /// The target is a user-archived Captain: asleep, not dead.
     SkippedAsleep,
     /// The target is a demoted Captain: no live Captain remains to wake.
@@ -420,6 +442,9 @@ pub enum Delivery {
 /// runs in production, tests substitute a recorder.
 pub trait Deliver: Send + Sync {
     fn deliver(&self, task: &Task) -> Result<Delivery, EngineError>;
+    /// Whether queued row `row` still owes `session` its turn (queued, or
+    /// the turn running now).
+    fn pending(&self, session: &str, row: &str) -> Result<bool, EngineError>;
 }
 
 /// Queues a fired prompt on the target chat's doc — the row `QueueMessage`
@@ -488,9 +513,14 @@ impl Deliver for SessionDeliver {
                 session
             }
         };
-        self.doc_host
+        let row = self
+            .doc_host
             .queue_message(&session, &task.prompt, Vec::new())?;
-        Ok(Delivery::Delivered(session))
+        Ok(Delivery::Delivered { session, row })
+    }
+
+    fn pending(&self, session: &str, row: &str) -> Result<bool, EngineError> {
+        self.doc_host.queued_row_pending(session, row)
     }
 }
 
@@ -512,6 +542,10 @@ struct Inner {
 /// runner's longest sleep, so a failed delivery retries within it.
 const MIN_RUN_GAP_MS: i64 = 60_000;
 const POLL_CAP: Duration = Duration::from_secs(60);
+/// An in-flight marker older than this no longer coalesces, whatever the
+/// chat says: a row stuck in a paused queue costs one extra wake a day at
+/// most, never the schedule.
+const IN_FLIGHT_MAX_MS: i64 = 24 * 60 * 60 * 1000;
 
 impl Schedules {
     /// Open `{data_dir}/schedules.json` (written on first change).
@@ -591,26 +625,35 @@ impl Schedules {
                 wait = wait.min(to_dur(last + MIN_RUN_GAP_MS - now_ms));
                 continue;
             }
+            if task.in_flight.is_some() {
+                dirty = true;
+                if self.coalesces(task, now_ms) {
+                    // The previous wake has not been taken up yet: this
+                    // occurrence folds into it. Nothing new ran, so lastRunAt
+                    // stays; the marker stays until that delivery finishes.
+                    tracing::info!(schedule = %task.id, "scheduled wake coalesced into the pending one");
+                    task.updated_at = now_ms;
+                    advance(task, now, now_ms, &mut wait);
+                    continue;
+                }
+                task.in_flight = None;
+            }
             match self.inner.deliver.deliver(task) {
-                Ok(Delivery::Delivered(session)) => {
+                Ok(Delivery::Delivered { session, row }) => {
                     dirty = true;
                     if let Target::NewOnce { session: at, .. } | Target::New { session: at, .. } =
                         &mut task.target
                     {
-                        *at = Some(session);
+                        *at = Some(session.clone());
                     }
+                    task.in_flight = Some(InFlight {
+                        session,
+                        row,
+                        queued_at: now_ms,
+                    });
                     task.last_run_at = Some(now_ms);
                     task.updated_at = now_ms;
-                    task.next_at = parse_rrule(&task.rrule)
-                        .ok()
-                        .and_then(|rule| rule.next_after(now))
-                        .map(|t| t.timestamp_millis());
-                    if task.next_at.is_none() {
-                        task.active = false;
-                    }
-                    if let Some(next) = task.next_at {
-                        wait = wait.min(to_dur(next - now_ms));
-                    }
+                    advance(task, now, now_ms, &mut wait);
                 }
                 // A hidden Captain is asleep, not failed: consume this
                 // occurrence without touching lastRunAt and move to the next
@@ -619,16 +662,7 @@ impl Schedules {
                 Ok(Delivery::SkippedAsleep) => {
                     dirty = true;
                     task.updated_at = now_ms;
-                    task.next_at = parse_rrule(&task.rrule)
-                        .ok()
-                        .and_then(|rule| rule.next_after(now))
-                        .map(|t| t.timestamp_millis());
-                    if task.next_at.is_none() {
-                        task.active = false;
-                    }
-                    if let Some(next) = task.next_at {
-                        wait = wait.min(to_dur(next - now_ms));
-                    }
+                    advance(task, now, now_ms, &mut wait);
                 }
                 // A demoted Captain is not a valid target for a later turn
                 // either. Ending the task is durable; a transport error, by
@@ -648,6 +682,34 @@ impl Schedules {
             self.persist(&tasks);
         }
         wait
+    }
+
+    /// Whether this occurrence folds into the task's in-flight delivery:
+    /// same chat as the target (a `new` target's every occurrence is a
+    /// fresh chat, so never), marker younger than [`IN_FLIGHT_MAX_MS`], and
+    /// the row still owed. A failed check delivers — it never suppresses.
+    fn coalesces(&self, task: &Task, now_ms: i64) -> bool {
+        let Some(flight) = &task.in_flight else {
+            return false;
+        };
+        let target = match &task.target {
+            Target::Session { session } => session,
+            Target::NewOnce {
+                session: Some(session),
+                ..
+            } => session,
+            Target::NewOnce { session: None, .. } | Target::New { .. } => return false,
+        };
+        if *target != flight.session || now_ms - flight.queued_at >= IN_FLIGHT_MAX_MS {
+            return false;
+        }
+        self.inner
+            .deliver
+            .pending(&flight.session, &flight.row)
+            .unwrap_or_else(|error| {
+                tracing::warn!(schedule = %task.id, %error, "schedules: in-flight check failed");
+                false
+            })
     }
 
     fn list(&self) -> Vec<Task> {
@@ -682,10 +744,11 @@ impl Schedules {
         };
         task.updated_at = now_ms();
         let mut tasks = self.tasks();
-        task.last_run_at = tasks
+        let stored = tasks
             .iter()
-            .find(|t| !task.id.is_empty() && t.id == task.id)
-            .and_then(|t| t.last_run_at);
+            .find(|t| !task.id.is_empty() && t.id == task.id);
+        task.last_run_at = stored.and_then(|t| t.last_run_at);
+        task.in_flight = stored.and_then(|t| t.in_flight.clone());
         match tasks.iter_mut().find(|t| t.id == task.id) {
             Some(found) => *found = task.clone(),
             None => {
@@ -717,7 +780,9 @@ impl Schedules {
     }
 
     /// ScheduleRunNow: fire once now; `nextAt` is kept — the schedule still
-    /// owes that occurrence.
+    /// owes that occurrence. A manual run is an explicit ask, so it bypasses
+    /// coalescing and always queues; its row becomes the task's in-flight
+    /// delivery, so a scheduled occurrence due behind it folds into it.
     fn run_now(&self, params: &Value) -> Result<Value, RpcError> {
         let id = params
             .get("id")
@@ -733,11 +798,11 @@ impl Schedules {
             .deliver
             .deliver(task)
             .map_err(|error| RpcError::Failed(error.to_string()))?;
-        let Delivery::Delivered(session) = delivery else {
+        let Delivery::Delivered { session, row } = delivery else {
             return Err(RpcError::Failed(match delivery {
                 Delivery::SkippedAsleep => "the Captain is archived and asleep".into(),
                 Delivery::Ended => "the Captain has been demoted".into(),
-                Delivery::Delivered(_) => unreachable!(),
+                Delivery::Delivered { .. } => unreachable!(),
             }));
         };
         if let Target::NewOnce { session: at, .. } | Target::New { session: at, .. } =
@@ -745,8 +810,14 @@ impl Schedules {
         {
             *at = Some(session.clone());
         }
-        task.last_run_at = Some(now_ms());
-        task.updated_at = now_ms();
+        let now = now_ms();
+        task.in_flight = Some(InFlight {
+            session: session.clone(),
+            row,
+            queued_at: now,
+        });
+        task.last_run_at = Some(now);
+        task.updated_at = now;
         self.persist(&tasks);
         Ok(json!({ "fired": true, "session": session }))
     }
@@ -784,6 +855,19 @@ impl Schedules {
 pub(crate) fn rule_view(rrule: &str, now: DateTime<Utc>) -> Option<(i64, Option<DateTime<Utc>>)> {
     let rule = parse_rrule(rrule).ok()?;
     Some((rule.zone.local_minus_utc() as i64, rule.next_after(now)))
+}
+
+/// Consume the occurrence due at `now`: `nextAt` moves to the next one (the
+/// task ends when none is left) and `wait` shortens to it.
+fn advance(task: &mut Task, now: DateTime<Utc>, now_ms: i64, wait: &mut Duration) {
+    task.next_at = parse_rrule(&task.rrule)
+        .ok()
+        .and_then(|rule| rule.next_after(now))
+        .map(|t| t.timestamp_millis());
+    match task.next_at {
+        Some(next) => *wait = (*wait).min(to_dur(next - now_ms)),
+        None => task.active = false,
+    }
 }
 
 fn to_dur(ms: i64) -> Duration {
@@ -868,14 +952,36 @@ mod tests {
         assert_eq!(next(until, "2026-01-03T09:00:00Z"), "");
     }
 
-    struct Recorder(Mutex<Vec<String>>);
+    /// Records deliveries as `id:prompt`; each queues row `row-N`, and the
+    /// rows in `pending` are the ones a chat still owes a turn.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<String>>, Mutex<Vec<String>>);
+    impl Recorder {
+        fn new() -> Self {
+            Self::default()
+        }
+        fn count(&self) -> usize {
+            self.0.lock().unwrap().len()
+        }
+        /// The delivered row finished its turn: nothing pending remains.
+        fn finish_all(&self) {
+            self.1.lock().unwrap().clear();
+        }
+    }
     impl Deliver for Recorder {
         fn deliver(&self, task: &Task) -> Result<Delivery, EngineError> {
-            self.0
-                .lock()
-                .unwrap()
-                .push(format!("{}:{}", task.id, task.prompt));
-            Ok(Delivery::Delivered("chat-1".into()))
+            let mut log = self.0.lock().unwrap();
+            log.push(format!("{}:{}", task.id, task.prompt));
+            let row = format!("row-{}", log.len());
+            self.1.lock().unwrap().push(row.clone());
+            let session = match &task.target {
+                Target::Session { session } => session.clone(),
+                _ => "chat-1".into(),
+            };
+            Ok(Delivery::Delivered { session, row })
+        }
+        fn pending(&self, _session: &str, row: &str) -> Result<bool, EngineError> {
+            Ok(self.1.lock().unwrap().iter().any(|r| r == row))
         }
     }
 
@@ -892,13 +998,14 @@ mod tests {
             next_at: None,
             last_run_at: None,
             updated_at: 0,
+            in_flight: None,
         }
     }
 
     #[test]
     fn store_round_trip() {
         let dir = tempfile::tempdir().unwrap();
-        let deliver: Arc<dyn Deliver> = Arc::new(Recorder(Mutex::new(vec![])));
+        let deliver: Arc<dyn Deliver> = Arc::new(Recorder::new());
         let saved = Schedules::open(dir.path(), deliver.clone())
             .save(&json!({ "task": {
                 "title": "standup", "prompt": "post it",
@@ -921,7 +1028,7 @@ mod tests {
     #[test]
     fn missed_occurrences_fire_once() {
         let dir = tempfile::tempdir().unwrap();
-        let hits = Arc::new(Recorder(Mutex::new(vec![])));
+        let hits = Arc::new(Recorder::new());
         let store = Schedules::open(dir.path(), hits.clone());
         let mut t = task("DTSTART:20260101T090000Z\nRRULE:FREQ=MINUTELY");
         t.next_at = Some(utc("2026-11-18T10:00:00Z").timestamp_millis());
@@ -931,8 +1038,135 @@ mod tests {
         assert_eq!(hits.0.lock().unwrap().len(), 1); // latest missed fires once
         store.tick(now + chrono::Duration::seconds(30)); // next is 11:01
         assert_eq!(hits.0.lock().unwrap().len(), 1);
+        hits.finish_all();
         store.tick(now + chrono::Duration::seconds(61));
         assert_eq!(hits.0.lock().unwrap().len(), 2);
+    }
+
+    const EVERY_15: &str = "DTSTART:20260101T090000Z\nRRULE:FREQ=MINUTELY;INTERVAL=15";
+
+    /// A store holding `tasks`, each due at 09:00 on 2026-11-18.
+    fn due_store(dir: &Path, hits: &Arc<Recorder>, tasks: Vec<Task>) -> Schedules {
+        let store = Schedules::open(dir, hits.clone());
+        *store.tasks() = tasks
+            .into_iter()
+            .map(|mut t| {
+                t.next_at = Some(utc("2026-11-18T09:00:00Z").timestamp_millis());
+                t
+            })
+            .collect();
+        store
+    }
+
+    #[test]
+    fn a_busy_target_gets_one_wake_per_pending_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        let store = due_store(dir.path(), &hits, vec![task(EVERY_15)]);
+        let at = |hhmm: &str| utc(&format!("2026-11-18T{hhmm}:00Z"));
+        store.tick(at("09:00"));
+        assert_eq!(hits.count(), 1);
+        let first = store.list().remove(0);
+        assert_eq!(first.in_flight.as_ref().unwrap().row, "row-1");
+        // A one-hour turn: three more occurrences come due behind it.
+        for hhmm in ["09:15", "09:30", "09:45"] {
+            store.tick(at(hhmm));
+        }
+        assert_eq!(
+            hits.count(),
+            1,
+            "occurrences coalesce into the pending wake"
+        );
+        let held = store.list().remove(0);
+        assert_eq!(held.last_run_at, first.last_run_at, "nothing new ran");
+        assert_eq!(held.next_at, Some(at("10:00").timestamp_millis()));
+        assert_eq!(held.in_flight, first.in_flight);
+        // The turn ends: the next occurrence wakes the target again.
+        hits.finish_all();
+        store.tick(at("10:00"));
+        assert_eq!(hits.count(), 2);
+        assert_eq!(store.list()[0].in_flight.as_ref().unwrap().row, "row-2");
+    }
+
+    #[test]
+    fn separate_schedules_on_one_target_do_not_coalesce() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        let mut other = task(EVERY_15);
+        other.id = "t2".into();
+        other.prompt = "check".into();
+        let store = due_store(dir.path(), &hits, vec![task(EVERY_15), other]);
+        store.tick(utc("2026-11-18T09:00:00Z"));
+        assert_eq!(
+            *hits.0.lock().unwrap(),
+            vec!["t1:go".to_string(), "t2:check".to_string()]
+        );
+        store.tick(utc("2026-11-18T09:15:00Z"));
+        assert_eq!(hits.count(), 2, "each task coalesces only into its own row");
+    }
+
+    #[test]
+    fn in_flight_survives_restart_but_never_suppresses_for_good() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        due_store(dir.path(), &hits, vec![task(EVERY_15)]).tick(utc("2026-11-18T09:00:00Z"));
+        // Restart: the marker is read back and still coalesces while owed.
+        let reopened = Schedules::open(dir.path(), hits.clone());
+        assert_eq!(reopened.list()[0].in_flight.as_ref().unwrap().row, "row-1");
+        reopened.tick(utc("2026-11-18T09:15:00Z"));
+        assert_eq!(hits.count(), 1);
+        // A crash lost the turn: the row is owed nothing, so the next
+        // occurrence delivers.
+        hits.finish_all();
+        Schedules::open(dir.path(), hits.clone()).tick(utc("2026-11-18T09:30:00Z"));
+        assert_eq!(hits.count(), 2);
+        // A row the chat claims forever stops coalescing after a day.
+        let stuck = Schedules::open(dir.path(), hits.clone());
+        stuck.tick(utc("2026-11-19T09:30:00Z"));
+        assert_eq!(hits.count(), 3, "a stale marker does not suppress");
+    }
+
+    #[test]
+    fn a_retargeted_task_does_not_coalesce_into_the_old_chat() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        let store = due_store(dir.path(), &hits, vec![task(EVERY_15)]);
+        store.tick(utc("2026-11-18T09:00:00Z"));
+        store.tasks()[0].target = Target::Session {
+            session: "c2".into(),
+        };
+        store.tick(utc("2026-11-18T09:15:00Z"));
+        assert_eq!(hits.count(), 2);
+        assert_eq!(store.list()[0].in_flight.as_ref().unwrap().session, "c2");
+    }
+
+    #[test]
+    fn run_now_bypasses_coalescing_and_becomes_the_pending_wake() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        let store = due_store(dir.path(), &hits, vec![task(EVERY_15)]);
+        store.tick(utc("2026-11-18T09:00:00Z"));
+        store.run_now(&json!({ "id": "t1" })).unwrap();
+        assert_eq!(hits.count(), 2, "a manual run always queues");
+        assert_eq!(store.list()[0].in_flight.as_ref().unwrap().row, "row-2");
+        store.tick(utc("2026-11-18T09:15:00Z"));
+        assert_eq!(hits.count(), 2, "the scheduled occurrence folds into it");
+    }
+
+    #[test]
+    fn save_keeps_the_engine_owned_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        let hits = Arc::new(Recorder::new());
+        let store = due_store(dir.path(), &hits, vec![task(EVERY_15)]);
+        store.tick(utc("2026-11-18T09:00:00Z"));
+        let saved = store
+            .save(&json!({ "task": {
+                "id": "t1", "title": "t", "prompt": "go again", "rrule": EVERY_15,
+                "target": {"kind": "session", "session": "c1"},
+                "inFlight": {"session": "c1", "row": "forged", "queuedAt": 0},
+            } }))
+            .unwrap();
+        assert_eq!(saved.in_flight.unwrap().row, "row-1");
     }
 
     #[derive(Clone, Copy)]
@@ -1102,6 +1336,62 @@ mod tests {
         assert!(!stored.active, "the schedule ends durably");
         assert_eq!(stored.next_at, None);
         assert_eq!(stored.last_run_at, None, "nothing ran");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_queued_wake_is_pending_until_its_row_leaves_the_queue() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("data");
+        let core = boot_core(&dir).await;
+        let session = "chat-busy-captain";
+        core.workspace
+            .create_chat(session, None, Some(&core.device_id), None, None)
+            .expect("target chat is created");
+        core.captains
+            .promote(session, "Ada")
+            .expect("Captain promotes");
+        // Hold the queue as a busy turn would.
+        core.doc_host.open(session).expect("chat doc opens");
+        core.doc_host.pause_all_queues();
+        let schedules = Schedules::open(
+            &dir,
+            Arc::new(SessionDeliver {
+                doc_host: core.doc_host.clone(),
+                workspace: core.workspace.clone(),
+                data_dir: dir.clone(),
+            }),
+        );
+        let mut due = task(EVERY_15);
+        due.target = Target::Session {
+            session: session.into(),
+        };
+        due.next_at = Some(utc("2026-11-18T09:00:00Z").timestamp_millis());
+        *schedules.tasks() = vec![due];
+        let queued = |core: &crate::EngineCore| {
+            core.doc_host
+                .open(session)
+                .unwrap()
+                .doc()
+                .read_queue()
+                .unwrap()
+        };
+        schedules.tick(utc("2026-11-18T09:00:00Z"));
+        schedules.tick(utc("2026-11-18T09:15:00Z"));
+        let rows = queued(&core);
+        assert_eq!(rows.len(), 1, "one wake queued behind the busy turn");
+        assert_eq!(
+            schedules.list()[0].in_flight.as_ref().unwrap().row,
+            rows[0].id
+        );
+        // The row leaves the queue with no turn running: owed nothing.
+        assert!(
+            core.doc_host
+                .update_queued_message(session, &rows[0].id, "")
+                .unwrap()
+        );
+        schedules.tick(utc("2026-11-18T09:30:00Z"));
+        assert_eq!(queued(&core).len(), 1, "the next occurrence queues again");
+        core.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
