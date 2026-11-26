@@ -519,7 +519,12 @@ impl Deliver for SessionDeliver {
         Ok(Delivery::Delivered { session, row })
     }
 
+    /// A hidden or demoted Captain owes no wake: the occurrence goes to
+    /// `deliver`, which skips or ends the task for it.
     fn pending(&self, session: &str, row: &str) -> Result<bool, EngineError> {
+        if self.captain_outcome(session)?.is_some() {
+            return Ok(false);
+        }
         self.doc_host.queued_row_pending(session, row)
     }
 }
@@ -1391,6 +1396,49 @@ mod tests {
         );
         schedules.tick(utc("2026-11-18T09:30:00Z"));
         assert_eq!(queued(&core).len(), 1, "the next occurrence queues again");
+
+        // Dispatched: the row is the latest user message. It is owed while
+        // the turn it started runs, not once a later wake turn runs instead.
+        let row = queued(&core)[0].id.clone();
+        assert!(
+            core.doc_host
+                .update_queued_message(session, &row, "")
+                .unwrap()
+        );
+        let user_row = |created_at: i64| zeron_doc::SessionMessageEntry {
+            id: row.clone(),
+            role: zeron_doc::MessageRole::User,
+            parts: vec![zeron_doc::MessagePart::Text {
+                id: new_id(),
+                text: "go".into(),
+            }],
+            created_at,
+            device_id: core.device_id.clone(),
+            status: None,
+            continuation_of: None,
+            duration_ms: None,
+        };
+        let doc = core.doc_host.open(session).unwrap();
+        doc.doc().push_message(&user_row(now_ms())).unwrap();
+        core.sessions
+            .seed_status(session, zeron_proto::SessionStatus::Working);
+        let deliver = SessionDeliver {
+            doc_host: core.doc_host.clone(),
+            workspace: core.workspace.clone(),
+            data_dir: dir.clone(),
+        };
+        assert!(deliver.pending(session, &row).unwrap(), "its own turn runs");
+        let stale = format!("{row}-old");
+        let mut old = user_row(now_ms() - 3_600_000);
+        old.id = stale.clone();
+        doc.doc().push_message(&old).unwrap();
+        assert!(
+            !deliver.pending(session, &stale).unwrap(),
+            "a turn started long after the row is not its turn"
+        );
+        // A demoted Captain owes no wake: the next occurrence ends the task.
+        core.captains.demote(session).expect("Captain demotes");
+        assert!(!deliver.pending(session, &row).unwrap());
         core.shutdown().await;
     }
 
