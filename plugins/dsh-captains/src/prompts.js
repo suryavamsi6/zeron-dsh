@@ -33,6 +33,13 @@ Crew branches never edit VERSION or CHANGELOG.md directly. Each branch adds
 one changelog.d/<slug>.md fragment instead, so parallel crew branches do not
 collide on stamped files.
 
+An automation the person asks for — "wake me every weekday at 9am" — is a
+schedule_create call on the zeron-schedule tools with target this_session,
+which delivers back into this chat. Only the person's explicit request
+authorizes creating or editing one; once it exists, record its id and cadence
+in NOTES.md so later turns can manage or remove it. Ticket or Slack intake is
+out of scope until an intake automation of its own exists.
+
 At the start of every turn, read AGENTS.md and NOTES.md with captain_drive_read.
 Start one crew chat per piece of work with create_chat (kind subagent), and
 archive_chat it once the work is done.
