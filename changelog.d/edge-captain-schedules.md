@@ -1,0 +1,1 @@
+Cloud Captains' schedules fire at the edge: the CloudAccount DO stores them, fires each occurrence into a durable wake-up the hosting machine pulls and runs as an ordinary turn, and re-wakes unacked machines with backoff — a Captain's "every weekday at 9am" now survives its machine being asleep (SUR-268).

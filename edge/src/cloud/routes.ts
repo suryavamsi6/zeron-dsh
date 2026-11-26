@@ -375,6 +375,45 @@ export const handleCloudRoute = async (
     return rpc(() => accountStub(ns, runner.orgId, runner.userId).reportUsage(runner, account, windows, planLabel));
   }
 
+  if (url.pathname === "/runner/wakeups") {
+    // The hosting machine's pull: pending schedule wake-ups for the chat it
+    // hosts (SUR-268). The nudge is only ever a hint; the prompt itself
+    // crosses here, over the runner's authenticated channel.
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (!isObject(body) || typeof body.chatId !== "string" || !ID_RE.test(body.chatId)) {
+      return jsonError(400, "bad_request", "Expected {chatId}.");
+    }
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() => accountStub(ns, runner.orgId, runner.userId).pendingWakeups(runner, body.chatId as string));
+  }
+
+  if (url.pathname === "/runner/wakeups/ack") {
+    if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
+    if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
+      return jsonError(403, "forbidden", "Runner token required.");
+    }
+    const ns = env.CLOUD_ACCOUNTS;
+    if (!ns) return unavailable();
+    const body = await readJsonBody(request, MAX_RUNNER_BODY);
+    if (
+      !isObject(body) ||
+      typeof body.chatId !== "string" || !ID_RE.test(body.chatId) ||
+      typeof body.fireId !== "string" || body.fireId.length > 64
+    ) {
+      return jsonError(400, "bad_request", "Expected {chatId, fireId}.");
+    }
+    const runner = { orgId: auth.orgId, userId: auth.userId, deviceId: auth.deviceId };
+    return rpc(() =>
+      accountStub(ns, runner.orgId, runner.userId).ackWakeup(runner, body.chatId as string, body.fireId as string)
+    );
+  }
+
   if (url.pathname === "/runner/wake-timing") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed", "POST only.");
     if (auth.kind !== "runner" || !auth.deviceId || !auth.orgId) {
@@ -610,6 +649,37 @@ export const handleCloudRoute = async (
         if (picked === "bad") return jsonError(400, "bad_request", BAD_MACHINE);
         return sessionRpc(() => stub.retrySession(caller, chatId, edgeUrl, picked.machine));
       }
+      // Edge-owned Captain schedules for this cloud-hosted chat (SUR-268).
+      // A runner manages them only for the chat its machine hosts — the DO
+      // re-checks that; runner-policy admits the shape, the DO owns the truth.
+      if (rest[2] === "schedules") {
+        const body = await readJsonBody(request, 8192);
+        if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
+        const { id, title, prompt, rrule, active } = body;
+        if (id !== undefined && (typeof id !== "string" || id.length > 64)) return jsonError(400, "bad_request", "Bad id.");
+        if (typeof title !== "string" || typeof prompt !== "string" || typeof rrule !== "string") {
+          return jsonError(400, "bad_request", "Expected {title, prompt, rrule}.");
+        }
+        if (active !== undefined && typeof active !== "boolean") return jsonError(400, "bad_request", "Bad active.");
+        return sessionRpc(() =>
+          stub.upsertSchedule(caller, chatId, {
+            ...(id === undefined ? {} : { id }),
+            title,
+            prompt,
+            rrule,
+            ...(active === undefined ? {} : { active })
+          })
+        );
+      }
+    }
+    if (rest.length === 3 && rest[2] === "schedules" && request.method === "GET") {
+      return sessionRpc(() => stub.listCloudSchedules(caller, chatId));
+    }
+    // DELETE /cloud/{org}/sessions/{chatId}/schedules/{id}
+    if (rest.length === 4 && rest[2] === "schedules" && request.method === "DELETE") {
+      const id = rest[3];
+      if (!id || id.length > 64) return jsonError(400, "bad_request", "Bad id.");
+      return sessionRpc(() => stub.deleteSchedule(caller, chatId, id));
     }
   }
   return jsonError(404, "not_found", "Not found.");

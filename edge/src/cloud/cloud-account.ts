@@ -120,6 +120,19 @@ import {
   type UsageWindow
 } from "./models";
 import { activeProviderName, sandboxProvider } from "./providers";
+import {
+  MAX_SCHEDULES_PER_CHAT,
+  WAKEUP_ACK_TIMEOUT_MS,
+  WAKEUP_RETENTION_MS,
+  ensureCloudSchedules,
+  listSchedules as readSchedules,
+  nextAfter,
+  parseRrule,
+  planFire,
+  wakeupRetryDue,
+  type CloudSchedule,
+  type CloudWakeup
+} from "./schedules";
 import { WAKE_STAGE_TTL_MS, wakeTiming, type EngineTiming, type WakeStage, type WakeStages, type WakeTrace } from "./wake";
 import {
   CREDIT_PACK,
@@ -577,6 +590,7 @@ export class CloudAccount extends DurableObject<Env> {
     if (!this.tablesReady) {
       ensureMeteringTables(this.ctx.storage.sql);
       ensureBillingTables(this.ctx.storage.sql);
+      ensureCloudSchedules(this.ctx.storage.sql);
       this.tablesReady = true;
     }
     return this.ctx.storage.sql;
@@ -614,6 +628,18 @@ export class CloudAccount extends DurableObject<Env> {
     }
     if (this.acct.nextReconcileAt !== undefined) due.push(this.acct.nextReconcileAt);
     if (this.acct.sweepDevicesAt !== undefined) due.push(this.acct.sweepDevicesAt);
+    // Edge-owned Captain schedules: the next due occurrence, and a retry
+    // pass while any fired wake-up is unacked.
+    if (this.tablesReady) {
+      const sql = this.ctx.storage.sql;
+      for (const row of readSchedules(sql)) {
+        if (row.active && row.next_fire_at !== null) due.push(row.next_fire_at);
+      }
+      const pending = [
+        ...sql.exec("SELECT count(*) AS n FROM cloud_wakeup WHERE state='pending'")
+      ][0]?.n as number | undefined;
+      if (pending) due.push(Date.now() + WAKEUP_ACK_TIMEOUT_MS);
+    }
     if (due.length === 0) await this.ctx.storage.deleteAlarm();
     else await this.ctx.storage.setAlarm(Math.min(...due));
   }
@@ -1908,7 +1934,222 @@ export class CloudAccount extends DurableObject<Env> {
     }
   }
 
-  // ── runner identity (pre-bearer /runner/enroll, /runner/token) ───────────
+  // ── edge-owned Captain schedules (SUR-268) ────────────────────────────────
+
+  /**
+   * Create or replace a schedule whose target chat is one of this account's
+   * cloud sessions. The rrule is validated and the next occurrence computed
+   * here, so a stored row never needs the engine's clock to be right at
+   * write time. Ownership is fixed: a schedule exists here because the chat
+   * is cloud-hosted; delivery routes through the hosting engine either way.
+   */
+  async upsertSchedule(
+    caller: CloudCaller,
+    chatId: string,
+    input: { id?: string; title: string; prompt: string; rrule: string; active?: boolean }
+  ): Promise<CloudResult<{ schedule: CloudSchedule }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
+    // A machine manages schedules only for the chat it hosts — never for
+    // another of the person's sessions, however wide its reach.
+    if (caller.deviceId !== undefined && this.byDevice.get(caller.deviceId) !== chatId) {
+      return fail(403, "forbidden", "A Cloud machine manages schedules only for the chat it hosts.");
+    }
+    const s = this.sessions.get(chatId);
+    if (!s || s.pendingDelete) return fail(404, "unknown_chat", "That chat is not a Cloud session here.");
+    if (!input.title || input.title.length > 120) return fail(400, "bad_request", "title is 1–120 chars.");
+    if (!input.prompt.trim()) return fail(400, "bad_request", "prompt is empty.");
+    const sql = this.sql();
+    const existing = input.id
+      ? ([...sql.exec("SELECT * FROM cloud_schedule WHERE id=? AND chat_id=?", input.id, chatId)] as CloudSchedule[])[0]
+      : undefined;
+    if (input.id && !existing) return fail(404, "unknown_schedule", "No such schedule on this chat.");
+    if (!existing) {
+      const count = [...sql.exec("SELECT count(*) AS n FROM cloud_schedule WHERE chat_id=?", chatId)][0].n as number;
+      if (count >= MAX_SCHEDULES_PER_CHAT) {
+        return fail(409, "too_many", `A chat carries at most ${MAX_SCHEDULES_PER_CHAT} schedules.`);
+      }
+    }
+    let nextFireAt: number | null = null;
+    const active = input.active ?? existing?.active !== 0;
+    try {
+      const rule = parseRrule(input.rrule);
+      const next = active ? nextAfter(rule, Date.now()) : undefined;
+      if (active && next === undefined) {
+        return fail(400, "bad_request", "rrule has no occurrence in the future.");
+      }
+      nextFireAt = next ?? null;
+    } catch (e) {
+      return fail(400, "bad_request", String(e instanceof Error ? e.message : e));
+    }
+    const now = Date.now();
+    const row: CloudSchedule = {
+      id: input.id ?? crypto.randomUUID(),
+      chat_id: chatId,
+      title: input.title,
+      prompt: input.prompt,
+      rrule: input.rrule,
+      active: active ? 1 : 0,
+      next_fire_at: nextFireAt,
+      last_fired_at: existing?.last_fired_at ?? null,
+      last_error: null,
+      created_at: existing?.created_at ?? now,
+      updated_at: now
+    };
+    sql.exec(
+      "INSERT INTO cloud_schedule VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
+        "title=excluded.title, prompt=excluded.prompt, rrule=excluded.rrule, active=excluded.active, " +
+        "next_fire_at=excluded.next_fire_at, last_error=excluded.last_error, updated_at=excluded.updated_at",
+      row.id, row.chat_id, row.title, row.prompt, row.rrule, row.active,
+      row.next_fire_at, row.last_fired_at, row.last_error, row.created_at, row.updated_at
+    );
+    await this.armAlarm();
+    return { ok: true, value: { schedule: row } };
+  }
+
+  async deleteSchedule(caller: CloudCaller, chatId: string, id: string): Promise<CloudResult<{ deleted: boolean }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
+    if (caller.deviceId !== undefined && this.byDevice.get(caller.deviceId) !== chatId) {
+      return fail(403, "forbidden", "A Cloud machine manages schedules only for the chat it hosts.");
+    }
+    const sql = this.sql();
+    const gone =
+      [...sql.exec("SELECT count(*) AS n FROM cloud_schedule WHERE id=? AND chat_id=?", id, chatId)][0].n === 1;
+    if (gone) {
+      sql.exec("DELETE FROM cloud_schedule WHERE id=? AND chat_id=?", id, chatId);
+      // Wake-ups already fired stay: the engine acks or drops them, and a
+      // deleted schedule's prompt in flight is still one the person asked for.
+      await this.armAlarm();
+    }
+    return { ok: true, value: { deleted: gone } };
+  }
+
+  async listCloudSchedules(caller: CloudCaller, chatId?: string): Promise<CloudResult<{ schedules: CloudSchedule[] }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
+    if (caller.deviceId !== undefined && chatId !== undefined && this.byDevice.get(caller.deviceId) !== chatId) {
+      return fail(403, "forbidden", "A Cloud machine reads schedules only for the chat it hosts.");
+    }
+    return { ok: true, value: { schedules: readSchedules(this.sql(), chatId) } };
+  }
+
+  /** The runner pull: pending wake-ups for one of the machine's own chats.
+   * The engine materializes them as ordinary queued messages — the doc write
+   * only a host can make — then acks. */
+  async pendingWakeups(caller: CloudCaller, chatId: string): Promise<CloudResult<{ wakeups: CloudWakeup[] }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
+    // A machine may only read the wake-ups of the chat it hosts.
+    if (caller.deviceId !== undefined && this.byDevice.get(caller.deviceId) !== chatId) {
+      return fail(403, "forbidden", "A Cloud machine reads wake-ups only for the chat it hosts.");
+    }
+    const rows = [
+      ...this.sql().exec(
+        "SELECT * FROM cloud_wakeup WHERE chat_id=? AND state='pending' ORDER BY occurrence_at, fire_id",
+        chatId
+      )
+    ] as CloudWakeup[];
+    return { ok: true, value: { wakeups: rows } };
+  }
+
+  async ackWakeup(caller: CloudCaller, chatId: string, fireId: string): Promise<CloudResult<{ acked: boolean }>> {
+    if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
+    if (caller.deviceId !== undefined && this.byDevice.get(caller.deviceId) !== chatId) {
+      return fail(403, "forbidden", "A Cloud machine acks wake-ups only for the chat it hosts.");
+    }
+    const now = Date.now();
+    this.sql().exec(
+      "UPDATE cloud_wakeup SET state='acked', acked_at=? WHERE fire_id=? AND chat_id=? AND state='pending'",
+      now, fireId, chatId
+    );
+    const acked =
+      [...this.sql().exec("SELECT changes() AS n")][0].n === 1;
+    return { ok: true, value: { acked } };
+  }
+
+  /** Nudge the session device's room: a wake-up is pending for its chat.
+   * The nudge carries only the chat id, as every nudge does — the prompt
+   * itself comes over the runner's authenticated pull, never the hint. */
+  private async nudgeSessionDevice(s: SessionRecord): Promise<void> {
+    const ns = this.env.DEVICE_ROOMS;
+    const userId = this.acct.userId;
+    if (!ns || !userId) return;
+    try {
+      const res = await ns.get(ns.idFromName(`d2/${s.deviceId}`)).fetch(
+        new Request("https://device/nudge", {
+          method: "POST",
+          headers: { [AUTH_USER_HEADER]: userId, "content-type": "application/json" },
+          body: JSON.stringify({ chatId: s.chatId })
+        })
+      );
+      if (!res.ok) console.warn("cloud: schedule nudge failed", s.deviceId, res.status);
+    } catch (e) {
+      console.warn("cloud: schedule nudge threw", s.deviceId, String(e));
+    }
+  }
+
+  /**
+   * The alarm pass: fire every due occurrence once, rewake machines whose
+   * wake-ups went unacked, drop the exhausted. Coalescing is the in-flight
+   * check in planFire — a busy Captain gets one wake per schedule, never a
+   * pile of duplicates behind one long turn.
+   */
+  private async fireDueSchedules(now: number): Promise<void> {
+    const sql = this.sql();
+    const dueRows = [
+      ...sql.exec("SELECT * FROM cloud_schedule WHERE active=1 AND next_fire_at IS NOT NULL AND next_fire_at<=? ORDER BY next_fire_at", now)
+    ] as CloudSchedule[];
+    for (const row of dueRows) {
+      const s = this.sessions.get(row.chat_id);
+      if (!s || s.pendingDelete || s.state === "deleting") {
+        // Permanent failure: the chat is gone — the schedule ends, no retry loop.
+        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=?, updated_at=? WHERE id=?",
+          "the chat is deleted", now, row.id);
+        continue;
+      }
+      const inFlight =
+        ([...sql.exec("SELECT count(*) AS n FROM cloud_wakeup WHERE schedule_id=? AND state='pending'", row.id)][0].n as number) > 0;
+      const plan = planFire(row, now, inFlight);
+      if (plan.kind === "end") {
+        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=?, updated_at=? WHERE id=?",
+          plan.error ?? "rrule has no occurrence in the future", now, row.id);
+        continue;
+      }
+      const active = plan.nextFireAt === undefined ? 0 : 1;
+      if (plan.kind === "coalesce") {
+        sql.exec("UPDATE cloud_schedule SET active=?, next_fire_at=?, updated_at=? WHERE id=?",
+          active, plan.nextFireAt ?? null, now, row.id);
+        continue;
+      }
+      // fire
+      const fireId = crypto.randomUUID();
+      sql.exec(
+        "INSERT INTO cloud_wakeup VALUES (?,?,?,?,?,?,0,?,?,NULL)",
+        fireId, row.id, row.chat_id, plan.occurrenceAt, row.prompt, "pending", now, now
+      );
+      sql.exec(
+        "UPDATE cloud_schedule SET active=?, next_fire_at=?, last_fired_at=?, last_error=NULL, updated_at=? WHERE id=?",
+        active, plan.nextFireAt ?? null, now, now, row.id
+      );
+      await this.wake(s);
+      await this.nudgeSessionDevice(s);
+    }
+    // Retry sweep: unacked wake-ups rewake with backoff; exhausted ones drop.
+    const pendings = [
+      ...sql.exec("SELECT * FROM cloud_wakeup WHERE state='pending' ORDER BY created_at LIMIT 64")
+    ] as CloudWakeup[];
+    for (const w of pendings) {
+      const s = this.sessions.get(w.chat_id);
+      if (!s || s.pendingDelete || s.state === "deleting") {
+        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=?", w.fire_id);
+        continue;
+      }
+      if (!wakeupRetryDue(w, now)) continue;
+      const attempts = w.attempts + 1;
+      sql.exec("UPDATE cloud_wakeup SET attempts=?, nudged_at=? WHERE fire_id=?", attempts, now, w.fire_id);
+      await this.wake(s);
+      await this.nudgeSessionDevice(s);
+    }
+    // Retention: resolved rows age out; the schedule row carries the audit.
+    sql.exec("DELETE FROM cloud_wakeup WHERE state!='pending' AND created_at<?", now - WAKEUP_RETENTION_MS);
+  }
 
   private sessionByDevice(deviceId: string): SessionRecord | undefined {
     const chatId = this.byDevice.get(deviceId);
@@ -2363,6 +2604,11 @@ export class CloudAccount extends DurableObject<Env> {
   async alarm(): Promise<void> {
     const now = Date.now();
     await this.retryDeletes(now);
+    try {
+      await this.fireDueSchedules(now);
+    } catch (e) {
+      console.error("cloud schedule firing failed", String(e));
+    }
     if (this.acct.nextOrphanSweepAt !== undefined && now >= this.acct.nextOrphanSweepAt) {
       this.acct.nextOrphanSweepAt = now + ORPHAN_SWEEP_MS;
       await this.sweepOrphans(now);
