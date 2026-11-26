@@ -3161,7 +3161,7 @@ fn perform_merge(
         }
         // The receipt is bound to the crew checkout: a commit made there after
         // shipping, pushed or not, invalidates it before the gate and again
-        // before landing.
+        // before the rebased head is pushed over the crew branch.
         let bound = || {
             let (head, tree) = runner.checkout_head(repo)?;
             receipt_binding_failure(receipt, &head, &tree).map_or(Ok(()), Err)
@@ -3177,6 +3177,7 @@ fn perform_merge(
             head
         } else {
             let before_publish = |rebased_head: &str| {
+                bound()?;
                 write_merge_progress(
                     &progress_path,
                     &receipt.head_sha,
@@ -3207,7 +3208,6 @@ fn perform_merge(
         if !crew_is_live(live_crew, &receipt.crew_id) {
             return Err("crew member was removed while the merge gate ran".into());
         }
-        bound()?;
         runner.land(repo, receipt.pr, &head)?;
         Ok(MergeOutcome {
             crew_id: receipt.crew_id.clone(),
@@ -6384,6 +6384,7 @@ mod tests {
         rebase_calls: std::sync::atomic::AtomicUsize,
         release: std::sync::atomic::AtomicUsize,
         land_calls: std::sync::atomic::AtomicUsize,
+        publish_calls: std::sync::atomic::AtomicUsize,
         move_target: std::sync::atomic::AtomicBool,
     }
 
@@ -6403,6 +6404,7 @@ mod tests {
                 rebase_calls: std::sync::atomic::AtomicUsize::new(0),
                 release: std::sync::atomic::AtomicUsize::new(0),
                 land_calls: std::sync::atomic::AtomicUsize::new(0),
+                publish_calls: std::sync::atomic::AtomicUsize::new(0),
                 move_target: std::sync::atomic::AtomicBool::new(false),
             }
         }
@@ -6472,6 +6474,7 @@ mod tests {
             bytes[39] = b'0' + (call as u8 % 10);
             let new_head = String::from_utf8(bytes).unwrap();
             before_publish(&new_head)?;
+            self.publish_calls.fetch_add(1, Ordering::SeqCst);
             Ok(new_head)
         }
 
@@ -7025,7 +7028,8 @@ mod tests {
 
     /// A commit made in the crew checkout after shipping invalidates the
     /// receipt even while the remote branch still names the reviewed head:
-    /// before the gate, and again when it lands during the gate.
+    /// before the gate, and again when it lands during the gate, before the
+    /// rebased head is pushed over the crew branch.
     #[test]
     fn helm_ready_receipt_queue_refuses_a_local_commit_after_shipping() {
         use std::sync::atomic::Ordering;
@@ -7050,6 +7054,7 @@ mod tests {
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
         assert!(outcomes[0].reason.contains("headSha"), "{}", outcomes[0].reason);
         assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.publish_calls.load(Ordering::SeqCst), 0);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
 
