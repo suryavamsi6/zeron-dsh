@@ -169,14 +169,14 @@ return ui.component(function(props: Props): Node
 	local function harness_list(): { Harness }
 		local out = {}
 		for _, h in read(props.harnesses) :: { Harness } do
-			if h.id == "deepseek" then table.insert(out, h) end
+			if h.id == "deepseek" or h.id == "devin" then table.insert(out, h) end
 		end
 		return out
 	end
 	local function model_list(): { Model }
 		local out = {}
 		for _, m in read(props.models) :: { Model } do
-			if m.harness == "deepseek" then table.insert(out, m) end
+			if m.harness == "deepseek" or m.harness == "devin" then table.insert(out, m) end
 		end
 		return out
 	end
