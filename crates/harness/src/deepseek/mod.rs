@@ -593,6 +593,7 @@ impl DeepSeekHarness {
             HarnessError::NotInstalled("Node >=24.9 is required for the DeepSeek SDK".into())
         })?;
         if !sdk_installed(&self.sdk_root) {
+            crate::install::auto_install_deepseek();
             return Err(HarnessError::NotInstalled(format!(
                 "Install @deepseek-ai/dsh-sdk-client@{SDK_VERSION} and @deepseek-ai/dsh@{SDK_VERSION} into {} (ZERON_DEEPSEEK_SDK_DIR)",
                 self.sdk_root.display()

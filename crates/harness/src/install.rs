@@ -49,6 +49,33 @@ fn npm_cli_for(node: &Path) -> Option<PathBuf> {
     candidates.into_iter().find(|candidate| candidate.is_file())
 }
 
+/// Install the SDK in the background when a use finds it missing: the fork's
+/// installs are self-driving (the error copy's "try again in a moment" is
+/// meant literally), so the first touch of a feature that needs the SDK kicks
+/// the install off and the retry finds it done. Catalog probes never call
+/// this. One install at a time — a second touch while one runs is a no-op.
+pub fn auto_install_deepseek() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    if installed(HarnessId::DeepSeek)
+        || !can_install(HarnessId::DeepSeek)
+        || RUNNING.swap(true, Ordering::SeqCst)
+    {
+        return;
+    }
+    let Ok(handle) = tokio::runtime::Handle::try_current() else {
+        RUNNING.store(false, Ordering::SeqCst);
+        return;
+    };
+    handle.spawn(async move {
+        let result = install_harness(HarnessId::DeepSeek, CancellationToken::new()).await;
+        if let Err(error) = result {
+            eprintln!("zeron: deepseek auto-install failed: {error}");
+        }
+        RUNNING.store(false, Ordering::SeqCst);
+    });
+}
+
 pub fn manual_command(id: HarnessId) -> Option<&'static str> {
     (id == HarnessId::DeepSeek).then_some(
         "Set ZERON_DEEPSEEK_SDK_DIR to an isolated npm prefix, then run: npm install --prefix \"$ZERON_DEEPSEEK_SDK_DIR\" --save-exact @deepseek-ai/dsh-sdk-client@0.2.2-rc.3 @deepseek-ai/dsh@0.2.2-rc.3 (Node >=24.9)",

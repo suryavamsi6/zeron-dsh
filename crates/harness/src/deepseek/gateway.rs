@@ -192,6 +192,7 @@ impl Gateway {
     async fn spawn(&self) -> Result<Session, GatewayError> {
         let bin = self.bin();
         if !bin.is_file() {
+            crate::install::auto_install_deepseek();
             return Err(GatewayError::NotInstalled(bin.display().to_string()));
         }
         let node = crate::executable::find_on_paths_with(
