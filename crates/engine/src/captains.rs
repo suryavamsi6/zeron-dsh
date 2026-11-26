@@ -14,7 +14,7 @@
 //! the honest report of what was committed, not a claim that the chat still
 //! exists.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
@@ -26,6 +26,20 @@ use sha2::Digest;
 use zeron_rpc::{RpcError, methods};
 
 const FILE_NAME: &str = "captains.json";
+
+/// File ownership metadata recorded for one crew member. `owns` is not
+/// advisory: the run stamp carries it to the DeepSeek policy, which denies
+/// edits outside the globs. `worktree` is the dedicated checkout the member
+/// is expected to work in; both are optional for older rows and ordinary
+/// crew members.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CrewMeta {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+}
 
 /// One chat promoted to Captain: its display name, when it was promoted,
 /// whether it has since been demoted (its record and crew list are kept as
@@ -50,6 +64,11 @@ pub struct Captain {
     /// cascade's business. Kept off the file while it is empty.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub archived_crew: Vec<String>,
+    /// Ownership metadata by crew chat id. Kept as a side map so a
+    /// `captains.json` written before SUR-206 — plain string crew entries —
+    /// loads unchanged, and so existing roster projections keep their shape.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub crew_meta: BTreeMap<String, CrewMeta>,
 }
 
 impl Captain {
@@ -81,6 +100,8 @@ pub enum RunRole {
     Crew {
         captain_id: String,
         captain_name: String,
+        owns: Vec<String>,
+        worktree: Option<String>,
     },
 }
 
@@ -180,6 +201,8 @@ impl Registry {
             // crew is still free.
             Some(captain) => {
                 captain.crew.retain(|member| !unavailable.contains(member));
+                let crew = captain.crew.clone();
+                captain.crew_meta.retain(|member, _| crew.contains(member));
                 captain.name = name.to_string();
                 captain.created_at = Utc::now();
                 captain.archived = false;
@@ -192,6 +215,7 @@ impl Registry {
                 user_archived: false,
                 crew: Vec::new(),
                 archived_crew: Vec::new(),
+                crew_meta: BTreeMap::new(),
             }),
         }
         Ok(())
@@ -214,10 +238,38 @@ impl Registry {
     /// Add `chat_id` to `captain_id`'s crew. A Captain can't be crew, and a
     /// chat is in at most one crew.
     pub fn add_crew(&mut self, captain_id: &str, chat_id: &str) -> Result<(), String> {
+        self.add_crew_with_metadata(captain_id, chat_id, CrewMeta::default())
+    }
+
+    /// Add `chat_id` to `captain_id`'s crew with ownership metadata, or
+    /// replace the metadata when the member is already in that crew. The
+    /// ownership rules are the same as [`Registry::add_crew`].
+    pub fn add_crew_with_metadata(
+        &mut self,
+        captain_id: &str,
+        chat_id: &str,
+        meta: CrewMeta,
+    ) -> Result<(), String> {
+        if meta
+            .owns
+            .iter()
+            .any(|glob| glob.is_empty() || glob.contains('\0'))
+        {
+            return Err("crew owns globs must be non-empty strings".into());
+        }
+        if meta
+            .worktree
+            .as_deref()
+            .is_some_and(|path| path.is_empty() || !Path::new(path).is_absolute())
+        {
+            return Err("crew worktree must be an absolute path".into());
+        }
         if self.is_captain(chat_id) {
             return Err(format!("a Captain can't be crew: {chat_id}"));
         }
-        if let Some(owner) = self.captain_of_crew(chat_id) {
+        if let Some(owner) = self.captain_of_crew(chat_id)
+            && owner.chat_id != captain_id
+        {
             return Err(format!(
                 "a chat is in at most one crew ({chat_id} crews for {})",
                 owner.chat_id
@@ -230,7 +282,14 @@ impl Registry {
         else {
             return Err(format!("no such captain: {captain_id}"));
         };
-        captain.crew.push(chat_id.to_string());
+        if !captain.crew.iter().any(|id| id == chat_id) {
+            captain.crew.push(chat_id.to_string());
+        }
+        if meta == CrewMeta::default() {
+            captain.crew_meta.remove(chat_id);
+        } else {
+            captain.crew_meta.insert(chat_id.to_string(), meta);
+        }
         Ok(())
     }
 
@@ -247,6 +306,7 @@ impl Registry {
             return Err(format!("{chat_id} is not in that crew"));
         };
         captain.crew.remove(position);
+        captain.crew_meta.remove(chat_id);
         Ok(())
     }
 
@@ -349,6 +409,8 @@ impl Registry {
             .expect("the lookup above found the record");
         captain.user_archived = false;
         captain.crew.retain(|member| !unavailable.contains(member));
+        let crew = captain.crew.clone();
+        captain.crew_meta.retain(|member, _| crew.contains(member));
         Ok((std::mem::take(&mut captain.archived_crew), true))
     }
 
@@ -381,9 +443,12 @@ impl Registry {
             };
         }
         if let Some(captain) = self.captain_of_crew(chat_id) {
+            let meta = captain.crew_meta.get(chat_id).cloned().unwrap_or_default();
             return RunRole::Crew {
                 captain_id: captain.chat_id.clone(),
                 captain_name: captain.name.clone(),
+                owns: meta.owns,
+                worktree: meta.worktree,
             };
         }
         RunRole::None
@@ -418,15 +483,21 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
         captain_id: &'a str,
         captain_name: &'a str,
         drive_root: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        owns: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        worktree: Option<String>,
     }
 
-    let (role, captain_id, captain_name) = match registry.run_role(chat_id) {
+    let (role, captain_id, captain_name, owns, worktree) = match registry.run_role(chat_id) {
         RunRole::None => return None,
-        RunRole::Captain { name } => ("captain", chat_id.to_string(), name),
+        RunRole::Captain { name } => ("captain", chat_id.to_string(), name, Vec::new(), None),
         RunRole::Crew {
             captain_id,
             captain_name,
-        } => ("crew", captain_id, captain_name),
+            owns,
+            worktree,
+        } => ("crew", captain_id, captain_name, owns, worktree),
     };
     if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
         return None;
@@ -440,6 +511,8 @@ pub fn captains_env(registry: &Registry, deepseek_home: &Path, chat_id: &str) ->
             drive_root: drive_dir(deepseek_home, &captain_id)
                 .to_string_lossy()
                 .into_owned(),
+            owns,
+            worktree,
         })
         .expect("a captains stamp serialises"),
     )
@@ -520,6 +593,7 @@ pub fn ensure_drive(
         RunRole::Crew {
             captain_id,
             captain_name,
+            ..
         } => (captain_id, captain_name),
     };
     if valid_captain_row(chat_id, &captain_id, &captain_name).is_err() {
@@ -1752,6 +1826,17 @@ struct CrewParams {
     chat_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AddCrewParams {
+    captain_id: String,
+    chat_id: String,
+    #[serde(default)]
+    owns: Vec<String>,
+    #[serde(default)]
+    worktree: Option<String>,
+}
+
 /// One Captain as the roster projects it: the registry record plus the Drive
 /// path the plugin creates on the Captain's first turn.
 #[derive(Serialize)]
@@ -1763,6 +1848,8 @@ struct RosterEntry {
     archived: bool,
     user_archived: bool,
     crew: Vec<String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    crew_meta: BTreeMap<String, CrewMeta>,
     drive_path: String,
 }
 
@@ -1799,7 +1886,7 @@ impl CaptainsRpc<'_> {
                 self.demote(&params)
             }
             methods::ADD_CREW => {
-                let params: CrewParams = zeron_rpc::parse_params(params.clone())?;
+                let params: AddCrewParams = zeron_rpc::parse_params(params.clone())?;
                 self.add_crew(&params)
             }
             methods::REMOVE_CREW => {
@@ -1839,6 +1926,7 @@ impl CaptainsRpc<'_> {
                 archived: captain.archived,
                 user_archived: captain.user_archived,
                 crew: captain.crew.clone(),
+                crew_meta: captain.crew_meta.clone(),
                 drive_path: drive_dir(self.deepseek_home, &captain.chat_id)
                     .to_string_lossy()
                     .into_owned(),
@@ -1964,7 +2052,7 @@ impl CaptainsRpc<'_> {
     /// project, and — when a child — of a live Captain, not an ordinary
     /// chat (a side conversation has no delegation to serve; a Captain's
     /// own delegation is what crews are for).
-    fn add_crew(&self, params: &CrewParams) -> Result<Value, RpcError> {
+    fn add_crew(&self, params: &AddCrewParams) -> Result<Value, RpcError> {
         let captain_row = self.row(&params.captain_id)?;
         let member_row = self.row(&params.chat_id)?;
         if captain_row.space_id != member_row.space_id {
@@ -1985,15 +2073,32 @@ impl CaptainsRpc<'_> {
                         params.chat_id
                     ));
                 }
-                // A retried add commits nothing; crewing for ANOTHER live
-                // Captain is the registry's "at most one crew" refusal.
+                let meta = CrewMeta {
+                    owns: params.owns.clone(),
+                    worktree: params.worktree.clone(),
+                };
+                // A retried add commits nothing; the same call carrying
+                // ownership metadata updates that metadata. Crewing for
+                // ANOTHER live Captain is the registry's "at most one crew"
+                // refusal.
                 if let Some(owner) = registry.captain_of_crew(&params.chat_id)
                     && owner.chat_id == params.captain_id
                 {
-                    return Ok(false);
+                    let current = owner
+                        .crew_meta
+                        .get(&params.chat_id)
+                        .cloned()
+                        .unwrap_or_default();
+                    return if current == meta {
+                        Ok(false)
+                    } else {
+                        registry
+                            .add_crew_with_metadata(&params.captain_id, &params.chat_id, meta)
+                            .map(|()| true)
+                    };
                 }
                 registry
-                    .add_crew(&params.captain_id, &params.chat_id)
+                    .add_crew_with_metadata(&params.captain_id, &params.chat_id, meta)
                     .map(|()| true)
             })
             .map_err(RpcError::BadParams)?;
@@ -2472,7 +2577,9 @@ mod tests {
             registry.run_role("crew-1"),
             RunRole::Crew {
                 captain_id: "cap".into(),
-                captain_name: "ada".into()
+                captain_name: "ada".into(),
+                owns: Vec::new(),
+                worktree: None,
             }
         );
         assert_eq!(registry.run_role("stranger"), RunRole::None);
@@ -2526,6 +2633,44 @@ mod tests {
             stamp["driveRoot"],
             drive_dir(home, "chat-1").to_string_lossy().as_ref()
         );
+    }
+
+    #[test]
+    fn helm_owns_metadata_round_trips_into_the_crew_stamp() {
+        let home = Path::new("/deepseek-home");
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry
+            .add_crew_with_metadata(
+                "chat-1",
+                "chat-2",
+                CrewMeta {
+                    owns: vec!["src/**".into(), "docs/*.md".into()],
+                    worktree: Some("/worktrees/chat-2".into()),
+                },
+            )
+            .unwrap();
+
+        let stamp: serde_json::Value =
+            serde_json::from_str(&captains_env(&registry, home, "chat-2").unwrap()).unwrap();
+        assert_eq!(stamp["owns"], serde_json::json!(["src/**", "docs/*.md"]));
+        assert_eq!(stamp["worktree"], "/worktrees/chat-2");
+
+        let encoded = serde_json::to_string_pretty(&registry).unwrap();
+        let loaded: Registry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(loaded, registry);
+    }
+
+    #[test]
+    fn helm_owns_defaults_keep_legacy_stamps_unchanged() {
+        let home = Path::new("/deepseek-home");
+        let mut registry = Registry::default();
+        registry.promote("chat-1", "ada").unwrap();
+        registry.add_crew("chat-1", "chat-2").unwrap();
+        let stamp: serde_json::Value =
+            serde_json::from_str(&captains_env(&registry, home, "chat-2").unwrap()).unwrap();
+        assert!(stamp.get("owns").is_none());
+        assert!(stamp.get("worktree").is_none());
     }
 
     #[test]
@@ -3588,6 +3733,7 @@ mod tests {
                     user_archived: false,
                     crew: vec!["crew-x".to_string()],
                     archived_crew: Vec::new(),
+                    crew_meta: BTreeMap::new(),
                 },
                 Captain {
                     chat_id: "cap-name".to_string(),
@@ -3597,6 +3743,7 @@ mod tests {
                     user_archived: false,
                     crew: Vec::new(),
                     archived_crew: Vec::new(),
+                    crew_meta: BTreeMap::new(),
                 },
                 Captain {
                     chat_id: "cap-ok".to_string(),
@@ -3606,6 +3753,7 @@ mod tests {
                     user_archived: false,
                     crew: Vec::new(),
                     archived_crew: Vec::new(),
+                    crew_meta: BTreeMap::new(),
                 },
             ],
         }
@@ -3734,6 +3882,7 @@ mod tests {
                 user_archived: false,
                 crew: vec!["bad/id".to_string()],
                 archived_crew: Vec::new(),
+                crew_meta: BTreeMap::new(),
             }],
         };
         assert!(

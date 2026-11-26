@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { spawn } from 'node:child_process';
 import { accessSync, constants } from 'node:fs';
-import { cp, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { zstdDecompressSync } from 'node:zlib';
+import { ownsDenial } from '../src/deepseek/policy.mjs';
 
 // This test drives the installed `dsh` CLI instead of importing it, so a
 // missing SDK directory or package manager skips rather than failing at import.
@@ -176,6 +177,14 @@ test('zeron-captains validates its row config', async () => {
   const crew = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture });
   assert.equal(crew.captainId, 'c1');
   assert.equal(crew.role, 'crew');
+  const owned = module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture,
+    owns: ['src/**'], worktree: driveFixture });
+  assert.deepEqual(owned.owns, ['src/**']);
+  assert.equal(owned.worktree, driveFixture);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture,
+    owns: [''] }), /owns/);
+  assert.throws(() => module.normalizeConfig({ role: 'crew', chatId: 'c2', captainId: 'c1', captainName: 'B', driveRoot: driveFixture,
+    worktree: 'relative' }), /worktree/);
   // The boundary pairs are part of the contract, not a detail of the regex:
   // 128 characters is a valid id, 129 is not; 80 is a valid name, 81 is not.
   const id128 = 'a'.repeat(128);
@@ -1144,6 +1153,92 @@ test('the Helm runtime resolves captain-digest and the other rows do not', { tim
   for (const role of ['crew', 'none']) {
     assert.doesNotMatch(inputs[role], /captain-digest/, `the ${role} runtime listed captain-digest`);
   }
+});
+
+
+test('crew owns globs gate workspace edits before dispatch', () => {
+  const captains = { role: 'crew', chatId: 'crew-a', captainId: 'cap-a', captainName: 'Ada', owns: ['src/**', 'docs/*.md', 'scripts/**/test.js'] };
+  const exec = (name, arguments_) => ({ name, arguments: arguments_ });
+  assert.equal(ownsDenial(exec('write', { file_path: 'src/owned.js' }), captains), undefined);
+  assert.equal(ownsDenial(exec('edit', { file_path: 'docs/guide.md' }), captains), undefined);
+  assert.equal(ownsDenial(exec('write', { file_path: 'scripts/test.js' }), captains), undefined,
+    'a globstar crosses zero or more directories');
+  assert.equal(ownsDenial(exec('write', { file_path: 'reports/crew-a.md' }), captains), undefined,
+    'the crew report is always writable');
+  assert.match(ownsDenial(exec('write', { file_path: 'lib/other.txt' }), captains) ?? '', /outside its owns globs/,
+    'an in-scope directory glob is still exact about nonmatching files');
+  assert.match(ownsDenial(exec('edit', { file_path: 'crates/other.rs' }), captains) ?? '', /outside its owns globs/);
+  assert.match(ownsDenial(exec('write', { file_path: '../escape.rs' }), captains) ?? '', /outside its owns globs/);
+  const patch = '*** Begin Patch\n*** Update File: src/owned.js\n@@\n*** End Patch\n';
+  assert.equal(ownsDenial(exec('apply_patch', { input: patch }), captains), undefined);
+  const outsidePatch = patch.replace('src/owned.js', 'crates/other.rs');
+  assert.match(ownsDenial(exec('apply_patch', { input: outsidePatch }), captains) ?? '', /outside its owns globs/);
+  assert.equal(ownsDenial(exec('read', { file_path: 'crates/other.rs' }), captains), undefined,
+    'reads are not ownership-gated');
+  assert.equal(ownsDenial(exec('write', { file_path: 'crates/other.rs' }), { ...captains, owns: [] }), undefined,
+    'a crew member with no owns metadata is unchanged');
+});
+
+test('crew owns enforcement rejects out-of-scope writes before disk and allows scoped writes', { timeout: 300000 }, async t => {
+  if (sdkRoot === undefined) return t.skip('ZERON_DEEPSEEK_SDK_DIR is not set');
+  if (!onPath('pnpm')) return t.skip('pnpm is not on PATH');
+  const home = await mkdtemp(join(tmpdir(), 'zeron-dsh-owns-home-'));
+  const checkout = await mkdtemp(join(tmpdir(), 'zeron-dsh-owns-checkout-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  t.after(() => rm(checkout, { recursive: true, force: true }));
+  await mkdir(join(checkout, 'src'));
+  await mkdir(join(checkout, 'reports'));
+  const source = resolve(here, '../../../plugins/dsh-captains');
+  const bundle = join(checkout, 'dsh-captains');
+  await cp(source, bundle, { recursive: true });
+  const env = Object.fromEntries(Object.entries({ PATH: process.env.PATH, HOME: process.env.HOME,
+    SystemRoot: process.env.SystemRoot, DSH_HOME: home }).filter(([, value]) => value !== undefined));
+  const added = await run([dshBin, 'plugin', '--profile', 'sdk', 'add', bundle], { cwd: checkout, env, timeout: 240000 });
+  assert.equal(added.code, 0, `dsh plugin add failed: ${report(added)}`);
+  const role = { role: 'crew', chatId: 'crew-a', captainId: 'cap-a', captainName: 'Ada',
+    driveRoot: join(tmpdir(), 'drive', 'cap-a'), owns: ['src/**'], worktree: checkout };
+
+  const server = createServer((request, response) => {
+    const chunks = [];
+    request.on('data', chunk => chunks.push(chunk));
+    request.on('end', () => {
+      const input = JSON.parse(Buffer.concat(chunks).toString());
+      const results = (JSON.stringify(input.messages ?? []).match(/tool_result/g) ?? []).length;
+      response.writeHead(200, { 'content-type': 'text/event-stream' });
+      const event = (type, data) => response.write(`event: ${type}\ndata: ${JSON.stringify({ type, ...data })}\n\n`);
+      event('message_start', { message: { id: 'msg-owns', type: 'message', role: 'assistant', model: input.model,
+        content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } });
+      const tool = (id, args) => {
+        event('content_block_start', { index: 0, content_block: { type: 'tool_use', id, name: 'write', input: {} } });
+        event('content_block_delta', { index: 0, delta: { type: 'input_json_delta', partial_json: JSON.stringify(args) } });
+        event('content_block_stop', { index: 0 });
+        event('message_delta', { delta: { stop_reason: 'tool_use', stop_sequence: null }, usage: { output_tokens: 9 } });
+      };
+      if (results === 0) tool('toolu_outside', { file_path: 'outside.txt', content: 'outside' });
+      else if (results === 1) tool('toolu_inside', { file_path: 'src/owned.txt', content: 'inside' });
+      else if (results === 2) tool('toolu_report', { file_path: 'reports/crew-a.md', content: 'report' });
+      else {
+        event('content_block_start', { index: 0, content_block: { type: 'text', text: '' } });
+        event('content_block_delta', { index: 0, delta: { type: 'text_delta', text: 'OWNS_OK' } });
+        event('content_block_stop', { index: 0 });
+        event('message_delta', { delta: { stop_reason: 'end_turn', stop_sequence: null }, usage: { output_tokens: 3 } });
+      }
+      event('message_stop', {});
+      response.end();
+    });
+  });
+  await new Promise(listening => server.listen(0, '127.0.0.1', listening));
+  t.after(() => new Promise(closed => { server.closeAllConnections(); server.close(closed); }));
+
+  const result = await sidecar({ here, env }, sdkRoot, checkout, home, role, 'dsh-session-owns', {
+    prompt: 'write the three files', access: 'full-access',
+    env: { DEEPSEEK_BASE_URL: `http://127.0.0.1:${server.address().port}/anthropic` },
+  });
+  assert.equal(result.frame.type, 'done', `the owns run did not finish: ${JSON.stringify(result.frame).slice(0, 300)}\n${result.lines.slice(-4).join('\n')}`);
+  await assert.rejects(readFile(join(checkout, 'outside.txt'), 'utf8'), { code: 'ENOENT' },
+    'the out-of-scope write touched disk');
+  assert.equal(await readFile(join(checkout, 'src/owned.txt'), 'utf8'), 'inside');
+  assert.equal(await readFile(join(checkout, 'reports/crew-a.md'), 'utf8'), 'report');
 });
 
 // SUR-105: the property, not a prescribed case name — the Captain Drive tools

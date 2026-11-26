@@ -20,6 +20,71 @@ export function assertRoute(options) {
   }
 }
 
+
+const workspaceEdits = new Set(['write', 'edit', 'apply_patch']);
+
+function normalizeOwnedPath(path) {
+  return String(path).replace(/\\/g, '/').replace(/^\.\/+/, '');
+}
+
+function globRegex(glob) {
+  const source = normalizeOwnedPath(glob);
+  let out = '';
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i];
+    if (char === '*') {
+      if (source[i + 1] === '*') {
+        if (source[i + 2] === '/') {
+          out += '(?:.*/)?';
+          i += 2;
+        } else {
+          out += '.*';
+          i += 1;
+        }
+      } else out += '[^/]*';
+    } else if (char === '?') out += '[^/]';
+    else out += char.replace(/[|\\{}()[\]^$+?.]/g, '\\$&');
+  }
+  return new RegExp(`^${out}$`);
+}
+
+function patchPaths(input) {
+  if (typeof input !== 'string') return [];
+  const paths = [];
+  for (const line of input.split('\n')) {
+    const file = line.match(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/)?.[1]
+      ?? line.match(/^\*\*\* Move to: (.+)$/)?.[1];
+    if (file) paths.push(file.trim());
+  }
+  return paths;
+}
+
+function editPaths(exec) {
+  const args = exec.arguments;
+  if (typeof args !== 'object' || args === null) return [];
+  if ((exec.name === 'write' || exec.name === 'edit') && typeof args.file_path === 'string') return [args.file_path];
+  if (exec.name === 'apply_patch') return patchPaths(args.input);
+  return [];
+}
+
+// SUR-206: a crew member's `owns` globs are a hard pre-dispatch gate. Paths
+// are session-relative, matching the fs tools' own addressing; absolute or
+// parent-traversing paths can never be made safe by comparing glob text, so
+// they are outside every crew scope. The member's own report remains the one
+// unconditional writeback.
+export function ownsDenial(exec, captains) {
+  if (captains?.role !== 'crew' || !Array.isArray(captains.owns) || captains.owns.length === 0
+    || !workspaceEdits.has(exec.name)) return undefined;
+  const paths = editPaths(exec).map(normalizeOwnedPath);
+  if (paths.length === 0) return undefined;
+  const report = `reports/${captains.chatId}.md`;
+  const globs = captains.owns.filter(glob => typeof glob === 'string' && glob !== '').map(globRegex);
+  const outside = paths.find(path => path.startsWith('/') || /^[A-Za-z]:\//.test(path) || path.split('/').includes('..')
+    || (path !== report && !globs.some(glob => glob.test(path))));
+  return outside === undefined ? undefined
+    : `Crew member ${captains.chatId} may not edit ${outside}: outside its owns globs`;
+}
+
 export function requiresApproval(access, name) {
   if (!['supervised', 'auto-accept-edits', 'full-access'].includes(access)) {
     throw new Error('Unknown DeepSeek access mode');
@@ -50,7 +115,8 @@ export function apply(ctx, config) {
     approved.add(exec.token);
     return { kind: 'allow' };
   });
-  ctx.tools.guard(exec => requiresApproval(config.access, exec.name) && !approved.has(exec.token)
-    ? 'Zeron requires explicit approval for this tool invocation' : undefined);
+  ctx.tools.guard(exec => ownsDenial(exec, config.captains)
+    ?? (requiresApproval(config.access, exec.name) && !approved.has(exec.token)
+      ? 'Zeron requires explicit approval for this tool invocation' : undefined));
   ctx.provide('zeronPolicy', { ready: true });
 }
