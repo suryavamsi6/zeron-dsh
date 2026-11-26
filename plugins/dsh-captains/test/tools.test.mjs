@@ -99,6 +99,10 @@ test('writes respect the byte limit and engine-owned folders', async t => {
   await assert.rejects(write.execute({ path: 'huge.txt', content: 'x'.repeat(256 * 1024 + 1) }), /256 KB/);
   await assert.rejects(write.execute({ path: 'state/needs-you.json', content: '{}' }), /engine-owned/);
   await assert.rejects(write.execute({ path: 'reports/turn.md', content: '# report' }), /engine-owned/);
+  await write.execute({ path: 'state/ready/crew-a.json', content: '{}' });
+  for (const path of ['state/ready/not-json.txt', 'state/ready/nested/crew-a.json', 'state/merge-queue/results/crew-a.json']) {
+    await assert.rejects(write.execute({ path, content: '{}' }), /engine-owned/, path);
+  }
   // The guard runs on the resolved path, not on the string the model sent: a
   // display prefix must not smuggle a write into the engine's folders.
   for (const path of ['.//state/needs-you.json', './/reports/turn-1.md', '././/state/needs-you.json']) {

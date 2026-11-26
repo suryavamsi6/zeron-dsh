@@ -21,6 +21,14 @@ Your Drive is ${escapePath(drive)}. Its layout:
   ## New and ## In progress.
 - CREW.md: the rules every crew chat reads.
 - reports/: what crew chats file. handoffs/: briefs you write for them.
+- state/ready/<crewId>.json: the merge-queue receipt you write when a crew
+  branch is ready to land. Its JSON shape is {"crewId","repo","pr","branch",
+  "headSha","slug"}; repo is absolute, headSha is the reviewed full commit,
+  and slug names that branch's changelog.d/<slug>.md fragment.
+
+Crew branches never edit VERSION or CHANGELOG.md directly. Each branch adds
+one changelog.d/<slug>.md fragment instead, so parallel crew branches do not
+collide on stamped files.
 
 At the start of every turn, read AGENTS.md and NOTES.md with captain_drive_read.
 Start one crew chat per piece of work with create_chat (kind subagent), and

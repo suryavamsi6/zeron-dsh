@@ -3133,6 +3133,29 @@ impl Inner {
                             tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
                         }
                     }
+                    // Ready receipts are the Captain's merge-queue input. Its
+                    // turn end is the durable scan point: the receipt exists
+                    // even if the model process exits immediately after
+                    // writing it. Results are written per crew under the
+                    // Drive's merge-queue state; scan or command failures are
+                    // logged, never propagated into turn finalization.
+                    let merge_outcomes = data_dir
+                        .as_deref()
+                        .and_then(|dir| crate::captains::Registry::load(dir).ok())
+                        .map(|registry| crate::captains::process_ready_receipts(&drive, &registry, &chat_id))
+                        .unwrap_or_else(|| {
+                            tracing::warn!(chat = %chat_id, "crew merge queue skipped: captains registry load failed");
+                            Vec::new()
+                        });
+                    for outcome in merge_outcomes {
+                        tracing::info!(
+                            chat = %chat_id,
+                            crew = %outcome.crew_id,
+                            status = ?outcome.status,
+                            reason = %outcome.reason,
+                            "crew merge queue receipt settled"
+                        );
+                    }
                     // SUR-93: only the items that are new for this Captain
                     // ring. The roster is read here — unlike the snapshot
                     // above, a banner must not name a Captain who was demoted

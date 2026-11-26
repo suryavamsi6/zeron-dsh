@@ -20,6 +20,19 @@ export function isEngineOwned(first, platform = process.platform) {
   return ENGINE_OWNED.has(name);
 }
 
+export function isMergeReadyInput(parts, platform = process.platform) {
+  if (!Array.isArray(parts) || parts.length !== 3) return false;
+  const normalize = segment => {
+    let name = platform === 'win32' ? segment.replace(/[. ]+$/, '') : segment;
+    if (platform === 'win32' || platform === 'darwin') name = name.toLowerCase();
+    return name;
+  };
+  if (normalize(parts[0]) !== 'state' || normalize(parts[1]) !== 'ready') return false;
+  // The engine accepts the same bare file names it scans: alphanumerics,
+  // dashes and underscores only, with no directory or extra dot.
+  return /^[A-Za-z0-9_-]+\.json$/.test(parts[2]);
+}
+
 function resolveReal(target) {
   const rest = [];
   let ancestor = target;
@@ -120,7 +133,8 @@ export function driveToolSpecs(cfg) {
         const { realTarget, realDrive } = resolveInDrive(drive, rel);
         const relative = path.relative(realDrive, realTarget);
         const [first] = relative.split(path.sep);
-        if (isEngineOwned(first)) {
+        const parts = relative.split(path.sep);
+        if (isEngineOwned(first) && !isMergeReadyInput(parts)) {
           throw new Error(`'${first}/' is engine-owned; the engine writes it, not the model`);
         }
         const isDirectory = realTarget === realDrive || (fs.existsSync(realTarget) && fs.statSync(realTarget).isDirectory());
