@@ -17,9 +17,16 @@ pub fn can_install(id: HarnessId) -> bool {
     id == HarnessId::DeepSeek && prerequisites().is_some()
 }
 
-/// Node and its npm's cli entry, when both are really there.
+/// Node and its npm's cli entry, when both are really there and the runtime
+/// can start what it installs: the SDK's shim refuses Node below 24.9, so an
+/// older one is not a prerequisite — installing through it would "succeed"
+/// into a harness that never runs.
 fn prerequisites() -> Option<(PathBuf, PathBuf)> {
     let node = crate::deepseek::node()?;
+    let version = crate::executable::node_version(&node)?;
+    if version < (24, 9, 0) {
+        return None;
+    }
     let npm_cli = npm_cli_for(&node)?;
     Some((node, npm_cli))
 }
@@ -101,9 +108,13 @@ async fn install_deepseek_with(
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     crate::compose_child_path(&mut command, node);
-    let mut child = command.spawn().map_err(|e| {
+    // npm's lifecycle scripts are its children's children: the child runs in
+    // its own process group and shutdown ends the tree, so a cancelled or
+    // timed-out install leaves no script running (Unix process groups).
+    crate::process::owned::configure(&mut command);
+    let mut child = crate::process::owned::Child::new(command.spawn().map_err(|e| {
         HarnessError::Install(format!("cannot start npm through {}: {e}", node.display()))
-    })?;
+    })?);
     let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
     let running = &mut child;
     let collected = tokio::time::timeout(DEADLINE, async move {
@@ -115,15 +126,13 @@ async fn install_deepseek_with(
         _ = cancel.cancelled() => None,
     };
     let Some(collected) = outcome else {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        child.shutdown(Duration::from_secs(2)).await;
         return Err(HarnessError::Install("install cancelled".into()));
     };
     let (out, err, status) = match collected {
         Ok(done) => done,
         Err(_) => {
-            let _ = child.start_kill();
-            let _ = child.wait().await;
+            child.shutdown(Duration::from_secs(2)).await;
             return Err(HarnessError::Install(format!(
                 "npm install timed out after {} seconds",
                 DEADLINE.as_secs()
