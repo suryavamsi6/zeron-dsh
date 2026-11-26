@@ -124,12 +124,15 @@ const receiptLine = value => typeof value === 'string' && value.trim() !== '' &&
 // commit — which moves both — leaves the receipt naming a commit that is no
 // longer the branch tip, and the engine refuses it.
 export function shipReadyReceipt(drive, args) {
-  const { crewId, repo, pr, branch, slug, diffTier, gateCommand, failedOrSkipped = [], base = 'origin/main' } = args;
+  const { crewId, repo, pr, branch, headSha, slug, diffTier, gateCommand, failedOrSkipped = [], base = 'origin/main' } = args;
   if (typeof crewId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(crewId)) {
     throw new Error('crewId must be letters, digits, dashes and underscores');
   }
   if (typeof repo !== 'string' || !path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
   if (!Number.isInteger(pr) || pr <= 0) throw new Error('pr must be a pull request number');
+  if (typeof headSha !== 'string' || !/^[0-9a-f]{40}$/.test(headSha)) {
+    throw new Error('headSha must be the full commit SHA that was reviewed');
+  }
   if (typeof slug !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/.test(slug)) {
     throw new Error('slug must be lowercase letters, digits and dashes');
   }
@@ -148,12 +151,18 @@ export function shipReadyReceipt(drive, args) {
   if (git(repo, ['status', '--porcelain', '--untracked-files=no']) !== '') {
     throw new Error(`the checkout at ${repo} has uncommitted changes; commit them before shipping`);
   }
+  const head = git(repo, ['rev-parse', '--verify', 'HEAD^{commit}']);
+  // The gate results and the review belong to headSha; a commit made after
+  // the review must be reviewed before it can ship.
+  if (head !== headSha) {
+    throw new Error(`HEAD is ${head}, not the reviewed ${headSha}; review the new commits and ship again`);
+  }
   const receipt = {
     crewId,
     repo,
     pr,
     branch,
-    headSha: git(repo, ['rev-parse', '--verify', 'HEAD^{commit}']),
+    headSha: head,
     treeSha: git(repo, ['rev-parse', '--verify', 'HEAD^{tree}']),
     baseSha: git(repo, ['merge-base', 'HEAD', base]),
     gateCommand,
@@ -250,6 +259,7 @@ export function driveToolSpecs(cfg) {
         repo: { type: 'string', required: true, description: 'Absolute path of the crew checkout, with the reviewed branch checked out' },
         pr: { type: 'integer', required: true, description: 'The pull request number' },
         branch: { type: 'string', required: true, description: 'The crew branch; must be the checked-out branch' },
+        headSha: { type: 'string', required: true, description: 'The full commit SHA you reviewed; must still be HEAD' },
         slug: { type: 'string', required: true, description: 'Names the branch\'s changelog.d/<slug>.md fragment' },
         diffTier: { type: 'string', required: true, enum: DIFF_TIERS, description: 'docs, standard or s1' },
         gateCommand: { type: 'array', required: true, items: { type: 'string' }, description: 'Each gate command that ran, e.g. cargo nextest run --locked, zgx test ui' },

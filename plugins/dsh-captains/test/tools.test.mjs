@@ -273,7 +273,8 @@ async function crewCheckout(t) {
 }
 
 const shipArgs = repo => ({
-  crewId: 'crew-a', repo, pr: 7, branch: 'crew/crew-a', slug: 'crew-a-change', diffTier: 'standard',
+  crewId: 'crew-a', repo, pr: 7, branch: 'crew/crew-a', headSha: gitIn(repo, 'rev-parse', 'HEAD'),
+  slug: 'crew-a-change', diffTier: 'standard',
   gateCommand: ['cargo nextest run --locked', 'zgx test ui'], base: 'main',
 });
 
@@ -312,6 +313,7 @@ test('captain_ship_ready refuses a checkout that is not the reviewed commit', as
   gitIn(repo, 'checkout', '--quiet', '--', 'a.txt');
   for (const [patch, pattern] of [
     [{ crewId: '../x' }, /crewId/],
+    [{ headSha: 'HEAD' }, /headSha/],
     [{ repo: 'relative' }, /absolute/],
     [{ pr: 0 }, /pull request number/],
     [{ slug: 'Bad_Slug' }, /slug/],
@@ -346,4 +348,15 @@ test('captain_ship_ready does not run a checkout-configured fsmonitor', async t 
   const { ship } = tools(root);
   await ship.execute(shipArgs(repo));
   await assert.rejects(readdir(marker), /ENOENT/, 'the fsmonitor hook ran');
+});
+
+test('captain_ship_ready refuses a commit made after the review', async t => {
+  const root = await drive(t);
+  const repo = await crewCheckout(t);
+  const reviewed = shipArgs(repo);
+  await writeFile(join(repo, 'a.txt'), 'unreviewed\n');
+  gitIn(repo, 'commit', '--quiet', '-am', 'follow-up');
+  const { ship } = tools(root);
+  await assert.rejects(ship.execute(reviewed), /not the reviewed/);
+  await assert.rejects(readdir(join(root, 'state')), /ENOENT/, 'a stale review shipped');
 });
