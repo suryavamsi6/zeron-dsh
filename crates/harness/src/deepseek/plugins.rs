@@ -1254,10 +1254,19 @@ fn root_mapping_key_count(events: &[Event], needle: &str) -> usize {
 /// markers. Such a file is empty for editing even though YAML represents its
 /// document as an empty scalar; an explicit `""` or `...` is not the same.
 fn empty_document_source(yaml: &str) -> bool {
-    yaml.lines().all(|line| {
+    let mut marker = false;
+    for line in yaml.lines() {
         let text = line.trim();
-        text.is_empty() || text.starts_with('#') || text == "---"
-    })
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        if line == "---" && !marker {
+            marker = true;
+            continue;
+        }
+        return false;
+    }
+    true
 }
 
 /// The override file's YAML guard: valid syntax, one root sequence, and
@@ -2564,6 +2573,8 @@ mod tests {
             // Explicit empty scalars and end-document markers are not blank files.
             ("an explicit empty scalar", "\"\"\n"),
             ("a closed empty document", "---\n...\n"),
+            ("an indented document marker", "  ---\n"),
+            ("repeated document markers", "---\n---\n"),
             // Malformed YAML is never edited by line positions.
             ("malformed yaml", "- id: dyn\n  disabled: [true\n"),
         ] {
