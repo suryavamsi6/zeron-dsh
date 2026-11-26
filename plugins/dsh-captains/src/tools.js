@@ -107,7 +107,9 @@ export const DIFF_TIERS = ['docs', 'standard', 's1'];
 
 function git(repo, args) {
   try {
-    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+    // The checkout is model-selected: never let its config run an fsmonitor
+    // hook while the receipt is being read.
+    return execFileSync('git', ['-C', repo, '-c', 'core.fsmonitor=false', ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
   } catch (error) {
     const stderr = String(error.stderr ?? '').trim();
     throw new Error(`git ${args.join(' ')} failed${stderr === '' ? '' : `: ${stderr}`}`);

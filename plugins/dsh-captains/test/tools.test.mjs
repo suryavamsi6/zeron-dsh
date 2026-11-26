@@ -336,3 +336,14 @@ test('captain_ship_ready refuses a receipt path redirected into engine state', a
   await assert.rejects(ship.execute(shipArgs(repo)), /merge-queue receipt folder/);
   assert.deepEqual(await readdir(join(root, 'state', 'merge-queue', 'results')), []);
 });
+
+test('captain_ship_ready does not run a checkout-configured fsmonitor', async t => {
+  const root = await drive(t);
+  const repo = await crewCheckout(t);
+  const marker = join(repo, 'fsmonitor-ran');
+  await writeFile(join(repo, 'monitor.sh'), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+  gitIn(repo, 'config', 'core.fsmonitor', join(repo, 'monitor.sh'));
+  const { ship } = tools(root);
+  await ship.execute(shipArgs(repo));
+  await assert.rejects(readdir(marker), /ENOENT/, 'the fsmonitor hook ran');
+});
