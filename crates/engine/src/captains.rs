@@ -2327,6 +2327,15 @@ pub struct MergeOutcome {
     pub landed_head: Option<String>,
 }
 
+/// A fresh roster check. The closure is evaluated both before the expensive
+/// gate and again immediately before landing, so removing a crew member while
+/// its merge is queued withdraws that merge.
+type LiveCrewCheck<'a> = Option<&'a (dyn Fn(&str) -> bool + Send + Sync)>;
+
+fn crew_is_live(check: LiveCrewCheck<'_>, crew_id: &str) -> bool {
+    check.is_none_or(|is_live| is_live(crew_id))
+}
+
 fn bare_file_name(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 128
@@ -2391,7 +2400,9 @@ impl ReadyReceipt {
 pub(crate) trait MergeRunner: Send + Sync {
     fn fetch(&self, repo: &Path, branch: &str) -> Result<(), String>;
     fn target_sha(&self, repo: &Path) -> Result<String, String>;
+    fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
+    fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
     /// publish the rebased branch tip without overwriting a newer remote tip,
     /// and return that tip.
@@ -2450,10 +2461,41 @@ impl MergeRunner for ShellMergeRunner {
         Self::git(repo, &["rev-parse".into(), "origin/main".into()])
     }
 
+    fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String> {
+        Self::command(
+            repo,
+            "gh",
+            &[
+                "pr".into(),
+                "view".into(),
+                pr.to_string(),
+                "--json".into(),
+                "baseRefName".into(),
+                "--jq".into(),
+                ".baseRefName".into(),
+            ],
+        )
+    }
+
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String> {
         let range = format!("{base}...{head}");
         Self::git(repo, &["diff".into(), "--name-only".into(), range])
             .map(|output| output.lines().map(str::to_owned).collect())
+    }
+
+    fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String> {
+        Self::git(
+            repo,
+            &[
+                "ls-tree".into(),
+                "-r".into(),
+                "--name-only".into(),
+                head.into(),
+                "--".into(),
+                path.into(),
+            ],
+        )
+        .map(|output| !output.is_empty())
     }
 
     fn rebase_gate_publish(
@@ -2514,7 +2556,7 @@ impl MergeRunner for ShellMergeRunner {
     }
 
     fn land(&self, repo: &Path, pr: u64, head: &str) -> Result<String, String> {
-        Self::command(
+        let output = Self::command(
             repo,
             "gh",
             &[
@@ -2525,7 +2567,25 @@ impl MergeRunner for ShellMergeRunner {
                 "--match-head-commit".into(),
                 head.into(),
             ],
-        )
+        )?;
+        let state = Self::command(
+            repo,
+            "gh",
+            &[
+                "pr".into(),
+                "view".into(),
+                pr.to_string(),
+                "--json".into(),
+                "state".into(),
+                "--jq".into(),
+                ".state".into(),
+            ],
+        )?;
+        if state == "MERGED" {
+            Ok(output)
+        } else {
+            Err(format!("gh pr merge did not land the pull request; its state is {state}"))
+        }
     }
 }
 
@@ -2541,7 +2601,7 @@ impl MergeMutexGuard {
         let Some(pid) = text
             .lines()
             .find_map(|line| line.strip_prefix("pid="))
-            .and_then(|pid| pid.parse::<u32>().ok())
+            .and_then(|pid| pid.split_whitespace().next()?.parse::<u32>().ok())
         else {
             // A creator can be between create_new and writing its metadata.
             // Treat only a malformed file that has had time to be written as stale.
@@ -2564,7 +2624,8 @@ impl MergeMutexGuard {
         loop {
             match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
-                    let _ = writeln!(file, "pid={} created={}", std::process::id(), Utc::now().to_rfc3339());
+                    let _ = writeln!(file, "pid={}", std::process::id());
+                    let _ = writeln!(file, "created={}", Utc::now().to_rfc3339());
                     return Ok(Self { path });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
@@ -2593,7 +2654,7 @@ impl Drop for MergeMutexGuard {
     }
 }
 
-fn merge_fragment_failure(files: &[String], slug: &str) -> Option<String> {
+fn merge_fragment_failure(files: &[String], slug: &str, fragment_exists: bool) -> Option<String> {
     if let Some(path) = files
         .iter()
         .find(|path| path.as_str() == "VERSION" || path.as_str() == "CHANGELOG.md")
@@ -2603,13 +2664,18 @@ fn merge_fragment_failure(files: &[String], slug: &str) -> Option<String> {
         ));
     }
     let fragment = format!("changelog.d/{slug}.md");
-    if !files.iter().any(|path| path == &fragment) {
+    if !files.iter().any(|path| path == &fragment) || !fragment_exists {
         return Some(format!("crew branch is missing {fragment}"));
     }
     None
 }
 
-fn perform_merge(receipt: &ReadyReceipt, scratch: &Path, runner: &dyn MergeRunner) -> MergeOutcome {
+fn perform_merge(
+    receipt: &ReadyReceipt,
+    scratch: &Path,
+    runner: &dyn MergeRunner,
+    live_crew: LiveCrewCheck<'_>,
+) -> MergeOutcome {
     let failure = |reason: String| MergeOutcome {
         crew_id: receipt.crew_id.clone(),
         status: MergeOutcomeStatus::Failed,
@@ -2619,9 +2685,15 @@ fn perform_merge(receipt: &ReadyReceipt, scratch: &Path, runner: &dyn MergeRunne
     let repo = Path::new(&receipt.repo);
     let result = (|| {
         runner.fetch(repo, &receipt.branch)?;
+        let base = runner.pull_request_base(repo, receipt.pr)?;
+        if base != "main" {
+            return Err(format!("crew merge queue only lands pull requests targeting main, not {base}"));
+        }
         let before = runner.target_sha(repo)?;
         let files = runner.changed_files(repo, &before, &receipt.head_sha)?;
-        if let Some(reason) = merge_fragment_failure(&files, &receipt.slug) {
+        let fragment = format!("changelog.d/{}.md", receipt.slug);
+        let fragment_exists = runner.file_exists_at(repo, &receipt.head_sha, &fragment)?;
+        if let Some(reason) = merge_fragment_failure(&files, &receipt.slug, fragment_exists) {
             return Err(reason);
         }
         let head = runner.rebase_gate_publish(repo, &receipt.branch, &receipt.head_sha, scratch)?;
@@ -2634,6 +2706,9 @@ fn perform_merge(receipt: &ReadyReceipt, scratch: &Path, runner: &dyn MergeRunne
                 reason: format!("target head moved while the merge gate ran: {before} -> {after}"),
                 landed_head: None,
             });
+        }
+        if !crew_is_live(live_crew, &receipt.crew_id) {
+            return Err("crew member was removed while the merge gate ran".into());
         }
         runner.land(repo, receipt.pr, &head)?;
         Ok(MergeOutcome {
@@ -2661,12 +2736,46 @@ fn write_merge_outcome(path: &Path, outcome: &MergeOutcome) {
     }
 }
 
+fn json_file_names(dir: &Path) -> Result<Vec<String>, std::io::Error> {
+    let mut names = std::fs::read_dir(dir)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
+        .filter(|name| name.ends_with(".json"))
+        .collect::<Vec<_>>();
+    names.sort();
+    Ok(names)
+}
+
+fn read_json_file_names(dir: &Path) -> Option<Vec<String>> {
+    match json_file_names(dir) {
+        Ok(names) => Some(names),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Vec::new()),
+        Err(error) => {
+            tracing::warn!(path = %dir.display(), error = %error, "merge queue scan failed");
+            None
+        }
+    }
+}
+
+fn merge_lock_root(drive: &Path, queue: &Path) -> PathBuf {
+    // In production every Drive is `<deepseek-home>/captains/<id>`; locking
+    // the captains root makes the merge writer global across Captains on this
+    // device. A nonstandard Drive (tests and repair tools) falls back to its
+    // own queue rather than inventing a lock in an unrelated parent such as
+    // `/tmp`.
+    drive
+        .parent()
+        .filter(|parent| parent.file_name().is_some_and(|name| name == "captains"))
+        .map(|parent| parent.to_path_buf())
+        .unwrap_or_else(|| queue.to_path_buf())
+}
+
 fn process_ready_claim(
     drive: &Path,
     crew_id: &str,
     claim: &Path,
     runner: &dyn MergeRunner,
-    live_crew: Option<(&Registry, &str)>,
+    live_crew: LiveCrewCheck<'_>,
 ) -> MergeOutcome {
     let queue = drive.join("state").join(MERGE_QUEUE_DIR);
     let outcome = match std::fs::read_to_string(claim)
@@ -2683,41 +2792,18 @@ fn process_ready_claim(
             reason: "ready receipt crewId does not match its file name".into(),
             landed_head: None,
         },
-        Ok(receipt)
-            if live_crew.is_some_and(|(registry, captain_id)| {
-                registry
-                    .captain_of_crew(&receipt.crew_id)
-                    .is_none_or(|captain| captain.chat_id != captain_id || !captain.live())
-            }) =>
-        {
-            MergeOutcome {
-                crew_id: crew_id.to_string(),
-                status: MergeOutcomeStatus::Failed,
-                reason: "ready receipt does not name a live member of this Captain's crew".into(),
-                landed_head: None,
-            }
-        }
-        Ok(receipt) => {
-            // In production every Drive is `<deepseek-home>/captains/<id>`;
-            // locking the captains root makes the merge writer global across
-            // Captains on this device. A nonstandard Drive (tests and repair
-            // tools) falls back to its own queue rather than inventing a lock
-            // in an unrelated parent such as `/tmp`.
-            let lock_root = drive
-                .parent()
-                .filter(|parent| parent.file_name().is_some_and(|name| name == "captains"))
-                .map(|parent| parent.to_path_buf())
-                .unwrap_or_else(|| queue.clone());
-            let outcome = MergeMutexGuard::acquire(&lock_root)
-                .map(|_lock| perform_merge(&receipt, &queue.join(&receipt.crew_id), runner))
-                .unwrap_or_else(|reason| MergeOutcome {
-                    crew_id: receipt.crew_id.clone(),
-                    status: MergeOutcomeStatus::Failed,
-                    reason,
-                    landed_head: None,
-                });
-            outcome
-        }
+        Ok(receipt) if !crew_is_live(live_crew, &receipt.crew_id) => MergeOutcome {
+            crew_id: crew_id.to_string(),
+            status: MergeOutcomeStatus::Failed,
+            reason: "ready receipt does not name a live member of this Captain's crew".into(),
+            landed_head: None,
+        },
+        Ok(receipt) => perform_merge(
+            &receipt,
+            &queue.join(&receipt.crew_id),
+            runner,
+            live_crew,
+        ),
         Err(reason) => MergeOutcome {
             crew_id: crew_id.to_string(),
             status: MergeOutcomeStatus::Failed,
@@ -2733,14 +2819,17 @@ fn process_ready_claim(
     outcome
 }
 
-/// Process every ready receipt currently in this Captain Drive. A receipt is
-/// claimed by atomic rename before any merge work starts, so concurrent scans
-/// cannot merge the same crew twice; the merge mutex then serializes distinct
-/// crews. This is deliberately synchronous: callers run it in a blocking task.
+/// Process every ready receipt currently in this Captain Drive. The scan holds
+/// the merge mutex before claiming or recovering receipts. Consequently, once
+/// the mutex is acquired any file already in `claims/` is stranded by a dead
+/// scanner rather than actively processed: it is safe to settle it again.
+/// Receipts are still claimed by atomic rename so a Captain racing the scan
+/// cannot observe a half-written input as work in progress. This is
+/// deliberately synchronous: callers run it in a blocking task.
 pub(crate) fn process_ready_receipts_with(
     drive: &Path,
     runner: &dyn MergeRunner,
-    live_crew: Option<(&Registry, &str)>,
+    live_crew: LiveCrewCheck<'_>,
 ) -> Vec<MergeOutcome> {
     let state = drive.join("state");
     let ready = state.join(MERGE_READY_DIR);
@@ -2752,20 +2841,39 @@ pub(crate) fn process_ready_receipts_with(
             return Vec::new();
         }
     }
-    let mut names = match std::fs::read_dir(&ready) {
-        Ok(entries) => entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| entry.file_name().to_str().map(str::to_owned))
-            .filter(|name| name.ends_with(".json"))
-            .collect::<Vec<_>>(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+    let Some(initial_ready) = read_json_file_names(&ready) else { return Vec::new() };
+    let Some(initial_claims) = read_json_file_names(&claims) else { return Vec::new() };
+    if initial_ready.is_empty() && initial_claims.is_empty() {
+        return Vec::new();
+    }
+    let lock_root = merge_lock_root(drive, &queue);
+    let _lock = match MergeMutexGuard::acquire(&lock_root) {
+        Ok(lock) => lock,
         Err(error) => {
-            tracing::warn!(path = %ready.display(), error = %error, "ready receipt scan failed");
+            tracing::warn!(path = %lock_root.display(), error = %error, "merge mutex is unavailable");
             return Vec::new();
         }
     };
-    names.sort();
+
     let mut outcomes = Vec::new();
+    // Recover stranded claims first. A fresh ready receipt for the same crew
+    // is therefore settled after the older attempt and writes the final result.
+    let Some(claim_names) = read_json_file_names(&claims) else { return outcomes };
+    for name in claim_names {
+        let crew_id = name.trim_end_matches(".json");
+        if !bare_file_name(crew_id) || crew_id.contains(".") {
+            continue;
+        }
+        outcomes.push(process_ready_claim(
+            drive,
+            crew_id,
+            &claims.join(&name),
+            runner,
+            live_crew,
+        ));
+    }
+
+    let Some(names) = read_json_file_names(&ready) else { return outcomes };
     for name in names {
         let crew_id = name.trim_end_matches(".json");
         if !bare_file_name(crew_id) || crew_id.contains(".") {
@@ -2783,9 +2891,22 @@ pub(crate) fn process_ready_receipts_with(
 }
 
 /// Process ready receipts with the local `git`, `cargo`, `zgx` and `gh`
-/// commands. Errors become per-crew result files; scanning itself never throws.
-pub fn process_ready_receipts(drive: &Path, registry: &Registry, captain_id: &str) -> Vec<MergeOutcome> {
-    process_ready_receipts_with(drive, &ShellMergeRunner, Some((registry, captain_id)))
+/// commands. The roster check reloads the registry so a crew removal during a
+/// long gate is observed before landing. Errors become per-crew result files;
+/// scanning itself never throws.
+pub fn process_ready_receipts(drive: &Path, data_dir: &Path, captain_id: &str) -> Vec<MergeOutcome> {
+    if let Err(error) = Registry::load(data_dir) {
+        tracing::warn!(error = %error, "crew merge queue skipped: captains registry load failed");
+        return Vec::new();
+    }
+    let live_crew = |crew_id: &str| {
+        Registry::load(data_dir).ok().is_some_and(|registry| {
+            registry
+                .captain_of_crew(crew_id)
+                .is_some_and(|captain| captain.chat_id == captain_id && captain.live())
+        })
+    };
+    process_ready_receipts_with(drive, &ShellMergeRunner, Some(&live_crew))
 }
 
 #[cfg(test)]
@@ -5753,7 +5874,9 @@ mod tests {
 
     struct FakeMergeRunner {
         target: Mutex<String>,
+        base: Mutex<String>,
         files: Vec<String>,
+        on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         active: std::sync::atomic::AtomicUsize,
         max_active: std::sync::atomic::AtomicUsize,
         rebase_calls: std::sync::atomic::AtomicUsize,
@@ -5766,7 +5889,9 @@ mod tests {
         fn new(files: &[&str]) -> Self {
             Self {
                 target: Mutex::new("a".repeat(40)),
+                base: Mutex::new("main".into()),
                 files: files.iter().map(|file| file.to_string()).collect(),
+                on_rebase: Mutex::new(None),
                 active: std::sync::atomic::AtomicUsize::new(0),
                 max_active: std::sync::atomic::AtomicUsize::new(0),
                 rebase_calls: std::sync::atomic::AtomicUsize::new(0),
@@ -5786,8 +5911,16 @@ mod tests {
             Ok(self.target.lock().unwrap().clone())
         }
 
+        fn pull_request_base(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
+            Ok(self.base.lock().unwrap().clone())
+        }
+
         fn changed_files(&self, _repo: &Path, _base: &str, _head: &str) -> Result<Vec<String>, String> {
             Ok(self.files.clone())
+        }
+
+        fn file_exists_at(&self, _repo: &Path, _head: &str, _path: &str) -> Result<bool, String> {
+            Ok(true)
         }
 
         fn rebase_gate_publish(
@@ -5803,6 +5936,9 @@ mod tests {
             self.max_active.fetch_max(active, Ordering::SeqCst);
             while self.release.load(Ordering::SeqCst) < call {
                 std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            if let Some(callback) = &*self.on_rebase.lock().unwrap() {
+                callback();
             }
             if self.move_target.swap(false, Ordering::SeqCst) {
                 *self.target.lock().unwrap() = "b".repeat(40);
@@ -5950,17 +6086,100 @@ mod tests {
             "changelog.d/crew-b-change.md",
         ]);
         runner.release.store(99, Ordering::SeqCst);
-        let outcomes = process_ready_receipts_with(
-            drive.path(),
-            &runner,
-            Some((&registry, "cap-a")),
-        );
+        let live_crew = |crew_id: &str| {
+            registry
+                .captain_of_crew(crew_id)
+                .is_some_and(|captain| captain.chat_id == "cap-a" && captain.live())
+        };
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, Some(&live_crew));
         assert_eq!(outcomes.len(), 2);
         assert_eq!(outcome_at(drive.path(), "crew-a").status, MergeOutcomeStatus::Landed);
         let outsider = outcome_at(drive.path(), "crew-b");
         assert_eq!(outsider.status, MergeOutcomeStatus::Failed);
         assert!(outsider.reason.contains("live member"), "{}", outsider.reason);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// The lock metadata format once put the timestamp after the PID on one
+    /// line. Even that legacy form must still parse as a live owner rather
+    /// than expire underneath a long local test run.
+    #[test]
+    fn helm_merge_queue_lock_owner_survives_timestamp_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = dir.path().join(MERGE_LOCK_FILE);
+        std::fs::write(&lock, format!("pid={} created=now\n", std::process::id())).unwrap();
+        assert!(MergeMutexGuard::owner_alive(&lock));
+    }
+
+    /// A claim already present when a scan acquires the mutex cannot be
+    /// active in another scanner: every scan performs all claim processing
+    /// under that same mutex. It is therefore a crash-stranded receipt and is
+    /// settled instead of waiting forever.
+    #[test]
+    fn helm_merge_queue_recovers_a_crash_stranded_claim() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let claims = drive
+            .path()
+            .join("state")
+            .join(MERGE_QUEUE_DIR)
+            .join(MERGE_CLAIMS_DIR);
+        std::fs::create_dir_all(&claims).unwrap();
+        std::fs::rename(
+            drive.path().join("state").join(MERGE_READY_DIR).join("crew-a.json"),
+            claims.join("crew-a.json"),
+        )
+        .unwrap();
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        runner.release.store(1, Ordering::SeqCst);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
+        assert!(!claims.join("crew-a.json").exists());
+    }
+
+    /// Crew membership is checked again after the expensive gate. Removing
+    /// the member while its tests run withdraws the merge instead of landing
+    /// a branch for a crew the user has already removed.
+    #[test]
+    fn helm_merge_queue_revalidates_live_crew_before_landing() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        runner.release.store(1, Ordering::SeqCst);
+        let live = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        *runner.on_rebase.lock().unwrap() = Some(Box::new({
+            let live = live.clone();
+            move || live.store(false, Ordering::SeqCst)
+        }));
+        let live_crew = |_: &str| live.load(Ordering::SeqCst);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, Some(&live_crew));
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("removed"), "{}", outcomes[0].reason);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Release-train PRs are outside this queue's contract: the gate rebases
+    /// onto and compares `main`, so a PR targeting another branch is refused
+    /// before tests rather than merged against an untested base.
+    #[test]
+    fn helm_merge_queue_rejects_a_non_main_pull_request_base() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.base.lock().unwrap() = "release/1".into();
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("targeting main"), "{}", outcomes[0].reason);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
     }
 
     /// The fragment convention is enforced before any rebase or gate starts:

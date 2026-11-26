@@ -3141,10 +3141,9 @@ impl Inner {
                     // logged, never propagated into turn finalization.
                     let merge_outcomes = data_dir
                         .as_deref()
-                        .and_then(|dir| crate::captains::Registry::load(dir).ok())
-                        .map(|registry| crate::captains::process_ready_receipts(&drive, &registry, &chat_id))
+                        .map(|dir| crate::captains::process_ready_receipts(&drive, dir, &chat_id))
                         .unwrap_or_else(|| {
-                            tracing::warn!(chat = %chat_id, "crew merge queue skipped: captains registry load failed");
+                            tracing::warn!(chat = %chat_id, "crew merge queue skipped: engine data dir unavailable");
                             Vec::new()
                         });
                     for outcome in merge_outcomes {
