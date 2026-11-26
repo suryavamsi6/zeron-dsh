@@ -7,7 +7,7 @@
 //! crates/launch): the bundle's `Contents/MacOS/Zeron Engine`, started
 //! detached with `ZERON_MANAGED_ENGINE` and the bundle as `ZERON_APP`, its
 //! data in `ZERON_DATA_DIR` or ~/.zeron (crates/cli's paths), on
-//! `ZERON_IPC_PORT` or 27654. One already serving that port is used as it is
+//! `ZERON_IPC_PORT` or 27660. One already serving that port is used as it is
 //! (the shipping app's, before this one was installed). It signs in against
 //! production only (src/auth.rs), and a staging engine (port 27871,
 //! ~/.zeron-staging) or any other edge is refused. No more devices, no other
@@ -36,7 +36,7 @@
 //!   ZERON_ZGX_ENGINE_SPAWN=0      never start one; only use one that runs
 //!
 //! A development build never uses the production engine by accident: ports
-//! 27654 and 27655 (Zeron v3's on Windows), ~/.zeron (and the pre-0.2.0
+//! 27660 beside upstream Zeron's 27654 and 27655 (Zeron v3's on Windows), ~/.zeron (and the pre-0.2.0
 //! ~/.comet-native) and, on Windows, %LOCALAPPDATA%\Zeron are refused unless
 //! it's asked for by name:
 //!
@@ -59,7 +59,7 @@ const PRODUCTION_DATA: &[&str] = &[".zeron", ".comet-native"];
 
 /// The ports the production engine serves: Zeron's, and the one Zeron v3's
 /// Windows install serves beside it.
-const PRODUCTION_PORTS: &[u16] = &[zeron_cli::DEFAULT_IPC_PORT, 27655];
+const PRODUCTION_PORTS: &[u16] = &[zeron_cli::DEFAULT_IPC_PORT, 27654, 27655];
 
 /// The production engine's data dirs: [`PRODUCTION_DATA`] under home, and on
 /// Windows where zeron_cli puts it there (%LOCALAPPDATA%\Zeron, which no
@@ -68,7 +68,8 @@ fn production_dirs(var: &impl Fn(&str) -> Option<String>, home: &Path) -> Vec<Pa
     let mut dirs: Vec<PathBuf> = PRODUCTION_DATA.iter().map(|dir| home.join(dir)).collect();
     if cfg!(windows) {
         let local = var("LOCALAPPDATA").map(PathBuf::from).or_else(|| var("USERPROFILE").map(|p| Path::new(&p).join("AppData").join("Local")));
-        dirs.extend(local.map(|local| local.join("Zeron")));
+        dirs.extend(local.iter().map(|local| local.join("Zeron")));
+        dirs.extend(local.map(|local| local.join("Zeron DSH")));
     }
     dirs
 }
@@ -508,7 +509,7 @@ mod tests {
         let home = Path::new("/Users/someone");
         let prod = crate::auth::production();
         let beta = config_of(&[], home, Some(&exe), &prod.edge).unwrap();
-        assert_eq!((beta.port, beta.data_dir.clone()), (27654, home.join(".zeron")));
+        assert_eq!((beta.port, beta.data_dir.clone()), (27660, home.join(".zeron")));
         assert_eq!(beta.startable(), Some(macos.join("Zeron Engine").as_path()));
         assert_eq!((beta.edge.as_str(), beta.client.as_str(), beta.callback_port), (prod.edge.as_str(), prod.client.as_str(), 27641));
         assert!(beta.follows_bundle());

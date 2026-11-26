@@ -63,7 +63,7 @@ jobs:
       # The edge's, as the betas': stable at its root, the beta channel in its
       # `beta/`. (The old app's installs name the GitHub release marked
       # latest; their first package moves them here.)
-      windows-feed: https://zeron.sh/releases
+      windows-feed: https://github.com/suryavamsi6/zeron-dsh/releases
 
   # The old app (apps/zeron), when a release has to go back to it.
   linux:

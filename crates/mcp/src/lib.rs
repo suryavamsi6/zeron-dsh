@@ -31,7 +31,7 @@ pub use zeron::{Origin, Zeron};
 /// How `zeron mcp` finds the engine and who it speaks for.
 #[derive(Debug, Clone)]
 pub struct McpConfig {
-    /// Loopback IPC port of the engine to proxy (`ZERON_IPC_PORT`, default 27654).
+    /// Loopback IPC port of the engine to proxy (`ZERON_IPC_PORT`, default 27660).
     pub ipc_port: u16,
     /// The engine's data dir, whose `ipc-token-agent` authenticates the IPC
     /// dial (`ZERON_DATA_DIR`; the `zeron` binary fills in its default). The
@@ -52,7 +52,7 @@ impl McpConfig {
         let ipc_port = std::env::var("ZERON_IPC_PORT")
             .ok()
             .and_then(|p| p.parse().ok())
-            .unwrap_or(27654);
+            .unwrap_or(27660);
         Self {
             ipc_port,
             data_dir: std::env::var_os("ZERON_DATA_DIR")

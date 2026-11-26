@@ -27,7 +27,7 @@ pub fn resolve_data_dir(mut env: impl FnMut(&str) -> Option<OsString>) -> PathBu
                     .map(|home| PathBuf::from(home).join("AppData").join("Local"))
             })
             .expect("LOCALAPPDATA and USERPROFILE not set; set ZERON_DATA_DIR");
-        local.join("Zeron")
+        local.join("Zeron DSH")
     }
     #[cfg(not(windows))]
     {
@@ -69,7 +69,7 @@ mod tests {
     fn explorer_launch_without_home_uses_local_app_data() {
         assert_eq!(
             resolve(&[("LOCALAPPDATA", r"C:\Users\Test User\AppData\Local")]),
-            PathBuf::from(r"C:\Users\Test User\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\Test User\AppData\Local\Zeron DSH"),
         );
     }
 
@@ -78,7 +78,7 @@ mod tests {
     fn windows_profile_fallback_handles_unicode_and_apostrophes() {
         assert_eq!(
             resolve(&[("USERPROFILE", r"C:\Users\O'Brien 日本語")]),
-            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Zeron"),
+            PathBuf::from(r"C:\Users\O'Brien 日本語\AppData\Local\Zeron DSH"),
         );
     }
 

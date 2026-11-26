@@ -74,7 +74,7 @@ fn data_root() -> PathBuf {
         return std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .unwrap_or_else(crate::executable::home_or_current_dir)
-            .join("Zeron");
+            .join("Zeron DSH");
     }
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
