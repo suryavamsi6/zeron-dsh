@@ -37,7 +37,7 @@ if #problems > 0 then
 	}
 end
 
-local CHAT = "cap-a"
+local CHAT = C.chat
 local SESSION = { id = CHAT, cwd = "/proj" }
 local PROJECT = { id = "p1", path = "/proj", name = "proj" }
 
@@ -101,11 +101,13 @@ local function failing(message: string): any
 end
 
 CaptainDigest.roster = function(): any
-	return settle { captains = { { chatId = CHAT, name = "Billing", drivePath = "/drive" } } }
+	return settle(C.roster_answer())
 end
 
 CaptainDrive.drive = function(_chat: string): any
-	return settle { files = listing(), digest = "# Billing", needsYou = nil, reports = {} }
+	local answer = C.digest_answer()
+	answer.files = listing()
+	return settle(answer)
 end
 
 CaptainDrive.read = function(_chat: string, path: string): any
@@ -147,7 +149,7 @@ ui.command {
 		local _, escape = read_answer("../../outside.md")
 		-- (A file inside a folder by its bare name: the host takes the
 		-- Drive-relative path, so this is a refusal, not that file.)
-		local _, bare = read_answer("2026-11-23-a.md")
+		local _, bare = read_answer("a2.md")
 		capture:set({ files = files, reads = reads, missing = missing, escape = escape, bare = bare })
 	end,
 }
@@ -169,11 +171,11 @@ ui.command {
 	id = "file_report",
 	title = "File another report",
 	run = function()
-		texts["reports/2026-11-23-b.md"] = "# Crew report\n\nThe renewal is signed and filed.\n"
+		texts["reports/a3.md"] = "# Crew report\n\nThe renewal is signed and filed.\n"
 		table.insert(rows, {
-			name = "reports/2026-11-23-b.md",
+			name = "reports/a3.md",
 			kind = "file",
-			size = #texts["reports/2026-11-23-b.md"],
+			size = #texts["reports/a3.md"],
 			mtime = C.mtime,
 		})
 		store.messages:push({ id = `m{#store.messages:peek() + 1}`, role = "assistant", text = "Filed the renewal report." })

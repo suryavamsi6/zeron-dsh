@@ -42,17 +42,17 @@ test("the Digest tab opens from the strip and reads DIGEST.md with the crew's ne
 	-- Opened as a tab of the session's panel.
 	app:click('#captain-needs-you >> role:link "Open digest"')
 	expect(app:wait("#captain-digest", { timeout_ms = 15000 })).to_be(true)
-	expect(kinds(app, "cap-a")).to_be("captain_digest")
+	expect(kinds(app, "a1")).to_be("captain_digest")
 	-- Its way again: the tab it has, not a second one.
 	app:click('#captain-needs-you >> role:link "Open digest"')
 	app:frames(10)
-	expect(kinds(app, "cap-a")).to_be("captain_digest")
+	expect(kinds(app, "a1")).to_be("captain_digest")
 	-- DIGEST.md, through the message markdown's own renderer.
 	expect(until_text(app, "#captain-digest", "Two things are waiting on you.")).to_be(true)
 	expect(app:tree("#captain-digest")).to_contain("Billing")
 	-- …and the crew's report under it, under the name it filed.
 	expect(until_text(app, "#captain-digest", "Invoices reconciled; one needs your approval.")).to_be(true)
-	expect(app:tree("#captain-digest")).to_contain("billing-2026-11-22.md")
+	expect(app:tree("#captain-digest")).to_contain("a2.md")
 end)
 
 test("the needs-you strip shows the five first asks only", function()
@@ -91,5 +91,5 @@ test("a Captain's turn updates the strip and the open tab in place", function()
 	expect(until_text(app, "#captain-needs-you", "Sign the renewal")).to_be(true)
 	expect(until_text(app, "#captain-digest", "Renewal is signed and filed.")).to_be(true)
 	-- The same tab, updated: nothing was opened again.
-	expect(kinds(app, "cap-a")).to_be("captain_digest")
+	expect(kinds(app, "a1")).to_be("captain_digest")
 end)

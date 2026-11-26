@@ -44,12 +44,12 @@ test("captain_drive: the panel's home opens the Drive tab, listing the files in 
 	expect(app:wait("#panel-open-captain-drive", { timeout_ms = 15000 })).to_be(true)
 	app:click("#panel-open-captain-drive")
 	expect(app:wait("#captain-drive", { timeout_ms = 15000 })).to_be(true)
-	expect(kinds(app, "cap-a")).to_be("captain_drive")
+	expect(kinds(app, "a1")).to_be("captain_drive")
 	-- The four files, then the folders, each with the line that says what it
 	-- is (Capy's Drive table).
 	expect(until_text(app, "#captain-drive", "AGENTS.md")).to_be(true)
 	local tree = app:tree("#captain-drive")
-	for _, name in { "AGENTS.md", "CREW.md", "NOTES.md", "DIGEST.md", "2026-11-23-a.md", "handoffs" } do
+	for _, name in { "AGENTS.md", "CREW.md", "NOTES.md", "DIGEST.md", "a2.md", "handoffs" } do
 		expect(tree).to_contain(name)
 	end
 	-- (Its words on one line: as much of each as the row shows.)
@@ -67,7 +67,7 @@ test("captain_drive: the panel's home opens the Drive tab, listing the files in 
 		"NOTES.md",
 		"DIGEST.md",
 		"Reports the crew leaves for the Captain.",
-		"2026-11-23-a.md",
+		"a2.md",
 		"handoffs",
 	}
 	local last = 0
@@ -105,7 +105,7 @@ test("captain_drive: before the Captain's first turn the tab says there is no Dr
 	expect(app:wait("#captain-drive", { timeout_ms = 15000 })).to_be(true)
 	expect(until_text(app, "#captain-drive", "No Drive yet")).to_be(true)
 	expect(app:tree("#captain-drive")).to_contain("The Captain makes its Drive")
-	expect(kinds(app, "cap-a")).to_be("captain_drive")
+	expect(kinds(app, "a1")).to_be("captain_drive")
 end)
 
 test("captain_drive: a crew's report filed at a turn's end shows without the tab being reopened", function()
@@ -113,11 +113,11 @@ test("captain_drive: a crew's report filed at a turn's end shows without the tab
 	home(app)
 	app:command("open_drive")
 	expect(app:wait("#captain-drive", { timeout_ms = 15000 })).to_be(true)
-	expect(until_text(app, "#captain-drive", "2026-11-23-a.md")).to_be(true)
+	expect(until_text(app, "#captain-drive", "a2.md")).to_be(true)
 	app:command("file_report")
-	expect(until_text(app, "#captain-drive", "2026-11-23-b.md")).to_be(true)
+	expect(until_text(app, "#captain-drive", "a3.md")).to_be(true)
 	-- (The tab it had, not a second one.)
-	expect(kinds(app, "cap-a")).to_be("captain_drive")
+	expect(kinds(app, "a1")).to_be("captain_drive")
 end)
 
 test("captain_drive: a report inside reports/ opens by its Drive path, not its bare name", function()
@@ -125,10 +125,10 @@ test("captain_drive: a report inside reports/ opens by its Drive path, not its b
 	home(app)
 	app:command("open_drive")
 	expect(app:wait("#captain-drive", { timeout_ms = 15000 })).to_be(true)
-	expect(until_text(app, "#captain-drive", "2026-11-23-a.md")).to_be(true)
-	-- Its row shows its own name; the read it makes is `reports/2026-11-23-a.md`,
+	expect(until_text(app, "#captain-drive", "a2.md")).to_be(true)
+	-- Its row shows its own name; the read it makes is `reports/a2.md`,
 	-- the path the host lists. A bare name here is a refusal, not a read.
-	app:click('#captain-drive >> role:button "2026-11-23-a.md"')
-	expect(until_text(app, "#captain-drive", "Invoices reconciled.")).to_be(true)
+	app:click('#captain-drive >> role:button "a2.md"')
+	expect(until_text(app, "#captain-drive", "Invoices reconciled; one needs your approval.")).to_be(true)
 	expect(app:tree("#captain-drive")).never.to_contain("couldn't be read")
 end)

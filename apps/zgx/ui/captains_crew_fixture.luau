@@ -15,6 +15,7 @@
 local tree = require("@app/shell_fixture")
 local sidebar = require("@app/screens/shell/sidebar")
 local CaptainDigest = require("@app/screens/chat/captain_digest")
+local C = require("./captain_drive_contract")
 
 local captains = ui.shared("test_crew_captains", {} :: { [string]: string })
 local members = ui.shared("test_crew_members", {} :: { [string]: string })
@@ -25,7 +26,7 @@ local archived = ui.shared("test_crew_archived", {} :: { [string]: boolean })
 -- The roster the sidebar reads as it is made: Fix the build is the Captain,
 -- and no chat is in its crew yet. (The read lands before the first menu
 -- opens; a state set after the mount is a menu open behind.)
-captains:set({ a1 = "Billing" })
+captains:set({ [C.chat] = C.name })
 members:set({})
 
 -- The chats the shell fixture knows as the host's, with their sessions ready:
@@ -140,6 +141,7 @@ CaptainDigest.roster = function(): any
 end
 
 CaptainDigest.drive = function(chat: string): any
+	local answer = C.digest_answer()
 	local reports = {}
 	for member, captain in members:peek() do
 		if captain == chat then
@@ -147,11 +149,8 @@ CaptainDigest.drive = function(chat: string): any
 			table.insert(reports, { name = title, text = `# Crew report\n\n{title} finished its turn.` })
 		end
 	end
-	return settle({
-		digest = "# Billing\n\nWhat the crew filed.\n",
-		needsYou = { version = 1, updatedAt = "2026-11-23T03:00:00Z", items = { "Approve the invoice" } },
-		reports = reports,
-	})
+	answer.reports = reports
+	return settle(answer)
 end
 
 -- What a test drives to make the sidebar read the roster again (SUR-89's
