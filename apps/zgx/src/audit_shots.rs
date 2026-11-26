@@ -35,8 +35,12 @@
 //! the page's Save — then proves the engine took it: the row must list,
 //! and `<data_dir>/mcp-servers.json` must name the run's
 //! `sur-138-live-proof-<pid>`, or the shot fails even though the page
-//! drew it. Custom shots can still drive the page with `&<target>@<text>`
-//! (its `{sentinel}` expands to that same sentinel). The canvas defaults
+//! drew it. A spec whose steps click the row's Remove instead proves the
+//! removal: the row must go and the file must no longer name the
+//! sentinel, so the empty state a person sees after their last server is
+//! removed — not a stub — is what the shot renders. Custom shots can
+//! still drive the page with `&<target>@<text>`, `^<target>` and
+//! `*<target>` (`{sentinel}` expands to that same sentinel in all three). The canvas defaults
 //! to 900x2600 (the page's real height), and `AUDIT_OUT` unset falls
 //! back to `<dir>`:
 //!
@@ -371,17 +375,19 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
                 }
             }
             Step::Click(target) => {
-                app.target(target)
+                let target = target.replace("{sentinel}", &sentinel);
+                app.target(&target)
                     .map_err(|e| format!("{}: click {target}: {e}", shot.name))?;
-                app.click(target);
+                app.click(&target);
             }
             Step::Key(key) => {
                 app.keys(key);
             }
             Step::Hover(target) => {
-                app.target(target)
+                let target = target.replace("{sentinel}", &sentinel);
+                app.target(&target)
                     .map_err(|e| format!("{}: hover {target}: {e}", shot.name))?;
-                app.hover(target);
+                app.hover(&target);
             }
             Step::Type(target, text) => {
                 app.target(target)
@@ -402,55 +408,69 @@ fn take(shot: &Shot, out: &Path, scale: f32, dark: bool) -> Result<PathBuf, Stri
         app.settle();
         app.frames(10);
     }
-    // The live shot's provenance, before the picture: the row the page
-    // drew after its own Save, then the engine's file naming the sentinel —
-    // without the file entry the row could be the page's alone.
+    // The live shot's provenance, before the picture: the page and the
+    // engine must agree on the sentinel, and on which side of it the shot
+    // stands. A spec that clicks the sentinel's removal (`{sentinel}` in a
+    // click target) renders the empty state — the row gone and the file
+    // not naming it, the removal itself the proof the row was the page's
+    // own (its button would not have been there to click otherwise). Any
+    // other live shot proves the add: the row listed and the file naming
+    // it. Either way the file is half the proof — a row the page drew
+    // alone, or a file entry the page never showed, is not the page
+    // reflecting the engine — and either half can land first, so the poll
+    // waits for the two to agree rather than for one fixed order.
     if live_shot {
+        let removed = steps
+            .iter()
+            .any(|step| matches!(step, Step::Click(target) if target.contains("{sentinel}")));
         let remove = format!("role:button \"Remove {sentinel}\"");
-        let mut listed = false;
+        let file = live.as_ref().map(|live| live.data_dir.join("mcp-servers.json"));
+        let names = |file: &Path| {
+            let text = std::fs::read_to_string(file).unwrap_or_default();
+            let parsed: serde_json::Value =
+                serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
+            parsed["servers"].as_array().is_some_and(|servers| {
+                servers
+                    .iter()
+                    .any(|server| server["name"].as_str() == Some(sentinel.as_str()))
+            })
+        };
+        let mut agreed = false;
         for _ in 0..1000 {
             app.frames(1);
-            if app.find(&remove).is_some() {
-                listed = true;
+            let listed = app.find(&remove).is_some();
+            let named = file.as_ref().is_some_and(|file| names(file));
+            if listed == named && listed != removed {
+                agreed = true;
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        if !listed {
-            if let Some(live) = live {
-                live.close();
-            }
-            return Err(format!(
-                "{}: \"{sentinel}\" never listed after the page's Save",
-                shot.name
-            ));
-        }
-    }
-    let provenance = live.as_ref().map(|live| {
-        let file = live.data_dir.join("mcp-servers.json");
-        let text = std::fs::read_to_string(&file).unwrap_or_default();
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null);
-        let named = parsed["servers"].as_array().is_some_and(|servers| {
-            servers
-                .iter()
-                .any(|server| server["name"].as_str() == Some(sentinel.as_str()))
-        });
-        (file, named)
-    });
-    if let Some((file, named)) = provenance {
-        if named {
-            println!("audit_shots: {} names \"{sentinel}\"", file.display());
-        } else {
-            let error = format!(
-                "{}: {} does not name \"{sentinel}\"; the page's Save did not reach the engine",
-                shot.name,
-                file.display()
-            );
+        if !agreed {
+            let error = if removed {
+                format!(
+                    "{}: \"{sentinel}\" still listed or {} still naming it after the page's removal",
+                    shot.name,
+                    file.as_ref().map(|f| f.display().to_string()).unwrap_or_default()
+                )
+            } else {
+                format!(
+                    "{}: \"{sentinel}\" never listed with {} naming it after the page's Save",
+                    shot.name,
+                    file.as_ref().map(|f| f.display().to_string()).unwrap_or_default()
+                )
+            };
             if let Some(live) = live {
                 live.close();
             }
             return Err(error);
+        }
+        if let Some(file) = file {
+            if removed {
+                println!("audit_shots: {} no longer names \"{sentinel}\"", file.display());
+            } else {
+                println!("audit_shots: {} names \"{sentinel}\"", file.display());
+            }
         }
     }
     // Long enough for entrances and springs to finish.
