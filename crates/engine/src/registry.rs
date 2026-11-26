@@ -104,7 +104,9 @@ struct HarnessPrefsFile {
     /// Harnesses the user turned native subagents off for: their runs
     /// delegate through side chats only.
     native_subagents_off: Vec<HarnessId>,
-    /// Retained for older builds; it never enables removed providers.
+    /// Explicit opt-INS for harnesses detection alone does not switch on
+    /// (see [`HarnessRegistry::enabled_set`]). Legacy entries for removed
+    /// providers stay inert: the filter only admits registered harnesses.
     #[serde(skip_serializing_if = "Option::is_none")]
     enabled: Option<Vec<HarnessId>>,
 }
@@ -513,18 +515,27 @@ impl HarnessRegistry {
             .unwrap_or_else(PoisonError::into_inner) = Some(path);
     }
 
-    /// What this device offers: every harness whose CLI is FOUND, minus the
-    /// user's explicit opt-outs. Enablement follows detection, so installing
-    /// an agent is all it takes for it to appear in the composer.
+    /// What this device offers: every harness whose CLI is FOUND and that
+    /// detection alone switches on, plus the user's explicit opt-INS, minus
+    /// the explicit opt-outs. Enablement follows detection for the agents
+    /// that are free to run (installing one is all it takes); an agent that
+    /// is not — Devin points chats at an external paid service — is offered
+    /// once the user turns it on in Settings.
     pub fn enabled_set(&self) -> Vec<HarnessId> {
         // Both guards drop before the installed probes run: `descriptors()`
         // takes `slots` then `order`, so holding `order` across a probe (which
         // takes `slots`) would invert the lock order.
         let registered: Vec<HarnessId> = self.order().iter().copied().collect();
-        let disabled = self.prefs().disabled.clone();
+        let prefs = self.prefs();
+        let disabled = prefs.disabled.clone();
+        let opted_in: Vec<HarnessId> = prefs.enabled.clone().unwrap_or_default();
         registered
             .into_iter()
-            .filter(|id| auto_enabled(*id) && !disabled.contains(id) && self.installed_for(*id))
+            .filter(|id| {
+                (auto_enabled(*id) || opted_in.contains(id))
+                    && !disabled.contains(id)
+                    && self.installed_for(*id)
+            })
             .collect()
     }
 
@@ -548,7 +559,11 @@ impl HarnessRegistry {
         if !self.slots().contains_key(&id) {
             return Err(format!("unknown harness {id:?}"));
         }
-        if on && !auto_enabled(id) {
+        // Mock is a test rig the dev build opts in through `COMET_HARNESS`,
+        // never a Settings toggle; every other registered harness a user may
+        // switch on here even when detection alone would not (Devin is
+        // opt-in: enabling it points real chats at an external paid service).
+        if on && id == HarnessId::Mock {
             return Err(format!("{id:?} cannot be enabled from Settings"));
         }
         if on && !self.installed_for(id) {
@@ -559,13 +574,29 @@ impl HarnessRegistry {
             (true, false) => {
                 let mut prefs = self.prefs();
                 prefs.disabled.retain(|h| *h != id);
+                // Detection alone never switches a non-auto harness on, so
+                // enabling one is an explicit opt-IN, not just the absence
+                // of an opt-out.
+                if !auto_enabled(id) {
+                    let list = prefs.enabled.get_or_insert_with(Vec::new);
+                    if !list.contains(&id) {
+                        list.push(id);
+                    }
+                }
             }
             (false, true) => {
                 if enabled.len() == 1 {
                     return Err("cannot disable the last enabled harness".into());
                 }
                 let mut prefs = self.prefs();
-                prefs.disabled.push(id);
+                if let Some(list) = prefs.enabled.as_mut() {
+                    list.retain(|h| *h != id);
+                }
+                // Only a detection-enabled harness needs the opt-out; an
+                // opt-in one is off the moment the opt-in is withdrawn.
+                if auto_enabled(id) {
+                    prefs.disabled.push(id);
+                }
             }
             _ => return Ok(()),
         }
