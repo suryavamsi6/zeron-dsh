@@ -3118,6 +3118,7 @@ impl Inner {
                 let post = self.needs_you_post.get().cloned();
                 let seen = self.needs_you_seen.clone();
                 let data_dir = self.data_dir.get().cloned();
+                let inner = self.clone();
                 tokio::task::spawn_blocking(move || {
                     match crate::needs_you::record_turn_end(&drive, status, Utc::now()) {
                         Ok(recorded) => {
@@ -3132,6 +3133,17 @@ impl Inner {
                         Err(error) => {
                             tracing::warn!(chat = %chat_id, error = %error, "captain turn end failed");
                         }
+                    }
+                    // SUR-205: the digest's factual sections refresh on the
+                    // same seam — the model's turn is over, so what the
+                    // roster, the rows and the reports say is written down
+                    // before anything else reads the drive. Do this before
+                    // the merge-queue scan, which can wait on a long gate.
+                    let facts = inner.digest_crew_facts(&chat_id);
+                    if let Err(error) =
+                        crate::captains::refresh_digest(&drive, &facts, Utc::now())
+                    {
+                        tracing::warn!(chat = %chat_id, error = %error, "digest refresh failed");
                     }
                     // Ready receipts are the Captain's merge-queue input. Its
                     // turn end is the durable scan point: the receipt exists
@@ -3239,6 +3251,32 @@ impl Inner {
                     if let Some(delay) = inner.crew_wake_delay.get() {
                         delay(&report_key.1);
                     }
+                    // SUR-205: the report just written is part of the
+                    // digest's facts, so the refresh follows the write —
+                    // before the wake, so the Captain it starts reads a
+                    // digest that already carries this report.
+                    if let Some(captain_id) = captain_id.as_deref() {
+                        // A Captain mid-turn writes its Drive: a refresh now
+                        // would read-modify-write DIGEST.md across the
+                        // model's own write, and whichever rename lands last
+                        // wins whole-file — the asks saved in between are
+                        // gone. The Captain's own turn end resynthesizes
+                        // over those writes, so a busy Captain's refresh is
+                        // not just racy but redundant; an idle one writes
+                        // nothing, and this refresh lands before the wake
+                        // starts its next turn.
+                        let busy = lock(&inner.statuses)
+                            .get(captain_id)
+                            .is_some_and(is_active);
+                        if !busy {
+                            let facts = inner.digest_crew_facts(captain_id);
+                            if let Err(error) =
+                                crate::captains::refresh_digest(&drive, &facts, Utc::now())
+                            {
+                                tracing::warn!(chat = %chat_id, error = %error, "digest refresh failed");
+                            }
+                        }
+                    }
                     // The report is on disk (or definitively failed) before
                     // the wake's pointer line is built.
                     inner.wake_captain(
@@ -3317,6 +3355,50 @@ impl Inner {
                 tracing::warn!(chat = %entry.chat_id, error = %error, "scorecard append failed");
             }
         });
+    }
+
+    /// The crew facts the digest synthesis reads (SUR-205): the Captain's
+    /// roster crew, each with its workspace row's title and liveness. The
+    /// roster comes from `captains.json` — a crew removed from it (released)
+    /// is simply not gathered, so it leaves the digest at the next refresh.
+    /// A crew whose row is archived, or whose row is gone while the
+    /// workspace answers, is not live and leaves with it. A bare host has
+    /// no workspace at all: the rows are unknown rather than dead, so a
+    /// crew is never dropped for want of data.
+    fn digest_crew_facts(&self, captain_id: &str) -> Vec<crate::captains::DigestCrew> {
+        let Some(data_dir) = self.data_dir.get() else {
+            return Vec::new();
+        };
+        let Ok(registry) = crate::captains::Registry::load(data_dir) else {
+            return Vec::new();
+        };
+        let Some(captain) = registry
+            .captains()
+            .iter()
+            .find(|captain| captain.chat_id == captain_id)
+        else {
+            return Vec::new();
+        };
+        let ws = self.workspace();
+        captain
+            .crew
+            .iter()
+            .map(|chat_id| {
+                let row = ws
+                    .as_ref()
+                    .and_then(|ws| ws.chat(chat_id).ok().flatten());
+                let live = match (&ws, &row) {
+                    (None, _) => true,
+                    (Some(_), Some(row)) => !row.archived,
+                    (Some(_), None) => false,
+                };
+                crate::captains::DigestCrew {
+                    chat_id: chat_id.clone(),
+                    title: row.and_then(|chat| chat.title).unwrap_or_default(),
+                    live,
+                }
+            })
+            .collect()
     }
 
     /// The crew-turn wake (SUR-87): after the report write, queue the report
@@ -9683,6 +9765,93 @@ mod tests {
             *posted.lock().expect("posted"),
             vec![("Ada needs you".to_string(), "pick a name".to_string())],
             "the live control rings the new item"
+        );
+    }
+
+    /// The digest on disk shows `needle` within a bounded window — the
+    /// refresh runs in the turn end's blocking task.
+    async fn digest_shows(drive: &std::path::Path, needle: &str) -> bool {
+        for _ in 0..200 {
+            if std::fs::read_to_string(drive.join("DIGEST.md"))
+                .is_ok_and(|digest| digest.contains(needle))
+            {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    /// SUR-205: a Captain turn's end rewrites the digest's factual sections
+    /// from the roster and the reports, keeping the model's Needs you.
+    #[tokio::test]
+    async fn helm_digest_a_captain_turn_end_refreshes_the_factual_sections() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- approve the deploy\n");
+        std::fs::create_dir_all(drive.join("reports")).expect("reports");
+        std::fs::write(
+            drive.join("reports").join("crew-b.md"),
+            "# Crew report: crew-b\n- Status: completed\n- At: 2026-11-25T10:00:00Z\n\nInvoices reconciled.\n",
+        )
+        .expect("report");
+
+        assert!(sessions.turn_end_writes(
+            "cap-a",
+            Some(&captain_stamp(&drive)),
+            DoneStatus::Completed,
+            None
+        ));
+        assert!(
+            digest_shows(&drive, "<!-- refreshed ").await,
+            "the freshness timestamp lands"
+        );
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).expect("digest");
+        assert!(
+            digest.contains("- approve the deploy"),
+            "the model's Needs you survives: {digest}"
+        );
+        assert!(
+            digest.contains("completed at 2026-11-25T10:00:00Z — Invoices reconciled."),
+            "the crew's report facts are synthesized: {digest}"
+        );
+        assert!(digest.contains("## Stalls"), "the stalls section exists: {digest}");
+    }
+
+    /// SUR-205: a crew turn's end refreshes the digest after its report
+    /// write, so the report just filed is already in it.
+    #[tokio::test]
+    async fn helm_digest_a_crew_turn_end_carries_its_own_report_into_the_digest() {
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (sessions, home) = needs_you_engine(dir.path(), registry);
+        let drive = seed_digest(&home, "## Needs you\n- the captain's\n");
+        let crew_stamp = serde_json::json!({
+            "role": "crew",
+            "chatId": "crew-b",
+            "captainId": "cap-a",
+            "captainName": "Ada",
+            "driveRoot": drive.to_string_lossy(),
+        })
+        .to_string();
+        assert!(sessions.turn_end_writes(
+            "crew-b",
+            Some(&crew_stamp),
+            DoneStatus::Completed,
+            Some(TurnText {
+                id: "t-1",
+                text: Some("the invoices are done"),
+            })
+        ));
+        assert!(
+            digest_shows(&drive, "the invoices are done").await,
+            "the crew's own report reaches the digest it wakes into"
+        );
+        let digest = std::fs::read_to_string(drive.join("DIGEST.md")).expect("digest");
+        assert!(
+            digest.contains("## New\n- "),
+            "a first refresh lists the report as new: {digest}"
         );
     }
 
