@@ -2393,7 +2393,8 @@ pub(crate) trait MergeRunner: Send + Sync {
     fn target_sha(&self, repo: &Path) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
-    /// publish the rebased branch tip, and return that tip.
+    /// publish the rebased branch tip without overwriting a newer remote tip,
+    /// and return that tip.
     fn rebase_gate_publish(
         &self,
         repo: &Path,
@@ -2492,6 +2493,7 @@ impl MergeRunner for ShellMergeRunner {
                 "git",
                 &[
                     "push".into(),
+                    format!("--force-with-lease=refs/heads/{branch}:{head}"),
                     "origin".into(),
                     format!("HEAD:refs/heads/{branch}"),
                 ],
