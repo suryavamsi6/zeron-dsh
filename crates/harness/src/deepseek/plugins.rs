@@ -1110,9 +1110,13 @@ fn yaml_root(events: &[Event]) -> YamlRoot {
     if matches!(events.get(index), Some(Event::DocumentStart)) {
         index += 1;
     }
+    if matches!(events.get(index), Some(Event::DocumentEnd)) {
+        return YamlRoot::Empty;
+    }
     let root = match events.get(index) {
         Some(Event::SequenceStart(..)) => YamlRoot::Sequence,
         Some(Event::MappingStart(..)) => YamlRoot::Mapping,
+        Some(Event::Scalar(value, ..)) if value.is_empty() => YamlRoot::Empty,
         Some(Event::Scalar(..) | Event::Alias(..)) => YamlRoot::Other,
         _ => return YamlRoot::Other,
     };
@@ -1148,11 +1152,43 @@ fn yaml_root(events: &[Event]) -> YamlRoot {
     }
 }
 
-fn scalar_count(events: &[Event], needle: &str) -> usize {
-    events
-        .iter()
-        .filter(|event| matches!(event, Event::Scalar(value, ..) if value == needle))
-        .count()
+fn scan_yaml_id(events: &[Event], mut index: usize, needle: &str) -> (bool, usize) {
+    match events.get(index) {
+        Some(Event::Scalar(..) | Event::Alias(..)) => return (false, index + 1),
+        Some(Event::SequenceStart(..)) => {
+            index += 1;
+            let mut found = false;
+            while index < events.len() && !matches!(events[index], Event::SequenceEnd) {
+                let (hit, next) = scan_yaml_id(events, index, needle);
+                found |= hit;
+                index = next;
+            }
+            (found, index + usize::from(index < events.len()))
+        }
+        Some(Event::MappingStart(..)) => {
+            index += 1;
+            let mut found = false;
+            while index < events.len() && !matches!(events[index], Event::MappingEnd) {
+                let key_is_id = matches!(&events[index], Event::Scalar(value, ..) if value == "id");
+                let (hit, after_key) = scan_yaml_id(events, index, needle);
+                let value_is_id = key_is_id
+                    && matches!(events.get(after_key), Some(Event::Scalar(value, ..)) if value == needle);
+                let (hit_value, after_value) = scan_yaml_id(events, after_key, needle);
+                found |= hit || hit_value || value_is_id;
+                index = after_value;
+            }
+            (found, index + usize::from(index < events.len()))
+        }
+        _ => (false, index + 1),
+    }
+}
+
+fn yaml_has_id_value(events: &[Event], needle: &str) -> bool {
+    let mut index = usize::from(matches!(events.first(), Some(Event::StreamStart)));
+    if matches!(events.get(index), Some(Event::DocumentStart)) {
+        index += 1;
+    }
+    scan_yaml_id(events, index, needle).0
 }
 
 fn skip_yaml_node(events: &[Event], mut index: usize) -> Option<usize> {
@@ -1214,8 +1250,28 @@ fn override_yaml_guard(yaml: &str, id: &str) -> Option<(bool, bool)> {
     let root = yaml_root(&events);
     Some((
         matches!(root, YamlRoot::Empty | YamlRoot::Sequence),
-        scalar_count(&events, id) != 0,
+        yaml_has_id_value(&events, id),
     ))
+}
+
+/// A root flow sequence on the first content line: `(empty, start, end)` for
+/// its source text. Block rows can append after a block sequence, but not
+/// after the closing `]` of a flow sequence.
+fn flow_sequence_root(yaml: &str) -> Option<(bool, usize, usize)> {
+    let mut at = 0;
+    for line in yaml.split_inclusive('\n') {
+        let text = line.trim_end();
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "---" {
+            at += line.len();
+            continue;
+        }
+        return trimmed.starts_with('[').then(|| {
+            let start = at + line.find('[').unwrap_or(0);
+            (trimmed == "[]", start, at + text.len())
+        });
+    }
+    None
 }
 
 /// The override file's row for `id`, when one top-level `- ` item keys
@@ -1380,6 +1436,12 @@ pub fn set_row_disabled(home: &Path, id: &str, disabled: bool) -> Result<(), Har
         Err(e) => return Err(e.into()),
     };
     let row = override_row(&yaml, id)?;
+    let flow_root = flow_sequence_root(&yaml);
+    if matches!(flow_root, Some((false, _, _))) {
+        return Err(HarnessError::Protocol(
+            "cordis.patch.yml: a non-empty flow sequence can't be edited safely".into(),
+        ));
+    }
     match override_yaml_guard(&yaml, id) {
         Some((true, mentioned)) if row.is_some() || !mentioned => {}
         Some((true, _)) => {
@@ -1408,12 +1470,20 @@ pub fn set_row_disabled(home: &Path, id: &str, disabled: bool) -> Result<(), Har
     } else {
         match row {
             None => {
-                let mut out = yaml.clone();
-                if !out.is_empty() && !out.ends_with('\n') {
+                let row_text = format!("- id: {}\n  disabled: {disabled}", id_scalar(id));
+                if let Some((true, start, end)) = flow_root {
+                    let mut out = yaml.clone();
+                    out.replace_range(start..end, &row_text);
+                    out
+                } else {
+                    let mut out = yaml.clone();
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&row_text);
                     out.push('\n');
+                    out
                 }
-                out.push_str(&format!("- id: {}\n  disabled: {disabled}\n", id_scalar(id)));
-                out
             }
             Some(row) => set_disabled(&yaml, &row, disabled)?,
         }
@@ -2414,6 +2484,37 @@ mod tests {
             set_row_disabled(dir.path(), "bad\nid", true),
             Err(HarnessError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn empty_and_header_only_patch_documents_can_gain_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        profile_patch(dir.path(), "# patch comments\n[]\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "# patch comments\n- id: dyn\n  disabled: true\n"
+        );
+
+        profile_patch(dir.path(), "---\n- id: dyn\n  disabled: true\n");
+        set_row_disabled(dir.path(), "dyn", false).unwrap();
+        assert_eq!(read_profile_patch(dir.path()), "---\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "---\n- id: dyn\n  disabled: true\n"
+        );
+    }
+
+    #[test]
+    fn an_id_in_another_rows_title_does_not_block_a_new_override() {
+        let dir = tempfile::tempdir().unwrap();
+        profile_patch(dir.path(), "- id: other\n  title: dyn\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "- id: other\n  title: dyn\n- id: dyn\n  disabled: true\n"
+        );
     }
 
     #[test]
