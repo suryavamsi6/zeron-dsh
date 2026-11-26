@@ -317,16 +317,16 @@ local function build_rrule(f: Fields, device: number): (string?, string?)
 	return `{dtstart}\nRRULE:{body}`, nil
 end
 
--- Where a save runs the prompt, `run_in` the editor's pick. "This chat"
--- is the chat open now — a session-targeted task edited while no chat
--- is open keeps the one it names. A `new`/`new_once` target keeps the
+-- Where a save runs the prompt, `run_in` the editor's pick. An existing
+-- session-targeted task keeps the chat it names; a new one uses the chat
+-- open now. A `new`/`new_once` target keeps the
 -- chat the engine recorded for it (`session`) and the folder it works
 -- in (`cwd`, else the open chat's or project's).
 local function target_for(run_in: string, existing: any): ({ [string]: any }?, string?)
 	if run_in == "session" then
 		local open = route.session:peek()
-		local id = if open then open.id
-			elseif existing and type(existing.target) == "table" then existing.target.session
+		local id = if existing and type(existing.target) == "table" and type(existing.target.session) == "string" then existing.target.session
+			elseif open then open.id
 			else nil
 		if type(id) ~= "string" then
 			return nil, "run_in"
@@ -576,11 +576,11 @@ function M.view(): Node
 				f = "custom"
 			elseif rule.count == 1 then
 				f = "once"
-			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil then
+			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil and rule.count == nil then
 				f = "daily"
-			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) then
+			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) and rule.count == nil then
 				f = "weekdays"
-			elseif rule.freq == "WEEKLY" and rule.interval == 1 and (rule.days == nil or #rule.days == 1) then
+			elseif rule.freq == "WEEKLY" and rule.interval == 1 and rule.count == nil and (rule.days == nil or #rule.days == 1) then
 				f = "weekly"
 			else
 				f = "custom"
@@ -674,6 +674,9 @@ function M.view(): Node
 		end
 		if task and type(task.origin) == "string" then
 			next.origin = task.origin
+		end
+		if task and type(task.updatedAt) == "number" then
+			next.updatedAt = task.updatedAt
 		end
 		busy:set(true)
 		problem:set(nil)
