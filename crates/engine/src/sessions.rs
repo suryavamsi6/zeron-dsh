@@ -6301,6 +6301,36 @@ async fn drive_run(
         // Scheduled wake-ups and session crons live in the agent's process.
         self_scheduled.observe(&event, tokio::time::Instant::now());
 
+        // Scorecard accumulation, ahead of every route the event can take
+        // below: a turn's cost is its own usage AND its subagents' — the
+        // tagged wrapper would otherwise carry a child agent's spend past the
+        // meter, and the subagent routing below `continue`s before any later
+        // point in the loop (SUR-210 review).
+        let usage = match &event {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+            } => Some((*input_tokens, *output_tokens, *cached_input_tokens)),
+            AgentEvent::Subagent { event: nested, .. } => match nested.as_ref() {
+                AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                } => Some((*input_tokens, *output_tokens, *cached_input_tokens)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((input, output, cached)) = usage {
+            turn_tokens_in = turn_tokens_in.saturating_add(input);
+            turn_tokens_out = turn_tokens_out.saturating_add(output);
+            if let Some(cached) = cached {
+                turn_cache_known = true;
+                turn_tokens_cached = turn_tokens_cached.saturating_add(cached);
+            }
+        }
+
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
         // into the subagent's own doc, and the parent keeps only the spawn
@@ -6891,18 +6921,6 @@ async fn drive_run(
             }
             AgentEvent::InputResolved { .. } => {
                 inner.set_status(&chat_id, SessionStatus::Working, false);
-            }
-            AgentEvent::Usage {
-                input_tokens,
-                output_tokens,
-                cached_input_tokens,
-            } => {
-                turn_tokens_in = turn_tokens_in.saturating_add(*input_tokens);
-                turn_tokens_out = turn_tokens_out.saturating_add(*output_tokens);
-                if let Some(cached) = cached_input_tokens {
-                    turn_cache_known = true;
-                    turn_tokens_cached = turn_tokens_cached.saturating_add(*cached);
-                }
             }
             _ => {}
         }
@@ -9173,6 +9191,13 @@ mod tests {
         feed.send(started()).expect("started");
         feed.send(usage(1000, 200, Some(300))).expect("usage 1");
         feed.send(usage(500, 100, None)).expect("usage 2");
+        // A native subagent's spend belongs to the turn that spawned it:
+        // tagged usage must reach the meter through the routing wrapper.
+        feed.send(AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(usage(100, 50, None)),
+        })
+        .expect("subagent usage");
         feed.send(text("shipped")).expect("text");
         feed.send(done(DoneStatus::Completed)).expect("done");
         let rows = scorecard_rows(&drive).await;
@@ -9181,9 +9206,9 @@ mod tests {
         assert_eq!(row.chat_id, "cap-a");
         assert_eq!(row.role, "captain");
         assert!(!row.turn_id.is_empty());
-        assert_eq!(row.tokens_in, 1500, "the turn's usage sums its messages");
+        assert_eq!(row.tokens_in, 1600, "the turn's usage sums its own and its subagents' messages");
         assert_eq!(row.tokens_cached, Some(300));
-        assert_eq!(row.tokens_out, 300);
+        assert_eq!(row.tokens_out, 350);
         assert_eq!(row.outcome, "completed");
         assert_eq!(row.cost_usd, None, "no rate card, no invented price");
         assert!(row.duration_s < 60, "a test turn is seconds: {row:?}");
@@ -9263,6 +9288,36 @@ mod tests {
         let raw = std::fs::read_to_string(drive.join("state").join(crate::captains::SCORECARD_FILE))
             .expect("read");
         assert_eq!(raw.lines().count(), 2, "two turns, two rows: {raw}");
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_a_truncated_tail_does_not_eat_the_next_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let drive = dir.path().join("drive");
+        let state = drive.join("state");
+        std::fs::create_dir_all(&state).expect("state");
+        // A crash mid-write: the tail is a partial line with no newline.
+        std::fs::write(state.join(crate::captains::SCORECARD_FILE), "{\"chatId\":\"cap-a\",\"rol").expect("seed");
+        let entry = crate::captains::ScorecardEntry {
+            chat_id: "cap-a".into(),
+            role: "captain".into(),
+            turn_id: "turn-1".into(),
+            tokens_in: 10,
+            tokens_cached: None,
+            tokens_out: 2,
+            cost_usd: None,
+            duration_s: 3,
+            outcome: "completed".into(),
+        };
+        assert!(crate::captains::append_scorecard_entry(&drive, &entry).expect("append"));
+        let raw = std::fs::read_to_string(state.join(crate::captains::SCORECARD_FILE)).expect("read");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2, "the new row starts its own line: {raw}");
+        assert!(
+            serde_json::from_str::<crate::captains::ScorecardEntry>(lines[1]).is_ok(),
+            "the new row parses: {}",
+            lines[1]
+        );
     }
 
     #[tokio::test]
