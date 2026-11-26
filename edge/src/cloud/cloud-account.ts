@@ -122,6 +122,7 @@ import {
 import { activeProviderName, sandboxProvider } from "./providers";
 import {
   MAX_SCHEDULES_PER_CHAT,
+  MAX_WAKEUP_ATTEMPTS,
   WAKEUP_ACK_TIMEOUT_MS,
   WAKEUP_RETENTION_MS,
   ensureCloudSchedules,
@@ -1958,7 +1959,12 @@ export class CloudAccount extends DurableObject<Env> {
     if (!s || s.pendingDelete) return fail(404, "unknown_chat", "That chat is not a Cloud session here.");
     if (!input.title || input.title.length > 120) return fail(400, "bad_request", "title is 1–120 chars.");
     if (!input.prompt.trim()) return fail(400, "bad_request", "prompt is empty.");
+    if (input.id !== undefined && input.id.length === 0) return fail(400, "bad_request", "id must be non-empty.");
     const sql = this.sql();
+    // Ownership is scoped by chat at every step: a runner minting or guessing
+    // another chat's schedule id can never overwrite its row — the update
+    // below writes only the row this chat owns, and a create's id is either
+    // fresh (randomUUID) or one this chat already owns.
     const existing = input.id
       ? ([...sql.exec("SELECT * FROM cloud_schedule WHERE id=? AND chat_id=?", input.id, chatId)] as CloudSchedule[])[0]
       : undefined;
@@ -1995,13 +2001,21 @@ export class CloudAccount extends DurableObject<Env> {
       created_at: existing?.created_at ?? now,
       updated_at: now
     };
-    sql.exec(
-      "INSERT INTO cloud_schedule VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET " +
-        "title=excluded.title, prompt=excluded.prompt, rrule=excluded.rrule, active=excluded.active, " +
-        "next_fire_at=excluded.next_fire_at, last_error=excluded.last_error, updated_at=excluded.updated_at",
-      row.id, row.chat_id, row.title, row.prompt, row.rrule, row.active,
-      row.next_fire_at, row.last_fired_at, row.last_error, row.created_at, row.updated_at
-    );
+    if (existing) {
+      // Scoped update: even if a runner somehow lands another chat's id here,
+      // the write touches only the row this chat owns.
+      sql.exec(
+        "UPDATE cloud_schedule SET title=?, prompt=?, rrule=?, active=?, next_fire_at=?, last_error=NULL, updated_at=? " +
+          "WHERE id=? AND chat_id=?",
+        row.title, row.prompt, row.rrule, row.active, row.next_fire_at, row.updated_at, row.id, row.chat_id
+      );
+    } else {
+      sql.exec(
+        "INSERT INTO cloud_schedule VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        row.id, row.chat_id, row.title, row.prompt, row.rrule, row.active,
+        row.next_fire_at, row.last_fired_at, row.last_error, row.created_at, row.updated_at
+      );
+    }
     await this.armAlarm();
     return { ok: true, value: { schedule: row } };
   }
@@ -2139,6 +2153,15 @@ export class CloudAccount extends DurableObject<Env> {
       const s = this.sessions.get(w.chat_id);
       if (!s || s.pendingDelete || s.state === "deleting") {
         sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=?", w.fire_id);
+        continue;
+      }
+      // Past the attempt cap the occurrence is dropped, never backlogged —
+      // and it must LEAVE pending: a row that stayed would coalesce every
+      // later occurrence of its schedule forever.
+      if (w.attempts >= MAX_WAKEUP_ATTEMPTS) {
+        sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=?", w.fire_id);
+        sql.exec("UPDATE cloud_schedule SET last_error=?, updated_at=? WHERE id=?",
+          "the machine never acknowledged the wake-up", now, w.schedule_id);
         continue;
       }
       if (!wakeupRetryDue(w, now)) continue;
