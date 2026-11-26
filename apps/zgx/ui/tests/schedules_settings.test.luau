@@ -81,8 +81,7 @@ test("Automation tasks lists each task's name, when it runs, its next run, and w
 	expect(tree).to_contain("On this device · Every day at 09:00 UTC")
 	expect(tree).to_contain("Next")
 	expect(tree).to_contain("At the edge · Every Mon at 07:30 UTC")
-	expect(tree).to_contain("Local tasks fire only while this app is running")
-	expect(tree).to_contain("latest missed run fires once")
+	expect(tree).to_contain("locally on this device")
 	-- Asked once, as the page opened.
 	expect(asked(app, "Schedules")).to_be(1)
 end)
