@@ -630,8 +630,12 @@ export class CloudAccount extends DurableObject<Env> {
     if (this.acct.nextReconcileAt !== undefined) due.push(this.acct.nextReconcileAt);
     if (this.acct.sweepDevicesAt !== undefined) due.push(this.acct.sweepDevicesAt);
     // Edge-owned Captain schedules: the next due occurrence, and a retry
-    // pass while any fired wake-up is unacked.
-    if (this.tablesReady) {
+    // pass while any fired wake-up is unacked. Gated on the TABLE, not on
+    // `tablesReady`: that flag resets at every cold start while the rows
+    // persist, so a save before the first sql() call (a settings change)
+    // would otherwise arm the alarm without them and fire occurrences late.
+    const hasTables = [...this.ctx.storage.sql.exec("SELECT 1 FROM sqlite_master WHERE type='table' AND name='cloud_schedule'")].length > 0;
+    if (hasTables) {
       const sql = this.ctx.storage.sql;
       for (const row of readSchedules(sql)) {
         if (row.active && row.next_fire_at !== null) due.push(row.next_fire_at);
@@ -2110,7 +2114,14 @@ export class CloudAccount extends DurableObject<Env> {
     const dueRows = [
       ...sql.exec("SELECT * FROM cloud_schedule WHERE active=1 AND next_fire_at IS NOT NULL AND next_fire_at<=? ORDER BY next_fire_at", now)
     ] as CloudSchedule[];
-    for (const row of dueRows) {
+    for (const due of dueRows) {
+      // Re-read inside the loop: the wake/nudge awaits below interleave with
+      // other requests (the DO's checked-then-mutated discipline), so the
+      // scanned row can be minutes stale — paused, edited or deleted while an
+      // earlier schedule's wake was in flight. Writing the stale copy back
+      // would resurrect it.
+      const row = ([...sql.exec("SELECT * FROM cloud_schedule WHERE id=?", due.id)] as CloudSchedule[])[0];
+      if (!row || !row.active || row.next_fire_at === null || row.next_fire_at > now) continue;
       const s = this.sessions.get(row.chat_id);
       if (!s || s.pendingDelete || s.state === "deleting") {
         // Permanent failure: the chat is gone — the schedule ends, no retry loop.
