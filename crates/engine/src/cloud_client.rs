@@ -292,6 +292,7 @@ impl CloudClient {
         prompt: &str,
         rrule: &str,
         active: bool,
+        expected_updated_at: Option<i64>,
     ) -> Result<crate::cloud_schedules::CloudScheduleRow, EngineError> {
         require_id(chat_id, "chatId")?;
         if let Some(id) = id {
@@ -305,6 +306,9 @@ impl CloudClient {
         });
         if let Some(id) = id {
             body["id"] = id.into();
+        }
+        if let Some(expected) = expected_updated_at {
+            body["expectedUpdatedAt"] = expected.into();
         }
         #[derive(Deserialize)]
         struct Saved {

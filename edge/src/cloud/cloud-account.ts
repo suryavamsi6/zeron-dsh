@@ -1952,7 +1952,7 @@ export class CloudAccount extends DurableObject<Env> {
   async upsertSchedule(
     caller: CloudCaller,
     chatId: string,
-    input: { id?: string; title: string; prompt: string; rrule: string; active?: boolean }
+    input: { id?: string; title: string; prompt: string; rrule: string; active?: boolean; expectedUpdatedAt?: number }
   ): Promise<CloudResult<{ schedule: CloudSchedule }>> {
     if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
     // A machine manages schedules only for the chat it hosts — never for
@@ -1974,6 +1974,12 @@ export class CloudAccount extends DurableObject<Env> {
       ? ([...sql.exec("SELECT * FROM cloud_schedule WHERE id=? AND chat_id=?", input.id, chatId)] as CloudSchedule[])[0]
       : undefined;
     if (input.id && !existing) return fail(404, "unknown_schedule", "No such schedule on this chat.");
+    if (
+      input.expectedUpdatedAt !== undefined &&
+      (!existing || existing.updated_at !== input.expectedUpdatedAt)
+    ) {
+      return fail(409, "conflict", "That schedule changed since this page loaded — reload it before editing.");
+    }
     if (!existing) {
       const count = [...sql.exec("SELECT count(*) AS n FROM cloud_schedule WHERE chat_id=?", chatId)][0].n as number;
       if (count >= MAX_SCHEDULES_PER_CHAT) {

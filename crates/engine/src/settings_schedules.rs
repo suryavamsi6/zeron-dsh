@@ -145,6 +145,7 @@ async fn save(
                 &task.prompt,
                 &task.rrule,
                 task.active,
+                Some(task.updated_at),
             )
             .await
             .map_err(failed)?;
@@ -157,6 +158,9 @@ async fn save(
     // chats, so they remain device-owned.
     if let Some(chat_id) = target_session(&task) {
         if sessions.iter().any(|session| session.chat_id == chat_id) {
+            if !task.id.is_empty() {
+                return Err(RpcError::Failed(format!("no such schedule: {}", task.id)));
+            }
             let saved = cloud
                 .upsert_schedule(
                     chat_id,
@@ -165,6 +169,7 @@ async fn save(
                     &task.prompt,
                     &task.rrule,
                     task.active,
+                    None,
                 )
                 .await
                 .map_err(failed)?;
@@ -457,6 +462,7 @@ mod tests {
         let mut edited = task("edge-task", "cloud-chat");
         edited["title"] = json!("Paused edge");
         edited["active"] = json!(false);
+        edited["updatedAt"] = json!(2);
 
         let saved = call(
             &schedules,
@@ -475,7 +481,33 @@ mod tests {
                 && request.body["id"] == "edge-task"
                 && request.body["title"] == "Paused edge"
                 && request.body["active"] == false
+                && request.body["expectedUpdatedAt"] == 2
         }));
+    }
+
+    #[tokio::test]
+    async fn a_stale_cloud_edit_id_is_not_recreated() {
+        let edge = MockEdge::start().await;
+        let (_dir, schedules) = store();
+        let error = call(
+            &schedules,
+            edge.client(),
+            methods::SCHEDULE_SAVE,
+            &json!({"task": task("deleted-edge-task", "cloud-chat")}),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("no such schedule: deleted-edge-task")
+        );
+        assert!(
+            !edge
+                .requests()
+                .iter()
+                .any(|request| request.method == "POST")
+        );
     }
 
     #[tokio::test]
