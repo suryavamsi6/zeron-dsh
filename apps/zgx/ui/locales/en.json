@@ -1577,7 +1577,7 @@
           "line": "API key"
         },
         "sign_in": {
-          "start": "Sign in with ChatGPT",
+          "start": "Sign in with {name}",
           "description": "Sign in with the browser; the grant is kept in the store.",
           "waiting": "Waiting for the browser…",
           "cancel": "Cancel",
@@ -1585,7 +1585,7 @@
           "not_completed": "The sign-in wasn't completed.",
           "try_again": "Try again",
           "failed": "The sign-in didn't start: {says}",
-          "line": "ChatGPT account"
+          "line": "{name} account"
         },
         "in_use": "In use",
         "show_all": "Show all {count} providers",
