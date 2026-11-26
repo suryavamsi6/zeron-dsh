@@ -5,6 +5,21 @@
 //! `node_modules`), so listing what is installed is a read of two manifests per
 //! bundle and nothing else: no pnpm, no dsh, no writes. Changing it is dsh's
 //! own `plugin` subcommand, built here and run by the caller.
+//!
+//! YAML here is intentionally a checked subset, not a general YAML editor.
+//! The files dsh writes are small and machine-shaped: a top-level sequence of
+//! patch rows, simple block mappings, single-line JSON flow rows, and the flat
+//! `allowBuilds` map. The line parser keeps byte positions so an edit preserves
+//! comments, quoting and unrelated fields exactly; a YAML object tree would
+//! lose those positions, and tree-sitter would add the syntax crate and a
+//! query harness without supplying the patch-row semantics. Anchors, aliases,
+//! multiline flow collections, nested row structure and scalar encodings the
+//! line read cannot verify are outside the subset when they carry a row's
+//! identity or structure. They are not rewritten: the row is uneditable or the
+//! write is refused untouched. `yaml-rust2` is used only as a syntax/root-shape
+//! guard before editing; the dependency is already in this crate for skill
+//! frontmatter, so keeping the subset costs no new supply-chain or build-time
+//! weight.
 
 use std::{
     ffi::OsString,
@@ -15,6 +30,7 @@ use std::{
 
 use serde_json::Value;
 use tokio::io::AsyncReadExt;
+use yaml_rust2::parser::{Event, EventReceiver, Parser};
 
 use crate::{
     HarnessError,
@@ -1060,6 +1076,232 @@ struct OverrideRow {
     flow: Option<(Vec<(String, String)>, usize)>,
 }
 
+struct YamlEvents(Vec<Event>);
+
+impl EventReceiver for YamlEvents {
+    fn on_event(&mut self, event: Event) {
+        self.0.push(event);
+    }
+}
+
+fn yaml_events(yaml: &str) -> Option<Vec<Event>> {
+    let mut parser = Parser::new_from_str(yaml);
+    let mut events = YamlEvents(Vec::new());
+    parser.load(&mut events, true).ok()?;
+    Some(events.0)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum YamlRoot {
+    Empty,
+    Sequence,
+    Mapping,
+    Other,
+}
+
+/// The root node of a one-document YAML stream. Anything before or after it —
+/// a second document, in particular — makes the stream `Other`, because these
+/// editors only know how to place a row in one plain document.
+fn yaml_root(events: &[Event]) -> YamlRoot {
+    let mut index = usize::from(matches!(events.first(), Some(Event::StreamStart)));
+    if matches!(events.get(index), Some(Event::StreamEnd)) {
+        return YamlRoot::Empty;
+    }
+    if matches!(events.get(index), Some(Event::DocumentStart)) {
+        index += 1;
+    }
+    if matches!(events.get(index), Some(Event::DocumentEnd)) {
+        return YamlRoot::Empty;
+    }
+    let root = match events.get(index) {
+        Some(Event::SequenceStart(..)) => YamlRoot::Sequence,
+        Some(Event::MappingStart(..)) => YamlRoot::Mapping,
+        Some(Event::Scalar(..) | Event::Alias(..)) => YamlRoot::Other,
+        _ => return YamlRoot::Other,
+    };
+    if matches!(events.get(index), Some(Event::Scalar(..) | Event::Alias(..))) {
+        index += 1;
+    } else {
+        let mut depth = 0usize;
+        while index < events.len() {
+            match events[index] {
+                Event::SequenceStart(..) | Event::MappingStart(..) => depth += 1,
+                Event::SequenceEnd | Event::MappingEnd => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        index += 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        if depth != 0 {
+            return YamlRoot::Other;
+        }
+    }
+    if matches!(events.get(index), Some(Event::DocumentEnd)) {
+        index += 1;
+    }
+    if index + 1 == events.len() && matches!(events.get(index), Some(Event::StreamEnd)) {
+        root
+    } else {
+        YamlRoot::Other
+    }
+}
+
+fn scan_yaml_id(events: &[Event], mut index: usize, needle: &str) -> (bool, usize) {
+    match events.get(index) {
+        Some(Event::Scalar(..) | Event::Alias(..)) => return (false, index + 1),
+        Some(Event::SequenceStart(..)) => {
+            index += 1;
+            let mut found = false;
+            while index < events.len() && !matches!(events[index], Event::SequenceEnd) {
+                let (hit, next) = scan_yaml_id(events, index, needle);
+                found |= hit;
+                index = next;
+            }
+            (found, index + usize::from(index < events.len()))
+        }
+        Some(Event::MappingStart(..)) => {
+            index += 1;
+            let mut found = false;
+            while index < events.len() && !matches!(events[index], Event::MappingEnd) {
+                let key_is_id = matches!(&events[index], Event::Scalar(value, ..) if value == "id");
+                let (hit, after_key) = scan_yaml_id(events, index, needle);
+                let value_is_id = key_is_id
+                    && matches!(events.get(after_key), Some(Event::Scalar(value, ..)) if value == needle);
+                let (hit_value, after_value) = scan_yaml_id(events, after_key, needle);
+                found |= hit || hit_value || value_is_id;
+                index = after_value;
+            }
+            (found, index + usize::from(index < events.len()))
+        }
+        _ => (false, index + 1),
+    }
+}
+
+fn yaml_has_id_value(events: &[Event], needle: &str) -> bool {
+    let mut index = usize::from(matches!(events.first(), Some(Event::StreamStart)));
+    if matches!(events.get(index), Some(Event::DocumentStart)) {
+        index += 1;
+    }
+    if scan_yaml_id(events, index, needle).0 {
+        return true;
+    }
+    let anchored: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Scalar(value, _, anchor, _) if value == needle && *anchor != 0 => Some(*anchor),
+            _ => None,
+        })
+        .collect();
+    events.iter().any(|event| matches!(event, Event::Alias(anchor) if anchored.contains(anchor)))
+}
+
+fn skip_yaml_node(events: &[Event], mut index: usize) -> Option<usize> {
+    match events.get(index) {
+        Some(Event::Scalar(..) | Event::Alias(..)) => return Some(index + 1),
+        Some(Event::SequenceStart(..) | Event::MappingStart(..)) => {}
+        _ => return None,
+    }
+    let mut depth = 0usize;
+    while index < events.len() {
+        match events[index] {
+            Event::SequenceStart(..) | Event::MappingStart(..) => depth += 1,
+            Event::SequenceEnd | Event::MappingEnd => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// How many times `needle` keys the root mapping, including quoted spellings.
+/// Values elsewhere in the file are not keys and never make an edit refuse.
+fn root_mapping_key_count(events: &[Event], needle: &str) -> usize {
+    let mut index = usize::from(matches!(events.first(), Some(Event::StreamStart)));
+    if matches!(events.get(index), Some(Event::DocumentStart)) {
+        index += 1;
+    }
+    if !matches!(events.get(index), Some(Event::MappingStart(..))) {
+        return 0;
+    }
+    index += 1;
+    let mut count = 0;
+    while index < events.len() && !matches!(events[index], Event::MappingEnd) {
+        if matches!(&events[index], Event::Scalar(value, ..) if value == needle) {
+            count += 1;
+        }
+        let Some(after_key) = skip_yaml_node(events, index) else {
+            return count;
+        };
+        let Some(after_value) = skip_yaml_node(events, after_key) else {
+            return count;
+        };
+        index = after_value;
+    }
+    count
+}
+
+/// Whether the source is only blank lines, comments and document-start
+/// markers. Such a file is empty for editing even though YAML represents its
+/// document as an empty scalar; an explicit `""` or `...` is not the same.
+fn empty_document_source(yaml: &str) -> bool {
+    let mut marker = false;
+    for line in yaml.lines() {
+        let text = line.trim();
+        if text.is_empty() || text.starts_with('#') {
+            continue;
+        }
+        if line == "---" && !marker {
+            marker = true;
+            continue;
+        }
+        return false;
+    }
+    true
+}
+
+/// The override file's YAML guard: valid syntax, one root sequence, and
+/// whether the scalar `id` appears anywhere in it. The last answer is only a
+/// conservative unsupported-shape check — if the line parser cannot find that
+/// same id, the write refuses rather than adding a duplicate row.
+fn override_yaml_guard(yaml: &str, id: &str) -> Option<(bool, bool)> {
+    let events = yaml_events(yaml)?;
+    let root = yaml_root(&events);
+    Some((
+        empty_document_source(yaml) || matches!(root, YamlRoot::Empty | YamlRoot::Sequence),
+        yaml_has_id_value(&events, id),
+    ))
+}
+
+/// A root flow sequence on the first content line: `(empty, start, end)` for
+/// its source text. Block rows can append after a block sequence, but not
+/// after the closing `]` of a flow sequence.
+fn flow_sequence_root(yaml: &str) -> Option<(bool, usize, usize)> {
+    let mut at = 0;
+    for line in yaml.split_inclusive('\n') {
+        let text = line.trim_end();
+        let trimmed = text.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed == "---" {
+            at += line.len();
+            continue;
+        }
+        return trimmed.starts_with('[').then(|| {
+            let start = at + line.find('[').unwrap_or(0);
+            (trimmed == "[]", start, at + text.len())
+        });
+    }
+    None
+}
+
 /// The override file's row for `id`, when one top-level `- ` item keys
 /// on it.
 fn override_row(yaml: &str, id: &str) -> Result<Option<OverrideRow>, HarnessError> {
@@ -1222,6 +1464,30 @@ pub fn set_row_disabled(home: &Path, id: &str, disabled: bool) -> Result<(), Har
         Err(e) => return Err(e.into()),
     };
     let row = override_row(&yaml, id)?;
+    let flow_root = flow_sequence_root(&yaml);
+    if matches!(flow_root, Some((false, _, _))) {
+        return Err(HarnessError::Protocol(
+            "cordis.patch.yml: a non-empty flow sequence can't be edited safely".into(),
+        ));
+    }
+    match override_yaml_guard(&yaml, id) {
+        Some((true, mentioned)) if row.is_some() || !mentioned => {}
+        Some((true, _)) => {
+            return Err(HarnessError::Protocol(format!(
+                "cordis.patch.yml: the row for {id:?} uses YAML outside the editable subset"
+            )));
+        }
+        Some((false, _)) => {
+            return Err(HarnessError::Protocol(
+                "cordis.patch.yml: only one top-level sequence of rows can be edited safely".into(),
+            ));
+        }
+        None => {
+            return Err(HarnessError::Protocol(
+                "cordis.patch.yml: malformed YAML can't be edited safely".into(),
+            ));
+        }
+    }
     let default = row_defaults(home).get(id).copied().unwrap_or(false);
     let out = if disabled == default {
         let Some(row) = row else {
@@ -1232,12 +1498,20 @@ pub fn set_row_disabled(home: &Path, id: &str, disabled: bool) -> Result<(), Har
     } else {
         match row {
             None => {
-                let mut out = yaml.clone();
-                if !out.is_empty() && !out.ends_with('\n') {
+                let row_text = format!("- id: {}\n  disabled: {disabled}", id_scalar(id));
+                if let Some((true, start, end)) = flow_root {
+                    let mut out = yaml.clone();
+                    out.replace_range(start..end, &row_text);
+                    out
+                } else {
+                    let mut out = yaml.clone();
+                    if !out.is_empty() && !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&row_text);
                     out.push('\n');
+                    out
                 }
-                out.push_str(&format!("- id: {}\n  disabled: {disabled}\n", id_scalar(id)));
-                out
             }
             Some(row) => set_disabled(&yaml, &row, disabled)?,
         }
@@ -1381,8 +1655,32 @@ pub fn allow_build(home: &Path, package: &str) -> Result<(), HarnessError> {
         Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e.into()),
     };
+    let block = allow_builds(&yaml);
+    match yaml_events(&yaml).map(|events| {
+        (
+            empty_document_source(&yaml) || matches!(yaml_root(&events), YamlRoot::Empty | YamlRoot::Mapping),
+            root_mapping_key_count(&events, "allowBuilds"),
+        )
+    }) {
+        Some((true, count)) if count == usize::from(block.is_some()) => {}
+        Some((true, _)) => {
+            return Err(HarnessError::Protocol(
+                "pnpm-workspace.yaml: allowBuilds uses YAML outside the editable subset".into(),
+            ));
+        }
+        Some((false, _)) => {
+            return Err(HarnessError::Protocol(
+                "pnpm-workspace.yaml: only one top-level mapping can be edited safely".into(),
+            ));
+        }
+        None => {
+            return Err(HarnessError::Protocol(
+                "pnpm-workspace.yaml: malformed YAML can't be edited safely".into(),
+            ));
+        }
+    }
     let key = build_key(package);
-    let out = match allow_builds(&yaml) {
+    let out = match block {
         // The user's own say for it stands, whatever it is.
         Some(AllowBlock::Rows { names, .. }) | Some(AllowBlock::Inline { names, .. })
             if names.iter().any(|name| name.as_str() == package) =>
@@ -1986,6 +2284,40 @@ mod tests {
         assert!(!workspace(dir.path()).exists());
     }
 
+    #[test]
+    fn allow_build_yaml_outside_the_editable_subset_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        for (limit, yaml) in [
+            // Inline maps are editable only when the whole `{…}` is on one line.
+            (
+                "a multiline inline map",
+                "allowBuilds: {\n  esbuild: true\n}\n",
+            ),
+            // A scalar is not an allowBuilds map; appending another key would corrupt it.
+            ("a scalar value", "allowBuilds: true\n"),
+            // The line editor cannot answer which duplicate key pnpm would read.
+            (
+                "duplicate keys",
+                "allowBuilds:\n  esbuild: true\nallowBuilds:\n  other: true\n",
+            ),
+            // Appending `allowBuilds:` under a sequence root would corrupt it.
+            ("a sequence root", "- allowBuilds\n"),
+            // Malformed YAML is never edited by line positions.
+            ("malformed yaml", "allowBuilds:\n  esbuild: [true\n"),
+        ] {
+            write(&workspace(dir.path()), yaml);
+            let before = read(dir.path());
+            assert!(
+                matches!(
+                    allow_build(dir.path(), "dsh-hello-plugin"),
+                    Err(HarnessError::Protocol(_))
+                ),
+                "{limit} should refuse"
+            );
+            assert_eq!(read(dir.path()), before, "{limit} changed");
+        }
+    }
+
     fn profile_patch(home: &Path, contents: &str) {
         write(&profile_dir(home).join("cordis.patch.yml"), contents);
     }
@@ -2180,5 +2512,82 @@ mod tests {
             set_row_disabled(dir.path(), "bad\nid", true),
             Err(HarnessError::Protocol(_))
         ));
+    }
+
+    #[test]
+    fn empty_and_header_only_patch_documents_can_gain_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        profile_patch(dir.path(), "# patch comments\n[]\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "# patch comments\n- id: dyn\n  disabled: true\n"
+        );
+
+        profile_patch(dir.path(), "---\n- id: dyn\n  disabled: true\n");
+        set_row_disabled(dir.path(), "dyn", false).unwrap();
+        assert_eq!(read_profile_patch(dir.path()), "---\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "---\n- id: dyn\n  disabled: true\n"
+        );
+    }
+
+    #[test]
+    fn an_id_in_another_rows_title_does_not_block_a_new_override() {
+        let dir = tempfile::tempdir().unwrap();
+        profile_patch(dir.path(), "- id: other\n  title: dyn\n");
+        set_row_disabled(dir.path(), "dyn", true).unwrap();
+        assert_eq!(
+            read_profile_patch(dir.path()),
+            "- id: other\n  title: dyn\n- id: dyn\n  disabled: true\n"
+        );
+    }
+
+    #[test]
+    fn yaml_outside_the_editable_subset_is_refused_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        for (limit, yaml) in [
+            // The anchor makes the line read unable to prove this is `id: dyn`.
+            ("an anchored id", "- id: &row dyn\n  disabled: true\n"),
+            // A flow row is editable only when its whole one-line object is JSON.
+            (
+                "a multiline flow row",
+                "- {\"id\": \"dyn\",\n  \"disabled\": true}\n",
+            ),
+            // Patch rows nested in another mapping are not top-level switch rows.
+            ("a nested row", "- wrapper:\n    - id: dyn\n"),
+            // The editor owns one document, not a stream of them.
+            (
+                "multiple documents",
+                "---\n- id: other\n---\n- id: dyn\n",
+            ),
+            // Appending `- id:` under a mapping root would corrupt the document.
+            ("a mapping root", "rows:\n  - id: dyn\n"),
+            // An id reachable only through an alias is still outside line editing.
+            (
+                "an aliased id",
+                "- title: &name dyn\n- id: *name\n",
+            ),
+            // Explicit empty scalars and end-document markers are not blank files.
+            ("an explicit empty scalar", "\"\"\n"),
+            ("a closed empty document", "---\n...\n"),
+            ("an indented document marker", "  ---\n"),
+            ("repeated document markers", "---\n---\n"),
+            // Malformed YAML is never edited by line positions.
+            ("malformed yaml", "- id: dyn\n  disabled: [true\n"),
+        ] {
+            profile_patch(dir.path(), yaml);
+            let before = read_profile_patch(dir.path());
+            assert!(
+                matches!(
+                    set_row_disabled(dir.path(), "dyn", false),
+                    Err(HarnessError::Protocol(_))
+                ),
+                "{limit} should refuse"
+            );
+            assert_eq!(read_profile_patch(dir.path()), before, "{limit} changed");
+        }
     }
 }
