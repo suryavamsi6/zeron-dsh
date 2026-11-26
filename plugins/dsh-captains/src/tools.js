@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -81,6 +82,89 @@ export function resolveInDrive(drive, rel) {
 
 let tmpCounter = 0;
 
+function writeAtomic(realTarget, content) {
+  // Resolution and I/O are not atomic: a symlink swapped between
+  // resolveInDrive and this rename can still redirect the write to
+  // wherever the new link points. Checking the real path narrows the
+  // window; it does not close it.
+  const dir = path.dirname(realTarget);
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
+  try {
+    fs.writeFileSync(tmp, content);
+    fs.renameSync(tmp, realTarget);
+  } catch (error) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // the temp file never landed or the rename already moved it
+    }
+    throw error;
+  }
+}
+
+export const DIFF_TIERS = ['docs', 'standard', 's1'];
+
+function git(repo, args) {
+  try {
+    return execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
+  } catch (error) {
+    const stderr = String(error.stderr ?? '').trim();
+    throw new Error(`git ${args.join(' ')} failed${stderr === '' ? '' : `: ${stderr}`}`);
+  }
+}
+
+const receiptLine = value => typeof value === 'string' && value.trim() !== '' && value.length <= 512
+  && !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+
+// SUR-207: the receipt the engine's merge queue reads. HEAD and its tree are
+// read from the crew checkout itself, never typed by the model, so a later
+// commit — which moves both — leaves the receipt naming a commit that is no
+// longer the branch tip, and the engine refuses it.
+export function shipReadyReceipt(drive, args) {
+  const { crewId, repo, pr, branch, slug, diffTier, gateCommand, failedOrSkipped = [], base = 'origin/main' } = args;
+  if (typeof crewId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/.test(crewId)) {
+    throw new Error('crewId must be letters, digits, dashes and underscores');
+  }
+  if (typeof repo !== 'string' || !path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
+  if (!Number.isInteger(pr) || pr <= 0) throw new Error('pr must be a pull request number');
+  if (typeof slug !== 'string' || !/^[a-z0-9](?:[a-z0-9-]{0,78}[a-z0-9])?$/.test(slug)) {
+    throw new Error('slug must be lowercase letters, digits and dashes');
+  }
+  if (!DIFF_TIERS.includes(diffTier)) throw new Error(`diffTier must be one of ${DIFF_TIERS.join(', ')}`);
+  if (!Array.isArray(gateCommand) || gateCommand.length === 0 || !gateCommand.every(receiptLine)) {
+    throw new Error('gateCommand must list each gate command that ran, one line each');
+  }
+  if (!Array.isArray(failedOrSkipped) || !failedOrSkipped.every(receiptLine)) {
+    throw new Error('failedOrSkipped must name one test per entry');
+  }
+  if (typeof base !== 'string' || base === '' || base.startsWith('-')) throw new Error('base must name a revision');
+  const current = git(repo, ['rev-parse', '--abbrev-ref', 'HEAD']);
+  if (current !== branch) {
+    throw new Error(`the checkout at ${repo} is on ${current}, not ${branch}; ship the branch that was reviewed`);
+  }
+  if (git(repo, ['status', '--porcelain', '--untracked-files=no']) !== '') {
+    throw new Error(`the checkout at ${repo} has uncommitted changes; commit them before shipping`);
+  }
+  const receipt = {
+    crewId,
+    repo,
+    pr,
+    branch,
+    headSha: git(repo, ['rev-parse', '--verify', 'HEAD^{commit}']),
+    treeSha: git(repo, ['rev-parse', '--verify', 'HEAD^{tree}']),
+    baseSha: git(repo, ['merge-base', 'HEAD', base]),
+    gateCommand,
+    diffTier,
+    failedOrSkipped,
+    slug,
+  };
+  const rel = `state/ready/${crewId}.json`;
+  const { realTarget } = resolveInDrive(drive, rel);
+  writeAtomic(realTarget, JSON.stringify(receipt, null, 2) + '\n');
+  return receipt;
+}
+
 export function driveToolSpecs(cfg) {
   const drive = driveDir(cfg);
   const output = {
@@ -146,25 +230,31 @@ export function driveToolSpecs(cfg) {
         if (bytes > WRITE_CAP) {
           throw new Error('content exceeds the 256 KB Captain Drive write limit');
         }
-        // Resolution and I/O are not atomic: a symlink swapped between
-        // resolveInDrive and this rename can still redirect the write to
-        // wherever the new link points. Checking the real path narrows the
-        // window; it does not close it.
-        const dir = path.dirname(realTarget);
-        fs.mkdirSync(dir, { recursive: true });
-        const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
-        try {
-          fs.writeFileSync(tmp, content);
-          fs.renameSync(tmp, realTarget);
-        } catch (error) {
-          try {
-            fs.unlinkSync(tmp);
-          } catch {
-            // the temp file never landed or the rename already moved it
-          }
-          throw error;
-        }
+        writeAtomic(realTarget, content);
         return `wrote ${display} (${bytes} bytes)`;
+      },
+    },
+    {
+      name: 'captain_ship_ready',
+      description: 'Mark a reviewed crew branch ready to land: reads HEAD, its tree and the merge base from the crew checkout and writes state/ready/<crewId>.json for the merge queue. Any later commit invalidates the receipt; ship again after it.',
+      parameters: {
+        crewId: { type: 'string', required: true, description: 'The crew chat id; names the receipt file' },
+        repo: { type: 'string', required: true, description: 'Absolute path of the crew checkout, with the reviewed branch checked out' },
+        pr: { type: 'integer', required: true, description: 'The pull request number' },
+        branch: { type: 'string', required: true, description: 'The crew branch; must be the checked-out branch' },
+        slug: { type: 'string', required: true, description: 'Names the branch\'s changelog.d/<slug>.md fragment' },
+        diffTier: { type: 'string', required: true, enum: DIFF_TIERS, description: 'docs, standard or s1' },
+        gateCommand: { type: 'array', required: true, items: { type: 'string' }, description: 'Each gate command that ran, e.g. cargo nextest run --locked, zgx test ui' },
+        failedOrSkipped: { type: 'array', items: { type: 'string' }, description: 'Every test the gate failed or skipped; empty when all passed' },
+        base: { type: 'string', description: 'Revision the merge base is taken against; defaults to origin/main' },
+      },
+      output,
+      async execute(args) {
+        if (process.env.DSH_PERMISSION_MODE === 'read-only') {
+          throw new Error('the Captain Drive is read-only in this run');
+        }
+        const receipt = shipReadyReceipt(drive, args);
+        return `wrote state/ready/${receipt.crewId}.json for ${receipt.headSha} (tree ${receipt.treeSha})`;
       },
     },
   ];

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { mkdtemp, mkdir, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { driveDir, driveToolSpecs, resolveInDrive } from '../src/tools.js';
@@ -16,8 +17,8 @@ async function drive(t) {
 }
 
 function tools(root) {
-  const [read, write] = driveToolSpecs(captain(root));
-  return { read, write };
+  const [read, write, ship] = driveToolSpecs(captain(root));
+  return { read, write, ship };
 }
 
 test('the drive dir is the validated row root', async t => {
@@ -183,7 +184,7 @@ function gated(config, origin) {
 test('only the root agent registers the Drive tools', async t => {
   const root = await drive(t);
   const config = captain(root);
-  assert.deepEqual(gated(config, 'root').sort(), ['captain_drive_read', 'captain_drive_write']);
+  assert.deepEqual(gated(config, 'root').sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
   const crew = { ...config, role: 'crew', chatId: 'crew-1' };
   assert.deepEqual(gated(crew, 'root'), [], 'a crew chat registered a Drive tool');
   assert.deepEqual(gated(config, 'subagent'), [], 'a native child inherited the Drive tools');
@@ -225,11 +226,11 @@ test('an already-created root agent is latched once, not twice', async t => {
     on(event, handler) { if (event === 'agent/created') created = handler; },
   }, captain(root));
   assert.equal(sections.length, 1, 'a root created before the listener settled was not latched');
-  assert.deepEqual([...tools].sort(), ['captain_drive_read', 'captain_drive_write']);
+  assert.deepEqual([...tools].sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
   // The event arrives for the same agent afterwards: the latch must not double-register.
   created({ agent });
   assert.equal(sections.length, 1, 'the latch and the event double-registered the section');
-  assert.equal(tools.length, 2, 'the latch and the event doubled the Drive tools');
+  assert.equal(tools.length, 3, 'the latch and the event doubled the Drive tools');
 });
 
 test('the stamped drive root is the drive itself, not its parent', async t => {
@@ -252,4 +253,76 @@ test('the stamped drive root is the drive itself, not its parent', async t => {
   assert.deepEqual((await readdir(parent)).sort(), ['captains']);
   assert.deepEqual((await readdir(join(parent, 'captains'))).sort(), ['captain-1']);
   assert.deepEqual((await readdir(root)).sort(), ['notes']);
+});
+
+// SUR-207: captain_ship_ready reads the binding from git rather than the model.
+const gitIn = (repo, ...args) => execFileSync('git', ['-C', repo, '-c', 'user.name=crew', '-c', 'user.email=crew@example.invalid',
+  '-c', 'commit.gpgsign=false', ...args], { encoding: 'utf8' }).trim();
+
+async function crewCheckout(t) {
+  const repo = await mkdtemp(join(tmpdir(), 'captains-crew-'));
+  t.after(() => rm(repo, { recursive: true, force: true }));
+  gitIn(repo, 'init', '--quiet', '-b', 'main');
+  await writeFile(join(repo, 'a.txt'), 'one\n');
+  gitIn(repo, 'add', 'a.txt');
+  gitIn(repo, 'commit', '--quiet', '-m', 'base');
+  gitIn(repo, 'checkout', '--quiet', '-b', 'crew/crew-a');
+  await writeFile(join(repo, 'a.txt'), 'two\n');
+  gitIn(repo, 'commit', '--quiet', '-am', 'crew work');
+  return repo;
+}
+
+const shipArgs = repo => ({
+  crewId: 'crew-a', repo, pr: 7, branch: 'crew/crew-a', slug: 'crew-a-change', diffTier: 'standard',
+  gateCommand: ['cargo nextest run --locked', 'zgx test ui'], base: 'main',
+});
+
+test('captain_ship_ready writes a receipt bound to HEAD, its tree and the merge base', async t => {
+  const root = await drive(t);
+  const repo = await crewCheckout(t);
+  const { ship } = tools(root);
+  assert.equal(ship.name, 'captain_ship_ready');
+  const head = gitIn(repo, 'rev-parse', 'HEAD');
+  const tree = gitIn(repo, 'rev-parse', 'HEAD^{tree}');
+  assert.equal(await ship.execute(shipArgs(repo)), `wrote state/ready/crew-a.json for ${head} (tree ${tree})`);
+  const receipt = JSON.parse(readFileSync(join(root, 'state', 'ready', 'crew-a.json'), 'utf8'));
+  assert.deepEqual(receipt, {
+    crewId: 'crew-a', repo, pr: 7, branch: 'crew/crew-a', headSha: head, treeSha: tree,
+    baseSha: gitIn(repo, 'rev-parse', 'main'), gateCommand: ['cargo nextest run --locked', 'zgx test ui'],
+    diffTier: 'standard', failedOrSkipped: [], slug: 'crew-a-change',
+  });
+  // A later commit moves both bindings, so shipping again records the new tip.
+  await writeFile(join(repo, 'a.txt'), 'three\n');
+  gitIn(repo, 'commit', '--quiet', '-am', 'after review');
+  await ship.execute({ ...shipArgs(repo), diffTier: 's1', failedOrSkipped: ['ui::flaky (skipped)'] });
+  const again = JSON.parse(readFileSync(join(root, 'state', 'ready', 'crew-a.json'), 'utf8'));
+  assert.notEqual(again.headSha, head);
+  assert.notEqual(again.treeSha, tree);
+  assert.equal(again.diffTier, 's1');
+  assert.deepEqual(again.failedOrSkipped, ['ui::flaky (skipped)']);
+});
+
+test('captain_ship_ready refuses a checkout that is not the reviewed commit', async t => {
+  const root = await drive(t);
+  const repo = await crewCheckout(t);
+  const { ship } = tools(root);
+  await assert.rejects(ship.execute({ ...shipArgs(repo), branch: 'crew/other' }), /is on crew\/crew-a, not crew\/other/);
+  await writeFile(join(repo, 'a.txt'), 'dirty\n');
+  await assert.rejects(ship.execute(shipArgs(repo)), /uncommitted changes/);
+  gitIn(repo, 'checkout', '--quiet', '--', 'a.txt');
+  for (const [patch, pattern] of [
+    [{ crewId: '../x' }, /crewId/],
+    [{ repo: 'relative' }, /absolute/],
+    [{ pr: 0 }, /pull request number/],
+    [{ slug: 'Bad_Slug' }, /slug/],
+    [{ diffTier: 'trivial' }, /diffTier/],
+    [{ gateCommand: [] }, /gateCommand/],
+    [{ failedOrSkipped: ['a\nb'] }, /failedOrSkipped/],
+  ]) {
+    await assert.rejects(ship.execute({ ...shipArgs(repo), ...patch }), pattern, JSON.stringify(patch));
+  }
+  await assert.rejects(readdir(join(root, 'state')), /ENOENT/, 'a refused ship wrote a receipt');
+  process.env.DSH_PERMISSION_MODE = 'read-only';
+  t.after(() => { delete process.env.DSH_PERMISSION_MODE; });
+  await assert.rejects(ship.execute(shipArgs(repo)), /read-only/);
 });

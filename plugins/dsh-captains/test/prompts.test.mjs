@@ -52,6 +52,7 @@ test('the captain prompt names the Drive, its files and the crew protocol', () =
     '## In progress',
     'captain_drive_read',
     'captain_drive_write',
+    'captain_ship_ready',
     'create_chat',
     'archive_chat',
     'subagent',
