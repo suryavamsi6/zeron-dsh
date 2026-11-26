@@ -58,16 +58,38 @@ pub struct Binding {
 pub struct ScheduleMcp {
     schedules: Schedules,
     binding: Binding,
+    edge: Option<std::sync::Arc<crate::cloud_schedules::EdgeSchedules>>,
 }
 
 impl ScheduleMcp {
     pub fn new(schedules: Schedules, binding: Binding) -> Self {
-        Self { schedules, binding }
+        Self {
+            schedules,
+            binding,
+            edge: None,
+        }
+    }
+
+    /// On a cloud session machine the hosted chat's schedules are the
+    /// edge's: creates, edits and deletes for it forward there, and lists
+    /// and views merge both stores (`None` on every desktop engine).
+    pub fn with_edge(mut self, edge: Option<std::sync::Arc<crate::cloud_schedules::EdgeSchedules>>) -> Self {
+        self.edge = edge;
+        self
+    }
+
+    /// The edge client when `target` is this machine's hosted chat.
+    fn edge_for(&self, target: &Target) -> Option<&std::sync::Arc<crate::cloud_schedules::EdgeSchedules>> {
+        let edge = self.edge.as_ref()?;
+        match target {
+            Target::Session { session } if session == edge.chat_id() => Some(edge),
+            _ => None,
+        }
     }
 
     /// Answer one inbound MCP message. Requests (`id` present) always get a
     /// response frame; notifications and non-objects get none.
-    pub fn handle(&self, request: &Value) -> Option<Value> {
+    pub async fn handle(&self, request: &Value) -> Option<Value> {
         let Some(object) = request.as_object() else {
             return Some(error_response(
                 Value::Null,
@@ -82,10 +104,10 @@ impl ScheduleMcp {
             return Some(error_response(id, INVALID_REQUEST, "missing method"));
         };
         let params = object.get("params").cloned().unwrap_or(Value::Null);
-        Some(self.handle_request(id, method, params))
+        Some(self.handle_request(id, method, params).await)
     }
 
-    fn handle_request(&self, id: Value, method: &str, params: Value) -> Value {
+    async fn handle_request(&self, id: Value, method: &str, params: Value) -> Value {
         match method {
             "initialize" => {
                 let requested = params
@@ -109,7 +131,7 @@ impl ScheduleMcp {
             }
             "ping" => ok_response(id, json!({})),
             "tools/list" => ok_response(id, json!({ "tools": tools() })),
-            "tools/call" => self.call(id, params),
+            "tools/call" => self.call(id, params).await,
             // Optional capabilities not advertised: answer empty rather than
             // erroring so permissive clients do not log noise.
             "resources/list" => ok_response(id, json!({ "resources": [] })),
@@ -122,7 +144,7 @@ impl ScheduleMcp {
     /// `invalid_*`, `schedule_not_found`, `schedule_conflict`) as result
     /// payloads the model reads, so every outcome below is a result object —
     /// never a protocol error and never `isError`.
-    fn call(&self, id: Value, params: Value) -> Value {
+    async fn call(&self, id: Value, params: Value) -> Value {
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return error_response(id, INVALID_PARAMS, "tools/call needs a tool name");
         };
@@ -140,10 +162,10 @@ impl ScheduleMcp {
             )
         } else {
             match name {
-                "schedule_create" => self.create(&arguments),
-                "schedule_list" => Ok(self.list(&arguments)),
-                "schedule_view" => Ok(self.view(&arguments)),
-                "schedule_edit" => self.edit(&arguments),
+                "schedule_create" => self.create(&arguments).await,
+                "schedule_list" => Ok(self.list(&arguments).await),
+                "schedule_view" => Ok(self.view(&arguments).await),
+                "schedule_edit" => self.edit(&arguments).await,
                 _ => unreachable!(),
             }
             .unwrap_or_else(|(code, message)| failed(&code, &message))
@@ -163,8 +185,18 @@ impl ScheduleMcp {
     /// `schedule_create`: a new active task on `target`, resolved against the
     /// binding — `this_session` is the caller's own chat, `new_once` and
     /// `new` open in its cwd.
-    fn create(&self, args: &Value) -> Result<Value, (String, String)> {
+    async fn create(&self, args: &Value) -> Result<Value, (String, String)> {
         let target = self.target(args.get("target"), "invalid_prompt")?;
+        if let Some(edge) = self.edge_for(&target) {
+            let title = args.get("title").and_then(Value::as_str).unwrap_or_default();
+            let prompt = args.get("prompt").and_then(Value::as_str).unwrap_or_default();
+            let rrule = args.get("rrule").and_then(Value::as_str).unwrap_or_default();
+            let row = edge
+                .upsert(None, title, prompt, rrule, true)
+                .await
+                .map_err(edge_error)?;
+            return Ok(model_task(&cloud_task(&row)));
+        }
         let task = json!({
             "title": args.get("title").cloned().unwrap_or(Value::Null),
             "prompt": args.get("prompt").cloned().unwrap_or(Value::Null),
@@ -177,8 +209,8 @@ impl ScheduleMcp {
 
     /// `schedule_list`: `{items, shown, total, limit, offset}` — active tasks
     /// first, each ordered by `scheduledAt`, as dsh lists them.
-    fn list(&self, args: &Value) -> Value {
-        let mut tasks = self.schedules_list();
+    async fn list(&self, args: &Value) -> Value {
+        let mut tasks = self.schedules_list().await;
         if let Some(active) = args.get("active").and_then(Value::as_bool) {
             tasks.retain(|task| task.active == active);
         }
@@ -210,7 +242,7 @@ impl ScheduleMcp {
     }
 
     /// `schedule_view`: one task by id, or the declared `schedule_not_found`.
-    fn view(&self, args: &Value) -> Value {
+    async fn view(&self, args: &Value) -> Value {
         let Some(id) = args
             .get("id")
             .and_then(Value::as_str)
@@ -218,7 +250,7 @@ impl ScheduleMcp {
         else {
             return failed("invalid_selector", "schedule_view takes an id.");
         };
-        match self.find(id) {
+        match self.find(id).await {
             Some(task) => model_task(&task),
             None => json!({ "id": id, "code": "schedule_not_found" }),
         }
@@ -227,7 +259,7 @@ impl ScheduleMcp {
     /// `schedule_edit`: update (merge the provided fields into the stored
     /// task — its id and, for `new_once`, the chat delivery resolved are kept)
     /// or delete. `expectedUpdatedAt` guards against a stale view of the task.
-    fn edit(&self, args: &Value) -> Result<Value, (String, String)> {
+    async fn edit(&self, args: &Value) -> Result<Value, (String, String)> {
         let bad = |message: &str| Err(("invalid_selector".to_owned(), message.to_owned()));
         let Some(id) = args
             .get("id")
@@ -240,7 +272,8 @@ impl ScheduleMcp {
             .get("action")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let Some(task) = self.find(id) else {
+        let cloud = self.is_cloud_task(id).await;
+        let Some(task) = self.find(id).await else {
             return Ok(json!({ "id": id, "code": "schedule_not_found" }));
         };
         if let Some(expected) = args.get("expectedUpdatedAt").and_then(Value::as_str)
@@ -256,13 +289,19 @@ impl ScheduleMcp {
                 {
                     return bad("delete accepts only id, action, and expectedUpdatedAt.");
                 }
-                let reply = schedules::call(
-                    &self.schedules,
-                    methods::SCHEDULE_DELETE,
-                    &json!({ "id": id }),
-                )
-                .map_err(store_error)?;
-                if reply["deleted"] == true {
+                let deleted = if cloud {
+                    let edge = self.edge.clone().expect("a cloud task implies the client");
+                    edge.delete(id).await.map_err(edge_error)?
+                } else {
+                    let reply = schedules::call(
+                        &self.schedules,
+                        methods::SCHEDULE_DELETE,
+                        &json!({ "id": id }),
+                    )
+                    .map_err(store_error)?;
+                    reply["deleted"] == true
+                };
+                if deleted {
                     Ok(json!({ "id": id, "deleted": true }))
                 } else {
                     Ok(json!({ "id": id, "code": "schedule_not_found" }))
@@ -296,6 +335,34 @@ impl ScheduleMcp {
                         "update requires at least one of title, prompt, rrule, target, or active.",
                     );
                 }
+                if cloud {
+                    let edge = self.edge.clone().expect("a cloud task implies the client");
+                    let Target::Session { session } = &edited.target else {
+                        return Err((
+                            "invalid_selector".to_owned(),
+                            "a cloud-hosted chat's schedules can only target this_session."
+                                .to_owned(),
+                        ));
+                    };
+                    if session != edge.chat_id() {
+                        return Err((
+                            "invalid_selector".to_owned(),
+                            "a cloud-hosted chat's schedules can only target this_session."
+                                .to_owned(),
+                        ));
+                    }
+                    let row = edge
+                        .upsert(
+                            Some(id),
+                            &edited.title,
+                            &edited.prompt,
+                            &edited.rrule,
+                            edited.active,
+                        )
+                        .await
+                        .map_err(edge_error)?;
+                    return Ok(model_task(&cloud_task(&row)));
+                }
                 let task = serde_json::to_value(&edited)
                     .map_err(|e| ("internal_error".to_owned(), e.to_string()))?;
                 self.save(&task).map(|task| model_task(&task))
@@ -306,16 +373,42 @@ impl ScheduleMcp {
 
     // ---- against the store --------------------------------------------------
 
-    /// The store's whole list, as `Schedules` answers `Schedules`.
-    fn schedules_list(&self) -> Vec<Task> {
-        schedules::call(&self.schedules, methods::SCHEDULES, &json!({}))
-            .ok()
-            .and_then(|value| serde_json::from_value(value["tasks"].clone()).ok())
-            .unwrap_or_default()
+    /// Both stores' tasks merged: the local store's, plus the hosted
+    /// chat's edge rows on a cloud machine. A hiccup listing the edge
+    /// withholds those rows rather than failing the whole call — the local
+    /// answer is still true, and the edge retries on its own.
+    async fn schedules_list(&self) -> Vec<Task> {
+        let mut tasks: Vec<Task> =
+            schedules::call(&self.schedules, methods::SCHEDULES, &json!({}))
+                .ok()
+                .and_then(|value| serde_json::from_value(value["tasks"].clone()).ok())
+                .unwrap_or_default();
+        if let Some(edge) = &self.edge
+            && let Ok(rows) = edge.list().await
+        {
+            tasks.extend(rows.iter().map(cloud_task));
+        }
+        tasks
     }
 
-    fn find(&self, id: &str) -> Option<Task> {
-        self.schedules_list().into_iter().find(|task| task.id == id)
+    async fn find(&self, id: &str) -> Option<Task> {
+        self.schedules_list()
+            .await
+            .into_iter()
+            .find(|task| task.id == id)
+    }
+
+    /// Whether `id` is one of the edge's rows — edits and deletes for it
+    /// forward rather than touching the local store.
+    async fn is_cloud_task(&self, id: &str) -> bool {
+        match &self.edge {
+            None => false,
+            Some(edge) => edge
+                .list()
+                .await
+                .map(|rows| rows.iter().any(|row| row.id == id))
+                .unwrap_or(false),
+        }
     }
 
     /// `ScheduleSave`: the store validates title/prompt/rrule and recomputes
@@ -377,6 +470,37 @@ fn store_error(error: RpcError) -> (String, String) {
             }
         }
         _ => "internal_error",
+    };
+    (code.to_owned(), message)
+}
+
+/// An edge row as the local `Task` shape, so rendering, sorting and
+/// `expectedUpdatedAt` reasoning share every line with local tasks.
+fn cloud_task(row: &crate::cloud_schedules::CloudScheduleRow) -> Task {
+    Task {
+        id: row.id.clone(),
+        title: row.title.clone(),
+        prompt: row.prompt.clone(),
+        rrule: row.rrule.clone(),
+        target: Target::Session {
+            session: row.chat_id.clone(),
+        },
+        active: row.active != 0,
+        next_at: row.next_fire_at,
+        last_run_at: row.last_fired_at,
+        updated_at: row.updated_at,
+    }
+}
+
+/// An edge call failure → the closest dsh error code, mirroring `store_error`.
+fn edge_error(error: crate::EngineError) -> (String, String) {
+    let message = error.to_string();
+    let code = if message.contains("rrule") || message.contains("rule") {
+        "invalid_rule"
+    } else if message.contains("prompt") || message.contains("title") {
+        "invalid_prompt"
+    } else {
+        "internal_error"
     };
     (code.to_owned(), message)
 }
@@ -766,17 +890,39 @@ mod tests {
         }
     }
 
+    /// Drive the now-async handle synchronously. Without an edge client —
+    /// and no test below binds one — the future never actually pends, so a
+    /// plain noop-waker poll completes it in one pass.
+    fn drive<F: std::future::Future>(future: F) -> F::Output {
+        use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+        fn clone(_: *const ()) -> RawWaker {
+            RawWaker::new(std::ptr::null(), &VTABLE)
+        }
+        fn wake(_: *const ()) {}
+        static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, wake, wake, wake);
+        let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
+        let mut context = Context::from_waker(&waker);
+        let mut future = Box::pin(future);
+        loop {
+            match std::pin::Pin::as_mut(&mut future).poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => panic!("a local-only ScheduleMcp future must never pend"),
+            }
+        }
+    }
+
     fn mcp(schedules: &Schedules) -> ScheduleMcp {
         ScheduleMcp::new(schedules.clone(), binding())
     }
 
     /// A JSON-RPC request frame's result field, unwrapped.
     fn result(mcp: &ScheduleMcp, id: i64, method: &str, params: Value) -> Value {
-        let reply = mcp
-            .handle(&json!({
+        let reply = drive(
+            mcp.handle(&json!({
                 "jsonrpc": "2.0", "id": id, "method": method, "params": params,
-            }))
-            .unwrap_or_else(|| panic!("{method} got no reply"));
+            })),
+        )
+        .unwrap_or_else(|| panic!("{method} got no reply"));
         assert!(reply["error"].is_null(), "{method} failed: {reply}");
         reply["result"].clone()
     }
@@ -860,9 +1006,9 @@ mod tests {
         );
         // A notification gets no reply.
         assert!(
-            mcp.handle(&json!({
+            drive(mcp.handle(&json!({
                 "jsonrpc": "2.0", "method": "notifications/initialized",
-            }))
+            })))
             .is_none()
         );
     }
@@ -1164,11 +1310,62 @@ mod tests {
             "jsonrpc": "2.0", "id": 7, "method": "tools/call",
             "params": { "name": "schedule_view", "arguments": { "id": "nope" } },
         });
-        let reply = mcp.handle(&frame).unwrap();
+        let reply = drive(mcp.handle(&frame)).unwrap();
         assert_eq!(reply["id"], 7);
         assert_eq!(
             reply["result"]["structuredContent"],
             json!({ "id": "nope", "code": "schedule_not_found" })
         );
     }
+
+    #[test]
+    fn cloud_rows_map_into_the_task_shape() {
+        let row = crate::cloud_schedules::CloudScheduleRow {
+            id: "edge-1".into(),
+            chat_id: "chat-1".into(),
+            title: "standup".into(),
+            prompt: "post it".into(),
+            rrule: DAILY.into(),
+            active: 1,
+            next_fire_at: Some(1767225600000),
+            last_fired_at: None,
+            last_error: None,
+            created_at: 1,
+            updated_at: 1767000000000,
+        };
+        let task = cloud_task(&row);
+        assert_eq!(task.id, "edge-1");
+        assert_eq!(task.target, Target::Session { session: "chat-1".into() });
+        assert!(task.active);
+        assert_eq!(task.next_at, Some(1767225600000));
+        assert_eq!(task.updated_at, 1767000000000);
+        // …and it renders through the same model shape as a local task.
+        let modeled = model_task(&task);
+        assert_eq!(modeled["id"], "edge-1");
+        assert_eq!(modeled["target"], json!({ "kind": "session", "sessionId": "chat-1" }));
+    }
+
+    #[test]
+    fn edge_forwarding_is_decided_by_the_target_chat() {
+        // No live edge here: the routing decision itself is what's pinned.
+        // `this_session` on the hosting machine forwards; `new_once`/`new`
+        // and every desktop target stay local.
+        let dir = tempfile::tempdir().unwrap();
+        let schedules = store(&dir);
+        let mcp = mcp(&schedules);
+        assert!(mcp.edge.is_none(), "a desktop binding has no edge client");
+        let local = drive(mcp.handle(&json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": "schedule_create", "arguments": {
+                "title": "standup", "prompt": "post the standup notes",
+                "rrule": DAILY, "target": "this_session",
+            }},
+        })))
+        .expect("create answers");
+        assert!(local["error"].is_null(), "{local}");
+        // …and the desktop store is what accepted it.
+        let stored = schedules::call(&schedules, methods::SCHEDULES, &json!({})).unwrap();
+        assert_eq!(stored["tasks"].as_array().unwrap().len(), 1);
+    }
+
 }

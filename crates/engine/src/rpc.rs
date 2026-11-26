@@ -969,6 +969,7 @@ pub struct EngineRpc {
     plugins: Option<crate::plugins::Plugins>,
     /// The engine-owned schedule service (absent in bare test assemblies).
     schedules: Option<crate::schedules::Schedules>,
+    cloud_schedules: Option<std::sync::Arc<crate::cloud_schedules::EdgeSchedules>>,
     /// The device-local Captain roster (absent in bare test assemblies).
     captains: Option<std::sync::Arc<crate::captains::CaptainsStore>>,
     /// DSH's own settings and account service, started on first use.
@@ -1084,6 +1085,7 @@ impl EngineRpc {
             viewport_focus: Default::default(),
             plugins: None,
             schedules: None,
+            cloud_schedules: None,
             captains: None,
             dsh_gateway: Default::default(),
             engine_info,
@@ -1147,6 +1149,16 @@ impl EngineRpc {
     /// Attach the schedule service (Schedules / ScheduleSave / …).
     pub fn with_schedules(mut self, schedules: crate::schedules::Schedules) -> Self {
         self.schedules = Some(schedules);
+        self
+    }
+
+    /// The session machine's edge schedule client: the hosted chat's
+    /// schedule writes forward to the edge store (`None` on desktops).
+    pub fn with_cloud_schedules(
+        mut self,
+        cloud_schedules: std::sync::Arc<crate::cloud_schedules::EdgeSchedules>,
+    ) -> Self {
+        self.cloud_schedules = Some(cloud_schedules);
         self
     }
 
@@ -3828,8 +3840,10 @@ impl RpcService for EngineRpc {
                     .as_ref()
                     .is_some_and(|chat| chat.child_kind == Some(zeron_proto::ChildKind::Subagent)),
             };
-            let response =
-                crate::schedule_mcp::ScheduleMcp::new(schedules, binding).handle(&params);
+            let response = crate::schedule_mcp::ScheduleMcp::new(schedules, binding)
+                .with_edge(self.cloud_schedules.clone())
+                .handle(&params)
+                .await;
             return Ok(RpcReply::Value(serde_json::json!({
                 "response": response.unwrap_or(serde_json::Value::Null)
             })));

@@ -47,6 +47,7 @@ pub mod chat2_host;
 mod chat_persistence;
 mod cloud_accounts;
 pub mod cloud_client;
+pub mod cloud_schedules;
 pub mod cloud_disk;
 pub mod commands;
 pub mod commit_credit;
@@ -735,6 +736,9 @@ impl EngineCore {
         if let Some(broker) = self.credentials() {
             rpc = rpc.with_credentials(broker);
         }
+        if let Some(edge_schedules) = self.cloud_schedules() {
+            rpc = rpc.with_cloud_schedules(edge_schedules);
+        }
         Arc::new(rpc)
     }
 
@@ -760,6 +764,15 @@ impl EngineCore {
             .cloud
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(cloud);
+    }
+
+    /// The session machine's edge schedule client (`None` everywhere else).
+    pub fn cloud_schedules(&self) -> Option<std::sync::Arc<cloud_schedules::EdgeSchedules>> {
+        self.cloud
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .and_then(|cloud| cloud.schedules())
     }
 
     /// The Cloud runner's relay activity counter (`None` on every other device).
@@ -1249,7 +1262,23 @@ impl Engine {
                     }
                 });
             }
-            core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
+            if let Some(session) = runner::session() {
+                let edge_schedules = Arc::new(cloud_schedules::EdgeSchedules::new(
+                    &identity.edge_url(),
+                    &identity.org_id(),
+                    &session.chat_id,
+                    Arc::new(auth.clone()),
+                ));
+                cloud_schedules::spawn_wakeup_drain(core.doc_host.clone(), edge_schedules.clone());
+                core.set_cloud(runner::CloudRunner::new_with_schedules(
+                    broker,
+                    activity,
+                    heartbeat,
+                    edge_schedules,
+                ));
+            } else {
+                core.set_cloud(runner::CloudRunner::new(broker, activity, heartbeat));
+            }
         }
         // The chats as last published (the list every view watches), not a
         // fresh parse of every chat row on each scan.
