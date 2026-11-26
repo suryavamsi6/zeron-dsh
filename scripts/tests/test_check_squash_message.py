@@ -19,8 +19,9 @@ printf '%s\n' "${FAKE_REVIEWS:-[]}"
 """
 
 
-def review(body, review_id=6040806665, sha=SHA):
-    return {"id": review_id, "commit_id": sha, "state": "COMMENTED", "body": body}
+def review(body, review_id=6040806665, sha=SHA, submitted="2026-11-25T00:00:00Z"):
+    return {"id": review_id, "commit_id": sha, "state": "COMMENTED", "body": body,
+            "submitted_at": submitted}
 
 
 class SquashMessageTests(unittest.TestCase):
@@ -74,6 +75,37 @@ class SquashMessageTests(unittest.TestCase):
             review("VERDICT: SHIP new-nonce", review_id=2, sha=newer_sha),
         ])
         required = f"verdict 2 (SHIP new-nonce) pinned to {newer_sha}"
+        result = self.run_check(f"subject\n\n{required}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+
+    def test_a_quoted_ship_line_is_not_a_new_verdict(self):
+        self.env["FAKE_REVIEWS"] = json.dumps([
+            review("VERDICT: SHIP real-nonce", review_id=1, sha="0" * 40,
+                   submitted="2026-11-25T00:00:00Z"),
+            review("```\nVERDICT: SHIP real-nonce\n```\nquoted in a reply", review_id=2,
+                   sha="1" * 40, submitted="2026-11-25T01:00:00Z"),
+        ])
+        required = f"verdict 1 (SHIP real-nonce) pinned to {'0' * 40}"
+        result = self.run_check(f"subject\n\n{required}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_submission_order_beats_draft_review_id_order(self):
+        self.env["FAKE_REVIEWS"] = json.dumps([
+            review("VERDICT: SHIP submitted-last", review_id=1, sha="0" * 40,
+                   submitted="2026-11-25T02:00:00Z"),
+            review("VERDICT: SHIP submitted-first", review_id=2, sha="1" * 40,
+                   submitted="2026-11-25T01:00:00Z"),
+        ])
+        required = f"verdict 1 (SHIP submitted-last) pinned to {'0' * 40}"
+        result = self.run_check(f"subject\n\n{required}\n")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_paginated_review_pages_are_flattened(self):
+        self.env["FAKE_REVIEWS"] = json.dumps([[review("no verdict", review_id=1)],
+                                               [review("VERDICT: SHIP page-two", review_id=2,
+                                                       sha="1" * 40)]])
+        required = f"verdict 2 (SHIP page-two) pinned to {'1' * 40}"
         result = self.run_check(f"subject\n\n{required}\n")
         self.assertEqual(result.returncode, 0, result.stderr)
 

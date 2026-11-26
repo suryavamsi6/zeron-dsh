@@ -14,14 +14,16 @@ import re
 import subprocess
 import sys
 
-VERDICT = re.compile(r"^VERDICT:\s+SHIP\s+(?P<nonce>\S+)\s*$", re.MULTILINE)
+VERDICT = re.compile(r"^VERDICT:\s+SHIP\s+(?P<nonce>\S+)\s*$")
 
 
 def verdict_line(reviews):
     """The canonical line required from the newest review carrying a verdict."""
     ships = []
     for review in reviews:
-        match = VERDICT.search(review.get("body") or "")
+        body = review.get("body") or ""
+        first = next((line.rstrip() for line in body.splitlines() if line.strip()), "")
+        match = VERDICT.fullmatch(first)
         if not match:
             continue
         try:
@@ -31,10 +33,12 @@ def verdict_line(reviews):
         sha = review.get("commit_id") or ""
         if not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
             continue
-        ships.append((review_id, match.group("nonce"), sha.lower()))
+        # Review ids are minted when a draft is created; submission order is
+        # the approval order. ISO timestamps sort chronologically.
+        ships.append((review.get("submitted_at") or "", review_id, match.group("nonce"), sha.lower()))
     if not ships:
         return None
-    review_id, nonce, sha = max(ships)
+    _, review_id, nonce, sha = max(ships)
     return f"verdict {review_id} (SHIP {nonce}) pinned to {sha}"
 
 
@@ -43,14 +47,27 @@ def missing_line(message, line):
     return line not in message.splitlines()
 
 
+def review_pages(payload):
+    """`gh api --paginate --slurp` wraps each page in its own array."""
+    if all(isinstance(page, list) for page in payload):
+        return [review for page in payload for review in page]
+    return payload
+
+
 def gh_reviews(repo, pr):
     out = subprocess.run(
-        ["gh", "api", f"repos/{repo}/pulls/{pr}/reviews?per_page=100"],
+        [
+            "gh",
+            "api",
+            f"repos/{repo}/pulls/{pr}/reviews?per_page=100",
+            "--paginate",
+            "--slurp",
+        ],
         check=True,
         capture_output=True,
         text=True,
     )
-    return json.loads(out.stdout)
+    return review_pages(json.loads(out.stdout))
 
 
 def main(argv):
