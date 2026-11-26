@@ -42,6 +42,36 @@ library (`libstdc++.so` and `libstdc++.so.6`, in both `lib/` and `usr/lib/`),
 because `-lstdc++` resolves `.so` while the loader resolves `.so.6`, and a
 half-fixed sysroot passes or fails depending on `-L` order.
 
+Once it links, the render path's proof is a picture, and there is one you
+can take with no window at all: `audit_shots` (`src/audit_shots.rs`), a
+test that mounts a screen headless and has zgx's own GPU renderer draw it
+into a texture, read back as a PNG. It is ignored in ordinary runs; ask for
+it by name:
+
+```sh
+AUDIT_OUT=shots AUDIT_SHOTS=shell \
+  cargo test --bin zeron-zgx audit_shots -- --ignored --nocapture
+```
+
+A machine with no GPU still renders: Vulkan's software implementation,
+Mesa's lavapipe (`mesa-vulkan-drivers` on Debian and Ubuntu), is a device
+like any other, and on a host with no real one it is what the loader finds.
+Where the loader would pick wrong — or the driver is installed outside its
+search path — point it at lavapipe's ICD manifest explicitly:
+`VK_DRIVER_FILES` (the current name; `VK_ICD_FILENAMES` on loaders before
+1.3.234) set to the manifest's full path, `lvp_icd.x86_64.json` under the
+distribution's Vulkan ICD directory (`/usr/share/vulkan/icd.d` on Debian
+and Ubuntu). The ICD is the same class of local build aid as the shim
+above: host-only, not in this repository, not used by CI.
+
+The test prints each file it writes (`audit_shots: shots/shell.png`) and
+passes in a few seconds. A good `shell` shot on this host is a PNG of
+2480x1640, bit depth 8, colortype 6 (RGBA) — the points of the shell's
+1240x820 window at `AUDIT_SCALE`'s two pixels each. Black is not a good
+shot: it means the renderer never ran, and the variable or the ICD is the
+first place to look. The shot lists, cropping and the live-MCP variant are
+documented at the top of `src/audit_shots.rs`.
+
 On macOS you also need Zig 0.16 (`brew install zig@0.16`): Ghostty draws the
 panel's terminals there (zgx-desktop's `ghostty` feature), and zgx builds it
 from source. The first build of it takes about six minutes, once; it's then
