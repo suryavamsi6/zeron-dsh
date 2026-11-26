@@ -798,69 +798,70 @@ pub fn refresh_digest(
 ) -> Result<(), String> {
     let _serialization = REFRESH_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
     let path = drive.join("DIGEST.md");
-    let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    // The cutoff is the engine-owned sidecar first: the model rewrites
-    // DIGEST.md whole, and a write that drops the freshness comment must
-    // not resurrect every report as new. The comment is the fallback for
-    // a drive whose state directory is gone.
-    let since = std::fs::read_to_string(drive.join("state").join(CUTOFF_FILE))
-        .ok()
-        .and_then(|text| {
-            DateTime::parse_from_rfc3339(text.trim())
-                .ok()
-                .map(|parsed| parsed.with_timezone(&Utc))
-        })
-        .or_else(|| previous_refresh(&existing));
-    let mut new_items: Vec<String> = Vec::new();
-    let mut in_progress: Vec<String> = Vec::new();
-    let mut stalls: Vec<String> = Vec::new();
-    for member in crew.iter().filter(|member| member.live) {
-        let report = report_fact(drive, &member.chat_id);
-        if let Some(fact) = report.as_ref()
-            && since.is_none_or(|cutoff| fact.at > cutoff)
-        {
-            new_items.push(digest_bullet(member, report.as_ref()));
-        }
-        match report.as_ref().map(|fact| fact.word.as_str()) {
-            Some("error") | Some("aborted") => stalls.push(digest_bullet(member, report.as_ref())),
-            _ => in_progress.push(digest_bullet(member, report.as_ref())),
-        }
-    }
-    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut out = needs_you_section(&existing);
-    out.push_str("\n\n## New\n");
-    for line in &new_items {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\n## In progress\n");
-    for line in &in_progress {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str("\n## Stalls\n");
-    for line in &stalls {
-        out.push_str(line);
-        out.push('\n');
-    }
-    out.push_str(&format!("\n{REFRESHED}{stamp} -->\n"));
-    let mut temp = tempfile::NamedTempFile::new_in(drive)
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.write_all(out.as_bytes())
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    temp.as_file()
-        .sync_all()
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
     // On Windows the rename cannot land while any reader holds DIGEST.md
     // open (no delete sharing), so a polling reader — the UI, an editor —
     // would otherwise fail the turn-end write outright. The collision is
-    // momentary: retry briefly before giving up.
-    let mut temp = Some(temp);
+    // momentary: retry briefly before giving up. Every attempt rebuilds
+    // the digest from a fresh read: a captain_drive_write landing during
+    // the backoff carries a newer `## Needs you`, and persisting a digest
+    // built from the stale read would silently revert it.
     let mut attempt = 0;
-    loop {
-        let file = temp.take().expect("the temp file is consumed once");
-        match file.persist(&path) {
-            Ok(_) => break,
+    let stamp = loop {
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        // The cutoff is the engine-owned sidecar first: the model rewrites
+        // DIGEST.md whole, and a write that drops the freshness comment must
+        // not resurrect every report as new. The comment is the fallback for
+        // a drive whose state directory is gone.
+        let since = std::fs::read_to_string(drive.join("state").join(CUTOFF_FILE))
+            .ok()
+            .and_then(|text| {
+                DateTime::parse_from_rfc3339(text.trim())
+                    .ok()
+                    .map(|parsed| parsed.with_timezone(&Utc))
+            })
+            .or_else(|| previous_refresh(&existing));
+        let mut new_items: Vec<String> = Vec::new();
+        let mut in_progress: Vec<String> = Vec::new();
+        let mut stalls: Vec<String> = Vec::new();
+        for member in crew.iter().filter(|member| member.live) {
+            let report = report_fact(drive, &member.chat_id);
+            if let Some(fact) = report.as_ref()
+                && since.is_none_or(|cutoff| fact.at > cutoff)
+            {
+                new_items.push(digest_bullet(member, report.as_ref()));
+            }
+            match report.as_ref().map(|fact| fact.word.as_str()) {
+                Some("error") | Some("aborted") => stalls.push(digest_bullet(member, report.as_ref())),
+                _ => in_progress.push(digest_bullet(member, report.as_ref())),
+            }
+        }
+        let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut out = needs_you_section(&existing);
+        out.push_str("\n\n## New\n");
+        for line in &new_items {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("\n## In progress\n");
+        for line in &in_progress {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str("\n## Stalls\n");
+        for line in &stalls {
+            out.push_str(line);
+            out.push('\n');
+        }
+        out.push_str(&format!("\n{REFRESHED}{stamp} -->\n"));
+        let mut temp = tempfile::NamedTempFile::new_in(drive)
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        temp.write_all(out.as_bytes())
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        temp.as_file()
+            .sync_all()
+            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        match temp.persist(&path) {
+            Ok(_) => break stamp,
             Err(error) => {
                 attempt += 1;
                 if attempt >= 20 {
@@ -870,11 +871,10 @@ pub fn refresh_digest(
                         error.error
                     ));
                 }
-                temp = Some(error.file);
                 std::thread::sleep(std::time::Duration::from_millis(10 * attempt));
             }
         }
-    }
+    };
     // The sidecar follows the digest, never leads it: a crash between the
     // two re-lists a report as new — noise — rather than losing it from
     // New before it was ever listed. Best effort: a failed sidecar write
