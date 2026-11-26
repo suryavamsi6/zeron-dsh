@@ -835,10 +835,8 @@ local function devin_row(remote: () -> boolean): Node
 			end
 			busy:set(true)
 			agents.set_enabled("devin", true)
-			ui.sleep(300):after(function()
-				busy:set(false)
-				agents.load()
-			end)
+			busy:set(false)
+			agents.load()
 		end
 		return ds.Settings.Row {
 			compact = true,
