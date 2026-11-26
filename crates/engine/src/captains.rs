@@ -2516,6 +2516,10 @@ impl MergeRunner for ShellMergeRunner {
             std::fs::remove_dir_all(&worktree)
                 .map_err(|error| format!("could not clear the merge worktree: {error}"))?;
         }
+        // A crash can leave the checkout missing while `.git/worktrees` still
+        // registers it. Prune before recreating the path; waiting until after
+        // the gate makes crash recovery fail at `worktree add` forever.
+        Self::git(repo, &["worktree".into(), "prune".into()])?;
         let worktree_text = worktree.to_string_lossy().into_owned();
         Self::git(
             repo,
