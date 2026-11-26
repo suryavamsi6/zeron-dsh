@@ -74,7 +74,7 @@ jobs:
           set -euo pipefail
           exec > >(tee -a "$RUNNER_TEMP/first-red.log") 2>&1
           echo 'first-red-step: The Captains plugin unit suite'
-          for file in prompts.test.mjs tools.test.mjs crew.test.mjs; do
+          for file in prompts.test.mjs tools.test.mjs crew.test.mjs config.test.mjs; do
             if ! test -f "plugins/dsh-captains/test/$file"; then
               echo "missing plugin test file: $file" >&2
               exit 1
