@@ -1184,6 +1184,9 @@ test('crew owns globs gate workspace edits before dispatch', () => {
   }
   const indentedPatch = '*** Begin Patch\n  *** Update File: src/owned.js  \n@@\n*** End Patch\n';
   assert.equal(ownsDenial(exec('apply_patch', { input: indentedPatch }), captains), undefined);
+  const quotedHeaderPatch = '*** Begin Patch\n*** Update File: src/owned.js\n@@\n *** Update File: crates/other.rs\n*** End Patch\n';
+  assert.equal(ownsDenial(exec('apply_patch', { input: quotedHeaderPatch }), captains), undefined,
+    'a header quoted as leading-space patch context is not a target');
 });
 
 test('crew owns enforcement rejects out-of-scope writes before disk and allows scoped writes', { timeout: 300000 }, async t => {

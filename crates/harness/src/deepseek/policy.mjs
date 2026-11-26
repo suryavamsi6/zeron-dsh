@@ -53,10 +53,29 @@ function globRegex(glob) {
 function patchPaths(input) {
   if (typeof input !== 'string') return [];
   const paths = [];
-  for (const line of input.split('\n')) {
-    const file = line.match(/^\s*\*\*\* (?:Add|Update|Delete) File: (.+?)\s*$/)?.[1]
-      ?? line.match(/^\s*\*\*\* Move to: (.+?)\s*$/)?.[1];
-    if (file) paths.push(file.trim());
+  let operation;
+  let hunkStarted = false;
+  const trimEnd = value => value.replace(/\p{White_Space}+$/u, '');
+  const trim = value => value.replace(/^\p{White_Space}+|\p{White_Space}+$/gu, '');
+  for (const line of trim(input).split(/\r?\n/u)) {
+    // dsh-fs-patch trims both ends outside an update, but only the end inside
+    // one: a leading space is what makes a quoted header ordinary context.
+    const header = operation === 'update' ? trimEnd(line) : trim(line);
+    const target = header.startsWith('*** Add File: ') || header.startsWith('*** Update File: ')
+      || header.startsWith('*** Delete File: ');
+    if (target) {
+      const path = header.slice(header.indexOf(': ') + 2);
+      paths.push(path);
+      operation = header.startsWith('*** Add File: ') ? 'add'
+        : header.startsWith('*** Delete File: ') ? 'delete' : 'update';
+      hunkStarted = false;
+      continue;
+    }
+    if (operation === 'update' && !hunkStarted && header.startsWith('*** Move to: ')) {
+      paths.push(header.slice('*** Move to: '.length));
+      continue;
+    }
+    if (operation === 'update' && (header === '@@' || header.startsWith('@@ '))) hunkStarted = true;
   }
   return paths;
 }
@@ -107,7 +126,10 @@ export function apply(ctx, config) {
   const approved = new WeakSet();
   ctx.on('tools/pre-execute', async (exec, next) => {
     const decision = await next();
-    if (decision.kind !== 'allow' || !requiresApproval(config.access, exec.name)) return decision;
+    if (decision.kind !== 'allow') return decision;
+    const outside = ownsDenial(exec, config.captains);
+    if (outside !== undefined) return { kind: 'deny', reason: outside };
+    if (!requiresApproval(config.access, exec.name)) return decision;
     if (exec.signal.aborted) return { kind: 'cancel' };
     if (!exec.agent) return { kind: 'deny', reason: 'No agent owns this approval' };
     const outcome = await ctx.approval.request({
