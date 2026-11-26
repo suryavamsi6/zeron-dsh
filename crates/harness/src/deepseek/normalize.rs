@@ -131,12 +131,17 @@ impl Normalizer {
                         usage["inputTokens"].as_u64(),
                         usage["outputTokens"].as_u64(),
                     ) {
+                        let cached = usage["cacheReadTokens"]
+                            .as_u64()
+                            .unwrap_or(0)
+                            .saturating_add(usage["cacheWriteTokens"].as_u64().unwrap_or(0));
                         let input = input
                             .saturating_add(usage["cacheReadTokens"].as_u64().unwrap_or(0))
                             .saturating_add(usage["cacheWriteTokens"].as_u64().unwrap_or(0));
                         result.push(AgentEvent::Usage {
                             input_tokens: input,
                             output_tokens: output,
+                            cached_input_tokens: (cached > 0).then_some(cached),
                         });
                         result.push(AgentEvent::ContextUsage {
                             tokens: Some(input),

@@ -2095,6 +2095,65 @@ impl CaptainsRpc<'_> {
     }
 }
 
+// ── SUR-210: the per-turn cost scorecard ─────────────────────────────
+
+pub const SCORECARD_FILE: &str = "scorecard.jsonl";
+
+/// One finalized Helm or crew turn, one line of `<drive>/state/scorecard.jsonl`.
+/// `cost_usd` is null until a rate card exists — the wire carries tokens, not
+/// prices, and an invented price is worse than none.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ScorecardEntry {
+    #[serde(rename = "chatId")]
+    pub chat_id: String,
+    pub role: String,
+    #[serde(rename = "turnId")]
+    pub turn_id: String,
+    pub tokens_in: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_cached: Option<u64>,
+    pub tokens_out: u64,
+    pub cost_usd: Option<f64>,
+    pub duration_s: u64,
+    pub outcome: String,
+}
+
+/// Captain and crew turns of one roster share the Captain's drive, and their
+/// finalizations run on separate blocking threads: the append is serialized
+/// so two turns can never interleave a line.
+static SCORECARD_LOCK: Mutex<()> = Mutex::new(());
+
+/// Append `entry` to `<drive>/state/scorecard.jsonl` — or don't: one row per
+/// `(chatId, turnId)`, so a duplicate finalization of the same turn is a
+/// no-op (`Ok(false)`). Existing malformed lines are kept as they are; they
+/// are evidence, not the writer's business.
+pub fn append_scorecard_entry(drive: &Path, entry: &ScorecardEntry) -> Result<bool, String> {
+    let _serialization = SCORECARD_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+    let state = drive.join("state");
+    std::fs::create_dir_all(&state).map_err(|e| format!("scorecard state dir: {e}"))?;
+    let path = state.join(SCORECARD_FILE);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        for line in existing.lines() {
+            if let Ok(row) = serde_json::from_str::<ScorecardEntry>(line)
+                && row.chat_id == entry.chat_id
+                && row.turn_id == entry.turn_id
+            {
+                return Ok(false);
+            }
+        }
+    }
+    let mut line = serde_json::to_string(entry).map_err(|e| format!("scorecard encode: {e}"))?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| format!("scorecard open: {e}"))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| format!("scorecard write: {e}"))?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod test_seam {
     //! A latch the racing case installs and releases itself. `arrive()` parks
