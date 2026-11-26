@@ -2401,6 +2401,7 @@ pub(crate) trait MergeRunner: Send + Sync {
     fn fetch(&self, repo: &Path, branch: &str) -> Result<(), String>;
     fn target_sha(&self, repo: &Path) -> Result<String, String>;
     fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String>;
+    fn pull_request_state(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
     fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
@@ -2477,6 +2478,22 @@ impl MergeRunner for ShellMergeRunner {
         )
     }
 
+    fn pull_request_state(&self, repo: &Path, pr: u64) -> Result<String, String> {
+        Self::command(
+            repo,
+            "gh",
+            &[
+                "pr".into(),
+                "view".into(),
+                pr.to_string(),
+                "--json".into(),
+                "state".into(),
+                "--jq".into(),
+                ".state".into(),
+            ],
+        )
+    }
+
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String> {
         let range = format!("{base}...{head}");
         Self::git(repo, &["diff".into(), "--name-only".into(), range])
@@ -2545,7 +2562,7 @@ impl MergeRunner for ShellMergeRunner {
                 "git",
                 &[
                     "push".into(),
-                    format!("--force-with-lease=refs/heads/{branch}:{head}"),
+                    "--force-with-lease".into(),
                     "origin".into(),
                     format!("HEAD:refs/heads/{branch}"),
                 ],
@@ -2694,6 +2711,21 @@ fn perform_merge(
     };
     let repo = Path::new(&receipt.repo);
     let result = (|| {
+        match runner.pull_request_state(repo, receipt.pr)?.as_str() {
+            // A crash can happen after `gh pr merge` has already landed the
+            // PR. Recover that attempt as success instead of failing on the
+            // deleted branch or replaying the whole gate.
+            "MERGED" => {
+                return Ok(MergeOutcome {
+                    crew_id: receipt.crew_id.clone(),
+                    status: MergeOutcomeStatus::Landed,
+                    reason: "pull request was already merged".into(),
+                    landed_head: None,
+                });
+            }
+            "CLOSED" => return Err("pull request is closed without merging".into()),
+            _ => {}
+        }
         runner.fetch(repo, &receipt.branch)?;
         let base = runner.pull_request_base(repo, receipt.pr)?;
         if base != "main" {
@@ -5885,6 +5917,7 @@ mod tests {
     struct FakeMergeRunner {
         target: Mutex<String>,
         base: Mutex<String>,
+        state: Mutex<String>,
         files: Vec<String>,
         on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
         active: std::sync::atomic::AtomicUsize,
@@ -5900,6 +5933,7 @@ mod tests {
             Self {
                 target: Mutex::new("a".repeat(40)),
                 base: Mutex::new("main".into()),
+                state: Mutex::new("OPEN".into()),
                 files: files.iter().map(|file| file.to_string()).collect(),
                 on_rebase: Mutex::new(None),
                 active: std::sync::atomic::AtomicUsize::new(0),
@@ -5923,6 +5957,10 @@ mod tests {
 
         fn pull_request_base(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
             Ok(self.base.lock().unwrap().clone())
+        }
+
+        fn pull_request_state(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
+            Ok(self.state.lock().unwrap().clone())
         }
 
         fn changed_files(&self, _repo: &Path, _base: &str, _head: &str) -> Result<Vec<String>, String> {
@@ -6171,6 +6209,26 @@ mod tests {
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
         assert!(outcomes[0].reason.contains("removed"), "{}", outcomes[0].reason);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// Recovery is idempotent across the most dangerous crash boundary: the
+    /// merge command landed, then the engine died before writing the result.
+    /// The replayed receipt sees the merged PR and settles successfully
+    /// without requiring the deleted crew branch or rerunning the gate.
+    #[test]
+    fn helm_merge_queue_recovers_an_already_merged_pull_request() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.state.lock().unwrap() = "MERGED".into();
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
+        assert_eq!(outcomes[0].landed_head, None);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
 
