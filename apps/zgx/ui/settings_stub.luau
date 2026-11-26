@@ -35,6 +35,12 @@ local step_up_word = ui.state("settings_stub_step_up_word", "ok")
 -- The account's signing keys: "some" (this computer's, one new on another
 -- device, one revoked; listed out of order) or "none".
 local keys_mode = ui.state("settings_stub_keys", "some")
+-- What `DshMutateSettings` answers: nil (the write lands), "pending"
+-- (never settles), another string (refused that way — a validation rule's
+-- own words), or a table (its answer). `DshSetCredential` keeps answering
+-- on its own, so a mutation-only refusal reaches the save path's second
+-- branch, which the shared `refuse` cannot (it fails the credential first).
+local dsh_mutate = ui.state("settings_stub_dsh_mutate", nil :: any)
 -- What `DshPlugins` answers: nil, the two bundles below, or what a test
 -- sets (`{ bundles = …, pnpm = … }`).
 local dsh_plugins_answer = ui.state("settings_stub_dsh_plugins", nil :: any)
@@ -375,6 +381,15 @@ local answers: { [string]: (arg: any) -> any } = {
 		return settled(nil)
 	end,
 	["DshMutateSettings"] = function(arg: any)
+		local over = dsh_mutate:peek()
+		if over == "pending" then
+			-- (Still on its way: never settles.)
+			return { done = false, after = function() end }
+		elseif type(over) == "table" then
+			return settled(over)
+		elseif type(over) == "string" then
+			return settled(nil, over)
+		end
 		if refuse:peek() then
 			return failed("refused")
 		end
