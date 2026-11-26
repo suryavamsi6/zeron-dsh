@@ -489,6 +489,8 @@ fn cloud_task(row: &crate::cloud_schedules::CloudScheduleRow) -> Task {
         next_at: row.next_fire_at,
         last_run_at: row.last_fired_at,
         updated_at: row.updated_at,
+        in_flight: None,
+        origin: Some("edge".into()),
     }
 }
 
@@ -1339,6 +1341,7 @@ mod tests {
         assert!(task.active);
         assert_eq!(task.next_at, Some(1767225600000));
         assert_eq!(task.updated_at, 1767000000000);
+        assert_eq!(task.origin.as_deref(), Some("edge"), "the UI's cloud-row discriminator");
         // …and it renders through the same model shape as a local task.
         let modeled = model_task(&task);
         assert_eq!(modeled["id"], "edge-1");
