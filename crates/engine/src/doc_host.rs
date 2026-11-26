@@ -4671,9 +4671,50 @@ impl DocHost {
         transfers: Vec<crate::uploads::AttachmentTransfer>,
         config: Option<zeron_proto::ChatConfig>,
     ) -> Result<String, EngineError> {
+        self.queue_message_with_config_and_id(
+            chat_id,
+            text,
+            attachments,
+            hold_for_turn_end,
+            transfers,
+            config,
+            new_id(),
+        )
+    }
+
+    /// Queue with a caller-chosen stable id. Cloud wake-ups use their durable
+    /// edge fire id here: promotion keeps the queue row id as the user message
+    /// id, which makes a crash/replay before ack detectable after dispatch too.
+    pub(crate) fn queue_message_with_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+        id: &str,
+    ) -> Result<String, EngineError> {
+        self.queue_message_with_config_and_id(
+            chat_id,
+            text,
+            Vec::new(),
+            false,
+            Vec::new(),
+            None,
+            id.to_string(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_message_with_config_and_id(
+        &self,
+        chat_id: &str,
+        text: &str,
+        attachments: Vec<String>,
+        hold_for_turn_end: bool,
+        transfers: Vec<crate::uploads::AttachmentTransfer>,
+        config: Option<zeron_proto::ChatConfig>,
+        id: String,
+    ) -> Result<String, EngineError> {
         self.ensure_sendable(chat_id)?;
         let handle = self.open(chat_id)?;
-        let id = new_id();
         let item = QueuedMessage {
             id: id.clone(),
             text: queued_row_text(text, !attachments.is_empty()).to_string(),
@@ -4696,6 +4737,25 @@ impl DocHost {
         self.unarchive_on_send(chat_id);
         self.nudge_remote_host(chat_id);
         Ok(id)
+    }
+
+    /// Flush the doc write a caller is about to acknowledge externally. The
+    /// persister ordinarily debounces saves; an acknowledgement must mean the
+    /// row survives this process, so the caller needs this synchronous point.
+    pub(crate) fn flush_write(&self, chat_id: &str) -> Result<(), EngineError> {
+        let handle = self.open(chat_id)?;
+        let Some(persistence) = handle.persistence.as_ref() else {
+            self.save_snapshot(&handle);
+            return Ok(());
+        };
+        let generation = persistence.generation();
+        persistence.flush_sync();
+        if persistence.saved_generation() < generation {
+            return Err(EngineError::Other(format!(
+                "chat {chat_id}: the queued write is not durable"
+            )));
+        }
+        Ok(())
     }
 
     /// Whether queued row `row` still owes `chat_id` its turn: waiting in the

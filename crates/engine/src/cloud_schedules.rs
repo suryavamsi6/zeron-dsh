@@ -243,23 +243,34 @@ pub async fn drain_wakeups(
     let wakeups = edge.pull_wakeups().await?;
     let mut landed = 0;
     for wakeup in wakeups {
-        // Idempotency: a crash after the doc write but before the ack is the
-        // one replay case, and the edge's retries re-send the same row. An
-        // identical prompt already waiting in the queue makes this one a
-        // no-op rather than a duplicate.
+        // Idempotency: the fire id is the row's durable identity. It becomes
+        // the queued row id, and promotion keeps that id on the user message,
+        // so both sides of a crash-before-ack replay are detectable. Prompt
+        // text is deliberately not a key: two schedules may share one.
         let already = doc_host
             .open(&wakeup.chat_id)
             .and_then(|handle| {
-                handle
+                let queued = handle
                     .doc()
                     .read_queue()
-                    .map_err(|err| EngineError::Other(err.to_string()))
+                    .map_err(|err| EngineError::Other(err.to_string()))?
+                    .iter()
+                    .any(|row| row.id == wakeup.fire_id);
+                let dispatched = handle
+                    .doc()
+                    .read_entries()
+                    .map_err(|err| EngineError::Other(err.to_string()))?
+                    .iter()
+                    .any(|row| row.id == wakeup.fire_id);
+                Ok::<bool, EngineError>(queued || dispatched)
             })
-            .map(|queue| queue.iter().any(|row| row.text == wakeup.prompt))
             .unwrap_or(false);
         if !already {
-            doc_host.queue_message(&wakeup.chat_id, &wakeup.prompt, Vec::new())?;
+            doc_host.queue_message_with_id(&wakeup.chat_id, &wakeup.prompt, &wakeup.fire_id)?;
         }
+        // Ack only after the queue write is in the store, not merely in the
+        // in-memory doc whose debounced snapshot may not have run yet.
+        doc_host.flush_write(&wakeup.chat_id)?;
         edge.ack_wakeup(&wakeup.fire_id).await?;
         landed += 1;
     }
