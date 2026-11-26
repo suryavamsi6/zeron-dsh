@@ -3234,6 +3234,69 @@ impl Inner {
         }
     }
 
+    /// SUR-210: one scorecard line per finalized Captain or crew turn, in the
+    /// Captain's drive. Same gating as [`Self::turn_end_writes`] — the
+    /// dispatch-time stamp, never the roster — but no claim of its own: the
+    /// append itself dedupes `(chatId, turnId)`, so a duplicate finalization
+    /// is a no-op read rather than a lost retry. Tokens are the turn's
+    /// summed `Usage` wire events; `cost_usd` stays null until a rate card
+    /// exists. The write runs off the event loop; its outcome is traced,
+    /// never propagated.
+    #[allow(clippy::too_many_arguments)]
+    fn scorecard_write(
+        &self,
+        chat_id: &str,
+        stamp: Option<&str>,
+        status: DoneStatus,
+        turn_id: &str,
+        tokens_in: u64,
+        tokens_cached: Option<u64>,
+        tokens_out: u64,
+        duration_s: u64,
+    ) {
+        let Some(stamp) = stamp else {
+            return;
+        };
+        let stamp: serde_json::Value = match serde_json::from_str(stamp) {
+            Ok(stamp) => stamp,
+            Err(error) => {
+                tracing::warn!(chat = %chat_id, error = %error, "captains stamp parse failed");
+                return;
+            }
+        };
+        let role = stamp["role"].as_str().unwrap_or_default();
+        if role != "captain" && role != "crew" {
+            return;
+        }
+        let Some(drive) = stamp["driveRoot"]
+            .as_str()
+            .filter(|drive| !drive.is_empty())
+            .map(std::path::PathBuf::from)
+        else {
+            return;
+        };
+        let outcome = serde_json::to_value(status)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .unwrap_or_else(|| "unknown".into());
+        let entry = crate::captains::ScorecardEntry {
+            chat_id: chat_id.to_owned(),
+            role: role.to_owned(),
+            turn_id: turn_id.to_owned(),
+            tokens_in,
+            tokens_cached,
+            tokens_out,
+            cost_usd: None,
+            duration_s,
+            outcome,
+        };
+        tokio::task::spawn_blocking(move || {
+            if let Err(error) = crate::captains::append_scorecard_entry(&drive, &entry) {
+                tracing::warn!(chat = %entry.chat_id, error = %error, "scorecard append failed");
+            }
+        });
+    }
+
     /// The crew-turn wake (SUR-87): after the report write, queue the report
     /// line to the crew chat's Captain through the auto path — idle starts a
     /// turn, busy steers at the boundary. Runs inside the report's
@@ -5860,6 +5923,14 @@ async fn drive_run(
 
     let mut final_completed_turn = None;
     let mut final_outcome = None;
+    // SUR-210 scorecard accumulation: usage across the turn's assistant
+    // messages, summed; reset when the turn's Done finalizes. Cache reads are
+    // already inside `in` (the wire folds them); `cached` is the priced
+    // share, `known` once any message broke it out.
+    let mut turn_tokens_in = 0u64;
+    let mut turn_tokens_out = 0u64;
+    let mut turn_tokens_cached = 0u64;
+    let mut turn_cache_known = false;
     let final_status = loop {
         let event: AgentEvent = if let Some(event) = prepared_events.pop_front() {
             event
@@ -6236,6 +6307,36 @@ async fn drive_run(
         };
         // Scheduled wake-ups and session crons live in the agent's process.
         self_scheduled.observe(&event, tokio::time::Instant::now());
+
+        // Scorecard accumulation, ahead of every route the event can take
+        // below: a turn's cost is its own usage AND its subagents' — the
+        // tagged wrapper would otherwise carry a child agent's spend past the
+        // meter, and the subagent routing below `continue`s before any later
+        // point in the loop (SUR-210 review).
+        let usage = match &event {
+            AgentEvent::Usage {
+                input_tokens,
+                output_tokens,
+                cached_input_tokens,
+            } => Some((*input_tokens, *output_tokens, *cached_input_tokens)),
+            AgentEvent::Subagent { event: nested, .. } => match nested.as_ref() {
+                AgentEvent::Usage {
+                    input_tokens,
+                    output_tokens,
+                    cached_input_tokens,
+                } => Some((*input_tokens, *output_tokens, *cached_input_tokens)),
+                _ => None,
+            },
+            _ => None,
+        };
+        if let Some((input, output, cached)) = usage {
+            turn_tokens_in = turn_tokens_in.saturating_add(input);
+            turn_tokens_out = turn_tokens_out.saturating_add(output);
+            if let Some(cached) = cached {
+                turn_cache_known = true;
+                turn_tokens_cached = turn_tokens_cached.saturating_add(cached);
+            }
+        }
 
         // ── subagent routing ───────────────────────────────────────────
         // Tagged events NEVER fold into the parent transcript: they stream
@@ -6858,6 +6959,20 @@ async fn drive_run(
                 *status,
                 Some(TurnText { id: turn_id.as_str(), text: last_text }),
             );
+            inner.scorecard_write(
+                &chat_id,
+                stamp.as_deref(),
+                *status,
+                &turn_id,
+                turn_tokens_in,
+                turn_cache_known.then_some(turn_tokens_cached),
+                turn_tokens_out,
+                now_ms().saturating_sub(segment_started).max(0) as u64 / 1000,
+            );
+            turn_tokens_in = 0;
+            turn_tokens_out = 0;
+            turn_tokens_cached = 0;
+            turn_cache_known = false;
             // A question still pending at turn end can never be legitimately
             // answered (its turn is over): drain the resolvers NOW, or a late
             // `respond_input` finds one, emits InputResolved, and un-parks
@@ -9007,6 +9122,208 @@ mod tests {
         assert!(
             !drive.join("state").join(crate::needs_you::FILE).exists(),
             "a Done with no turn behind it records nothing"
+        );
+    }
+
+    // ── SUR-210: the per-turn scorecard ──────────────────────────────
+
+    /// A Captain chat's engine, its run driven by hand through `feed`.
+    /// Returns the sessions engine and the Captain's drive.
+    fn scorecard_engine(
+        dir: &std::path::Path,
+        registry_json: &str,
+        rx: mpsc::UnboundedReceiver<AgentEvent>,
+    ) -> (SessionsEngine, std::path::PathBuf) {
+        use super::*;
+        let registry = HarnessRegistry::new();
+        registry.register(Arc::new(FeedHarness {
+            feed: Mutex::new(Some(rx)),
+        }));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).expect("data dir");
+        std::fs::write(data.join("captains.json"), registry_json).expect("registry");
+        let home = dir.join("home");
+        let sessions = SessionsEngine::new(
+            "host".into(),
+            Arc::new(RunJournal::open(dir.join("journals")).expect("journal")),
+            Arc::new(registry),
+        );
+        sessions.use_data_dir(data);
+        sessions.use_captains_home(home.clone());
+        let store = Arc::new(zeron_sync::DocsStore::open(dir.join("docs")).expect("store"));
+        sessions.set_doc_host(DocHost::new(
+            store,
+            crate::doc_host::DocHostConfig {
+                device_id: "host".into(),
+                default_harness: HarnessId::DeepSeek,
+                edge: None,
+            },
+        ));
+        let drive = crate::captains::drive_dir(&home, "cap-a");
+        (sessions, drive)
+    }
+
+    fn usage(input: u64, output: u64, cached: Option<u64>) -> AgentEvent {
+        AgentEvent::Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cached_input_tokens: cached,
+        }
+    }
+
+    async fn scorecard_rows(drive: &std::path::Path) -> Vec<crate::captains::ScorecardEntry> {
+        let path = drive.join("state").join(crate::captains::SCORECARD_FILE);
+        for _ in 0..200 {
+            if let Ok(raw) = std::fs::read_to_string(&path) {
+                return raw
+                    .lines()
+                    .filter_map(|line| serde_json::from_str(line).ok())
+                    .collect();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("no scorecard written at {}", path.display());
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_a_captain_turn_appends_one_row_with_the_turns_totals() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (feed, rx) = mpsc::unbounded_channel();
+        let (sessions, drive) = scorecard_engine(dir.path(), NEEDS_YOU_REGISTRY, rx);
+        sessions
+            .dispatch("cap-a", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        feed.send(started()).expect("started");
+        feed.send(usage(1000, 200, Some(300))).expect("usage 1");
+        feed.send(usage(500, 100, None)).expect("usage 2");
+        // A native subagent's spend belongs to the turn that spawned it:
+        // tagged usage must reach the meter through the routing wrapper.
+        feed.send(AgentEvent::Subagent {
+            parent_tool_use_id: "tool-1".into(),
+            event: Box::new(usage(100, 50, None)),
+        })
+        .expect("subagent usage");
+        feed.send(text("shipped")).expect("text");
+        feed.send(done(DoneStatus::Completed)).expect("done");
+        let rows = scorecard_rows(&drive).await;
+        assert_eq!(rows.len(), 1, "one row per turn: {rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.chat_id, "cap-a");
+        assert_eq!(row.role, "captain");
+        assert!(!row.turn_id.is_empty());
+        assert_eq!(row.tokens_in, 1600, "the turn's usage sums its own and its subagents' messages");
+        assert_eq!(row.tokens_cached, Some(300));
+        assert_eq!(row.tokens_out, 350);
+        assert_eq!(row.outcome, "completed");
+        assert_eq!(row.cost_usd, None, "no rate card, no invented price");
+        assert!(row.duration_s < 60, "a test turn is seconds: {row:?}");
+        sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_a_crew_turn_records_the_crew_role() {
+        use super::*;
+        let registry = r#"{"captains":[{"chatId":"cap-a","name":"Ada","createdAt":"2026-11-01T00:00:00Z","archived":false,"crew":["crew-b"]}]}"#;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (feed, rx) = mpsc::unbounded_channel();
+        let (sessions, drive) = scorecard_engine(dir.path(), registry, rx);
+        sessions
+            .dispatch("crew-b", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        feed.send(started()).expect("started");
+        feed.send(usage(42, 7, None)).expect("usage");
+        feed.send(text("crew reply")).expect("text");
+        feed.send(done(DoneStatus::Completed)).expect("done");
+        let rows = scorecard_rows(&drive).await;
+        assert_eq!(rows.len(), 1, "one row: {rows:?}");
+        assert_eq!(rows[0].chat_id, "crew-b");
+        assert_eq!(rows[0].role, "crew");
+        assert_eq!(rows[0].tokens_in, 42);
+        assert_eq!(rows[0].tokens_cached, None, "never broken out, so unknown");
+        sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_an_unstamped_chat_writes_no_row() {
+        use super::*;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (feed, rx) = mpsc::unbounded_channel();
+        let (sessions, drive) = scorecard_engine(dir.path(), NEEDS_YOU_REGISTRY, rx);
+        sessions
+            .dispatch("plain", HarnessId::DeepSeek, request(), None)
+            .await
+            .expect("the run dispatches");
+        feed.send(started()).expect("started");
+        feed.send(usage(1, 1, None)).expect("usage");
+        feed.send(done(DoneStatus::Completed)).expect("done");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !drive.join("state").join(crate::captains::SCORECARD_FILE).exists(),
+            "an ordinary chat scores nothing"
+        );
+        sessions.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_a_duplicate_finalization_is_a_no_op() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let drive = dir.path().join("drive");
+        let entry = crate::captains::ScorecardEntry {
+            chat_id: "cap-a".into(),
+            role: "captain".into(),
+            turn_id: "turn-1".into(),
+            tokens_in: 10,
+            tokens_cached: None,
+            tokens_out: 2,
+            cost_usd: None,
+            duration_s: 3,
+            outcome: "completed".into(),
+        };
+        assert!(crate::captains::append_scorecard_entry(&drive, &entry).expect("first"));
+        assert!(
+            !crate::captains::append_scorecard_entry(&drive, &entry).expect("second"),
+            "the same (chatId, turnId) never writes twice"
+        );
+        let other = crate::captains::ScorecardEntry {
+            turn_id: "turn-2".into(),
+            ..entry.clone()
+        };
+        assert!(crate::captains::append_scorecard_entry(&drive, &other).expect("other turn"));
+        let raw = std::fs::read_to_string(drive.join("state").join(crate::captains::SCORECARD_FILE))
+            .expect("read");
+        assert_eq!(raw.lines().count(), 2, "two turns, two rows: {raw}");
+    }
+
+    #[tokio::test]
+    async fn helm_scorecard_a_truncated_tail_does_not_eat_the_next_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let drive = dir.path().join("drive");
+        let state = drive.join("state");
+        std::fs::create_dir_all(&state).expect("state");
+        // A crash mid-write: the tail is a partial line with no newline.
+        std::fs::write(state.join(crate::captains::SCORECARD_FILE), "{\"chatId\":\"cap-a\",\"rol").expect("seed");
+        let entry = crate::captains::ScorecardEntry {
+            chat_id: "cap-a".into(),
+            role: "captain".into(),
+            turn_id: "turn-1".into(),
+            tokens_in: 10,
+            tokens_cached: None,
+            tokens_out: 2,
+            cost_usd: None,
+            duration_s: 3,
+            outcome: "completed".into(),
+        };
+        assert!(crate::captains::append_scorecard_entry(&drive, &entry).expect("append"));
+        let raw = std::fs::read_to_string(state.join(crate::captains::SCORECARD_FILE)).expect("read");
+        let lines: Vec<&str> = raw.lines().collect();
+        assert_eq!(lines.len(), 2, "the new row starts its own line: {raw}");
+        assert!(
+            serde_json::from_str::<crate::captains::ScorecardEntry>(lines[1]).is_ok(),
+            "the new row parses: {}",
+            lines[1]
         );
     }
 

@@ -1371,6 +1371,11 @@ pub enum AgentEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        /// The input's cached share (cache reads + writes), when the provider
+        /// breaks it out — already folded into `input_tokens`, carried
+        /// separately so a cost record can price the cache differently.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cached_input_tokens: Option<u64>,
     },
     /// The agent advertised (or changed) its slash-command set — ACP
     /// `available_commands_update`. The engine caches the latest list per
