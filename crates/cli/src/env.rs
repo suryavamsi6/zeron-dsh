@@ -30,7 +30,7 @@ pub fn workos_client_id_from_env(edge_token: &Option<String>) -> Option<String> 
     }
 }
 
-/// The engine's IPC port: `ZERON_IPC_PORT`, else 27654.
+/// The engine's IPC port: `ZERON_IPC_PORT`, else 27660.
 pub fn ipc_port_from_env() -> u16 {
     ipc_port_from(std::env::var("ZERON_IPC_PORT").ok().as_deref())
 }
@@ -41,4 +41,4 @@ pub fn ipc_port_from(value: Option<&str>) -> u16 {
 }
 
 /// The production engine's IPC port.
-pub const DEFAULT_IPC_PORT: u16 = 27654;
+pub const DEFAULT_IPC_PORT: u16 = 27660;

@@ -40,17 +40,17 @@
 ; Never change AppId: it identifies the installation across upgrades, and
 ; crates/update/src/windows.rs refreshes DisplayVersion under this key after
 ; in-app updates.
-AppId={{AD5DEC34-E254-467B-8F24-8127EBAF4DA6}
-AppName=Zeron
+AppId={{B7E4A1C2-3F5D-4A8E-9C1B-2D6E7F8A9B0C}
+AppName=Zeron DSH
 AppVersion={#AppVersion}
-AppVerName=Zeron {#AppVersion}
+AppVerName=Zeron DSH {#AppVersion}
 AppPublisher=Zeron
 AppPublisherURL=https://zeron.sh
 AppSupportURL=https://github.com/zeronsh/zeron/issues
 AppUpdatesURL=https://github.com/zeronsh/zeron/releases
 VersionInfoVersion={#FileVersion}
 PrivilegesRequired=lowest
-DefaultDirName={autopf}\Zeron
+DefaultDirName={autopf}\Zeron DSH
 DisableProgramGroupPage=yes
 DisableDirPage=auto
 DisableReadyPage=yes
@@ -61,7 +61,7 @@ OutputDir={#OutputDir}
 OutputBaseFilename=zeron-{#AppVersion}-windows-{#Arch}-setup
 SetupIconFile=zeron.ico
 UninstallDisplayIcon={app}\zeron.exe
-UninstallDisplayName=Zeron
+UninstallDisplayName=Zeron DSH
 WizardStyle=modern
 Compression=lzma2/max
 SolidCompression=yes
@@ -85,16 +85,10 @@ Source: "{#PackageDir}\beta\*"; DestDir: "{app}\beta"; Flags: ignoreversion recu
 #endif
 
 [Icons]
-Name: "{autoprograms}\Zeron"; Filename: "{app}\zeron.exe"
-Name: "{autodesktop}\Zeron"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
+Name: "{autoprograms}\Zeron DSH"; Filename: "{app}\zeron.exe"
+Name: "{autodesktop}\Zeron DSH"; Filename: "{app}\zeron.exe"; Tasks: desktopicon
 
-[Registry]
-; zeron:// conversation links — the scheme macOS registers in Info.plist and
-; Linux in zeron.desktop.
-Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: ""; ValueData: "URL:Zeron"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\zeron"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\zeron\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"",0"
-Root: HKCU; Subkey: "Software\Classes\zeron\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\zeron.exe"" ""%1"""
+; No zeron:// registration: the original Zeron keeps its links.
 
 [Run]
 Filename: "{app}\zeron.exe"; Description: "{cm:LaunchProgram,Zeron}"; Flags: nowait postinstall skipifsilent
