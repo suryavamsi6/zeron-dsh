@@ -370,10 +370,12 @@ impl ScheduleMcp {
                 if self.edge_for(&edited.target).is_some() {
                     // Retargeted onto the hosted chat: the local copy could
                     // never wake a sleeping machine, so the task moves to
-                    // the edge — create there, drop here.
+                    // the edge — upserted under its own id, so callers keep
+                    // their handle and a retried edit after a lost reply is
+                    // the same row rather than a duplicate.
                     let edge = self.edge.clone().expect("edge_for implies the client");
                     let row = edge
-                        .upsert(None, &edited.title, &edited.prompt, &edited.rrule, edited.active)
+                        .upsert(Some(id), &edited.title, &edited.prompt, &edited.rrule, edited.active)
                         .await
                         .map_err(edge_error)?;
                     schedules::call(&self.schedules, methods::SCHEDULE_DELETE, &json!({ "id": id }))
