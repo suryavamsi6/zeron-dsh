@@ -310,6 +310,9 @@ export interface CloudSchedule extends Record<string, SqlStorageValue> {
   last_fired_at: number | null;
   last_error: string | null;
   created_at: number;
+  /** User-edit revision timestamp. Runtime firing state does not touch it:
+   * `last_fired_at`/`last_error` carry that audit, and optimistic edits must
+   * not conflict merely because an occurrence fired. */
   updated_at: number;
 }
 

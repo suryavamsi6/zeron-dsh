@@ -498,7 +498,7 @@ fn store_error(error: RpcError) -> (String, String) {
 
 /// An edge row as the local `Task` shape, so rendering, sorting and
 /// `expectedUpdatedAt` reasoning share every line with local tasks.
-fn cloud_task(row: &crate::cloud_schedules::CloudScheduleRow) -> Task {
+pub(crate) fn cloud_task(row: &crate::cloud_schedules::CloudScheduleRow) -> Task {
     Task {
         id: row.id.clone(),
         title: row.title.clone(),

@@ -249,6 +249,106 @@ impl CloudClient {
         }
     }
 
+    /// `GET /cloud/{orgId}/sessions/{chatId}/schedules`, as the signed-in
+    /// user. Edge-owned schedule rows are account data, so the desktop reads
+    /// them through the same user bearer as the rest of Cloud — unlike the
+    /// machine-scoped runner client in `cloud_schedules`.
+    pub async fn list_schedules(
+        &self,
+        chat_id: &str,
+    ) -> Result<Vec<crate::cloud_schedules::CloudScheduleRow>, EngineError> {
+        require_id(chat_id, "chatId")?;
+        let Some(target) = self.target.as_deref() else {
+            return Ok(Vec::new());
+        };
+        #[derive(Deserialize)]
+        struct Listed {
+            #[serde(default)]
+            schedules: Vec<crate::cloud_schedules::CloudScheduleRow>,
+        }
+        match target
+            .call::<Listed>(
+                reqwest::Method::GET,
+                &["cloud", "sessions", chat_id, "schedules"],
+                &[],
+                None,
+                "Cloud session schedules",
+            )
+            .await
+        {
+            Ok(listed) => Ok(listed.schedules),
+            Err(Failure::Missing(..)) => Ok(Vec::new()),
+            Err(Failure::Error(error)) => Err(error),
+        }
+    }
+
+    /// `POST /cloud/{orgId}/sessions/{chatId}/schedules` as the signed-in
+    /// user. `id` absent creates, present replaces.
+    pub async fn upsert_schedule(
+        &self,
+        chat_id: &str,
+        id: Option<&str>,
+        title: &str,
+        prompt: &str,
+        rrule: &str,
+        active: bool,
+        expected_updated_at: Option<i64>,
+    ) -> Result<crate::cloud_schedules::CloudScheduleRow, EngineError> {
+        require_id(chat_id, "chatId")?;
+        if let Some(id) = id {
+            require_id(id, "id")?;
+        }
+        let mut body = serde_json::json!({
+            "title": title,
+            "prompt": prompt,
+            "rrule": rrule,
+            "active": active,
+        });
+        if let Some(id) = id {
+            body["id"] = id.into();
+        }
+        if let Some(expected) = expected_updated_at {
+            body["expectedUpdatedAt"] = expected.into();
+        }
+        #[derive(Deserialize)]
+        struct Saved {
+            schedule: crate::cloud_schedules::CloudScheduleRow,
+        }
+        self.target()?
+            .call::<Saved>(
+                reqwest::Method::POST,
+                &["cloud", "sessions", chat_id, "schedules"],
+                &[],
+                Some(body),
+                "Save the Cloud session schedule",
+            )
+            .await
+            .map(|saved| saved.schedule)
+            .map_err(Failure::into_error)
+    }
+
+    /// `DELETE /cloud/{orgId}/sessions/{chatId}/schedules/{id}` as the
+    /// signed-in user.
+    pub async fn delete_schedule(&self, chat_id: &str, id: &str) -> Result<bool, EngineError> {
+        require_id(chat_id, "chatId")?;
+        require_id(id, "id")?;
+        #[derive(Deserialize)]
+        struct Deleted {
+            deleted: bool,
+        }
+        self.target()?
+            .call::<Deleted>(
+                reqwest::Method::DELETE,
+                &["cloud", "sessions", chat_id, "schedules", id],
+                &[],
+                None,
+                "Delete the Cloud session schedule",
+            )
+            .await
+            .map(|deleted| deleted.deleted)
+            .map_err(Failure::into_error)
+    }
+
     /// `POST /cloud/{orgId}/sessions` with `{chatId, spaceId, repo, branch?,
     /// reach?}` — idempotent per chat; mints the session device and starts
     /// provisioning. No `reach`: the account's default.

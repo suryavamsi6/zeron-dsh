@@ -3763,7 +3763,8 @@ impl RpcService for EngineRpc {
             let Some(schedules) = self.schedules.clone() else {
                 return Err(RpcError::Failed(format!("{method}: no schedule service")));
             };
-            let value = crate::schedules::call(&schedules, method, &params)?;
+            let value =
+                crate::settings_schedules::call(&schedules, self.cloud(), method, &params).await?;
             return Ok(RpcReply::Value(value));
         }
         // The Captain roster is `{data_dir}/captains.json` — device-local

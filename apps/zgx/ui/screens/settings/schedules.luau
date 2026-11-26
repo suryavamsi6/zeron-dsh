@@ -46,6 +46,7 @@ type Rule = {
 	hours: { number }?,
 	minutes: { number }?,
 	count: number?,
+	limited: boolean?,
 }
 
 type Fields = {
@@ -173,7 +174,10 @@ local function parse(src: any): Rule?
 			if rule.count == nil or rule.count < 1 or rule.count % 1 ~= 0 then
 				return nil
 			end
-		elseif k ~= "UNTIL" then
+			rule.limited = true
+		elseif k == "UNTIL" then
+			rule.limited = true
+		else
 			return nil -- a part this page doesn't write: not its own rule.
 		end
 	end
@@ -318,8 +322,8 @@ local function build_rrule(f: Fields, device: number): (string?, string?)
 end
 
 -- Where a save runs the prompt, `run_in` the editor's pick. "This chat"
--- is the chat open now — a session-targeted task edited while no chat
--- is open keeps the one it names. A `new`/`new_once` target keeps the
+-- is the chat open now — one edited while no chat is open keeps the one
+-- it names. A `new`/`new_once` target keeps the
 -- chat the engine recorded for it (`session`) and the folder it works
 -- in (`cwd`, else the open chat's or project's).
 local function target_for(run_in: string, existing: any): ({ [string]: any }?, string?)
@@ -328,6 +332,11 @@ local function target_for(run_in: string, existing: any): ({ [string]: any }?, s
 		local id = if open then open.id
 			elseif existing and type(existing.target) == "table" then existing.target.session
 			else nil
+		-- Edge ownership is fixed at creation, so an edge row never retargets
+		-- to whichever chat happens to be open behind Settings.
+		if existing and existing.origin == "edge" and type(existing.target) == "table" and type(existing.target.session) == "string" then
+			id = existing.target.session
+		end
 		if type(id) ~= "string" then
 			return nil, "run_in"
 		end
@@ -576,11 +585,11 @@ function M.view(): Node
 				f = "custom"
 			elseif rule.count == 1 then
 				f = "once"
-			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil then
+			elseif rule.freq == "DAILY" and rule.interval == 1 and rule.days == nil and not rule.limited then
 				f = "daily"
-			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) then
+			elseif (rule.freq == "DAILY" or rule.freq == "WEEKLY") and rule.interval == 1 and is_weekdays(rule.days) and not rule.limited then
 				f = "weekdays"
-			elseif rule.freq == "WEEKLY" and rule.interval == 1 and (rule.days == nil or #rule.days == 1) then
+			elseif rule.freq == "WEEKLY" and rule.interval == 1 and not rule.limited and (rule.days == nil or #rule.days == 1) then
 				f = "weekly"
 			else
 				f = "custom"
@@ -674,6 +683,9 @@ function M.view(): Node
 		end
 		if task and type(task.origin) == "string" then
 			next.origin = task.origin
+		end
+		if task and type(task.updatedAt) == "number" then
+			next.updatedAt = task.updatedAt
 		end
 		busy:set(true)
 		problem:set(nil)

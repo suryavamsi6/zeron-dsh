@@ -655,8 +655,11 @@ export const handleCloudRoute = async (
       if (rest[2] === "schedules") {
         const body = await readJsonBody(request, 8192);
         if (!isObject(body)) return jsonError(400, "bad_request", "Body must be a JSON object.");
-        const { id, title, prompt, rrule, active } = body;
+        const { id, title, prompt, rrule, active, expectedUpdatedAt } = body;
         if (id !== undefined && (typeof id !== "string" || id.length > 64)) return jsonError(400, "bad_request", "Bad id.");
+        if (expectedUpdatedAt !== undefined && (typeof expectedUpdatedAt !== "number" || !Number.isInteger(expectedUpdatedAt) || expectedUpdatedAt < 0)) {
+          return jsonError(400, "bad_request", "Bad expectedUpdatedAt.");
+        }
         if (typeof title !== "string" || typeof prompt !== "string" || typeof rrule !== "string") {
           return jsonError(400, "bad_request", "Expected {title, prompt, rrule}.");
         }
@@ -667,7 +670,8 @@ export const handleCloudRoute = async (
             title,
             prompt,
             rrule,
-            ...(active === undefined ? {} : { active })
+            ...(active === undefined ? {} : { active }),
+            ...(expectedUpdatedAt === undefined ? {} : { expectedUpdatedAt })
           })
         );
       }

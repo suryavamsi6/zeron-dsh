@@ -1952,7 +1952,7 @@ export class CloudAccount extends DurableObject<Env> {
   async upsertSchedule(
     caller: CloudCaller,
     chatId: string,
-    input: { id?: string; title: string; prompt: string; rrule: string; active?: boolean }
+    input: { id?: string; title: string; prompt: string; rrule: string; active?: boolean; expectedUpdatedAt?: number }
   ): Promise<CloudResult<{ schedule: CloudSchedule }>> {
     if (!this.matches(caller)) return fail(403, "forbidden", "Not your Cloud account.");
     // A machine manages schedules only for the chat it hosts — never for
@@ -1974,6 +1974,12 @@ export class CloudAccount extends DurableObject<Env> {
       ? ([...sql.exec("SELECT * FROM cloud_schedule WHERE id=? AND chat_id=?", input.id, chatId)] as CloudSchedule[])[0]
       : undefined;
     if (input.id && !existing) return fail(404, "unknown_schedule", "No such schedule on this chat.");
+    if (
+      input.expectedUpdatedAt !== undefined &&
+      (!existing || existing.updated_at !== input.expectedUpdatedAt)
+    ) {
+      return fail(409, "conflict", "That schedule changed since this page loaded — reload it before editing.");
+    }
     if (!existing) {
       const count = [...sql.exec("SELECT count(*) AS n FROM cloud_schedule WHERE chat_id=?", chatId)][0].n as number;
       if (count >= MAX_SCHEDULES_PER_CHAT) {
@@ -2126,22 +2132,22 @@ export class CloudAccount extends DurableObject<Env> {
       const s = this.sessions.get(row.chat_id);
       if (!s || s.pendingDelete || s.state === "deleting") {
         // Permanent failure: the chat is gone — the schedule ends, no retry loop.
-        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=?, updated_at=? WHERE id=?",
-          "the chat is deleted", now, row.id);
+        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=? WHERE id=?",
+          "the chat is deleted", row.id);
         continue;
       }
       const inFlight =
         ([...sql.exec("SELECT count(*) AS n FROM cloud_wakeup WHERE schedule_id=? AND state='pending'", row.id)][0].n as number) > 0;
       const plan = planFire(row, now, inFlight);
       if (plan.kind === "end") {
-        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=?, updated_at=? WHERE id=?",
-          plan.error ?? "rrule has no occurrence in the future", now, row.id);
+        sql.exec("UPDATE cloud_schedule SET active=0, next_fire_at=NULL, last_error=? WHERE id=?",
+          plan.error ?? "rrule has no occurrence in the future", row.id);
         continue;
       }
       const active = plan.nextFireAt === undefined ? 0 : 1;
       if (plan.kind === "coalesce") {
-        sql.exec("UPDATE cloud_schedule SET active=?, next_fire_at=?, updated_at=? WHERE id=?",
-          active, plan.nextFireAt ?? null, now, row.id);
+        sql.exec("UPDATE cloud_schedule SET active=?, next_fire_at=? WHERE id=?",
+          active, plan.nextFireAt ?? null, row.id);
         continue;
       }
       // fire
@@ -2151,8 +2157,8 @@ export class CloudAccount extends DurableObject<Env> {
         fireId, row.id, row.chat_id, plan.occurrenceAt, row.prompt, "pending", now, now
       );
       sql.exec(
-        "UPDATE cloud_schedule SET active=?, next_fire_at=?, last_fired_at=?, last_error=NULL, updated_at=? WHERE id=?",
-        active, plan.nextFireAt ?? null, now, now, row.id
+        "UPDATE cloud_schedule SET active=?, next_fire_at=?, last_fired_at=?, last_error=NULL WHERE id=?",
+        active, plan.nextFireAt ?? null, now, row.id
       );
       await this.wake(s);
       await this.nudgeSessionDevice(s);
@@ -2176,8 +2182,8 @@ export class CloudAccount extends DurableObject<Env> {
       if (w.attempts >= MAX_WAKEUP_ATTEMPTS) {
         if (now - (w.nudged_at ?? w.created_at) < wakeupWindowMs(w)) continue;
         sql.exec("UPDATE cloud_wakeup SET state='dropped' WHERE fire_id=? AND state='pending'", w.fire_id);
-        sql.exec("UPDATE cloud_schedule SET last_error=?, updated_at=? WHERE id=?",
-          "the machine never acknowledged the wake-up", now, w.schedule_id);
+        sql.exec("UPDATE cloud_schedule SET last_error=? WHERE id=?",
+          "the machine never acknowledged the wake-up", w.schedule_id);
         continue;
       }
       if (!wakeupRetryDue(w, now)) continue;
