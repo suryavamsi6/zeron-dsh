@@ -187,7 +187,9 @@ never by rebasing.
     edge does not filter. Safe today: the vault can only ever emit `deepseek-key` and `github`
     (`VAULT_PROVIDERS` in `edge/vault/src/api.ts`, `isProvider`, `VaultProvider::ALL`), and the
     client already drops unknown names (`known_connections`). The one break path is future: add
-    a third vault provider and serve a client released before this merge, which has neither the
+    a third vault provider whose wire name the oldest client you still serve does not know —
+    the six names that client already parses (`deepseek-key`, `codex`, `claude`, `github`,
+    `anthropic-key`, `openai-key`) are safe — and serve that client, which has neither the
     header nor the client-side filter. Before that happens port `understoodProviders` /
     `forClient` with a legacy default of today's two providers.
   - **Deliberately not taken:** upstream's multi-provider cloud-agent feature —

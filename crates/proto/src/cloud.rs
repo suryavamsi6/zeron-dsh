@@ -446,7 +446,9 @@ impl VaultProvider {
 /// `deepseek-key` and `github`, and the client drops names it does not know
 /// (`known_connections` below), so no client that can exist here breaks. Port
 /// upstream's `understoodProviders`/`forClient` to the edge before a third
-/// vault provider is added.
+/// vault provider is added **whose wire name the oldest client still served
+/// does not know** — the six names that client already parses are safe, so a
+/// third provider reusing one of them is no break by itself.
 pub const VAULT_PROVIDERS_HEADER: &str = "x-zeron-vault-providers";
 
 /// [`VAULT_PROVIDERS_HEADER`]'s value for this build.
