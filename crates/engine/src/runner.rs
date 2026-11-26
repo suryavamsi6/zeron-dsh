@@ -1406,6 +1406,7 @@ pub struct CloudRunner {
     broker: crate::credentials::CredentialBroker,
     activity: RelayActivity,
     heartbeat: tokio::task::JoinHandle<()>,
+    schedules: Option<std::sync::Arc<crate::cloud_schedules::EdgeSchedules>>,
 }
 
 impl CloudRunner {
@@ -1418,7 +1419,30 @@ impl CloudRunner {
             broker,
             activity,
             heartbeat,
+            schedules: None,
         }
+    }
+
+    /// A session machine's cloud: it hosts one chat, and that chat's
+    /// schedules are the edge's (the store that survives the machine
+    /// sleeping). `None` on a device runner, whose machines all keep
+    /// their schedules local.
+    pub fn new_with_schedules(
+        broker: crate::credentials::CredentialBroker,
+        activity: RelayActivity,
+        heartbeat: tokio::task::JoinHandle<()>,
+        schedules: std::sync::Arc<crate::cloud_schedules::EdgeSchedules>,
+    ) -> Self {
+        Self {
+            broker,
+            activity,
+            heartbeat,
+            schedules: Some(schedules),
+        }
+    }
+
+    pub fn schedules(&self) -> Option<std::sync::Arc<crate::cloud_schedules::EdgeSchedules>> {
+        self.schedules.clone()
     }
 
     pub fn broker(&self) -> &crate::credentials::CredentialBroker {

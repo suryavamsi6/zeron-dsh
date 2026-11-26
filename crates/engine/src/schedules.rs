@@ -49,6 +49,12 @@ pub struct Task {
     /// stored one). Absent in stores written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub in_flight: Option<InFlight>,
+    /// Which store holds the record: `"edge"` on a cloud machine's hosted
+    /// chat rows (written through to the edge), absent on ordinary local
+    /// tasks. Additive and never set by the store itself — the ScheduleMcp
+    /// forwarding layer stamps it when mapping edge rows in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 /// One delivered occurrence's queued row on its chat.
@@ -1005,6 +1011,7 @@ mod tests {
             last_run_at: None,
             updated_at: 0,
             in_flight: None,
+            origin: None,
         }
     }
 
