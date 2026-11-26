@@ -2149,6 +2149,21 @@ pub fn append_scorecard_entry(drive: &Path, entry: &ScorecardEntry) -> Result<bo
         .append(true)
         .open(&path)
         .map_err(|e| format!("scorecard open: {e}"))?;
+    // A crash mid-write leaves a tail with no newline. The damaged line is
+    // already unparseable; left flush against it, the NEXT row would join it
+    // and be unparseable too. Close the line first, then write.
+    if std::fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false) {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut tail = [0u8; 1];
+        let mut read_back = std::fs::File::open(&path).map_err(|e| format!("scorecard read: {e}"))?;
+        if read_back.seek(SeekFrom::End(-1)).is_ok()
+            && read_back.read_exact(&mut tail).is_ok()
+            && tail[0] != b'\n'
+        {
+            file.write_all(b"\n")
+                .map_err(|e| format!("scorecard newline repair: {e}"))?;
+        }
+    }
     file.write_all(line.as_bytes())
         .map_err(|e| format!("scorecard write: {e}"))?;
     Ok(true)
