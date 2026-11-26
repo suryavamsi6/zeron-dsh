@@ -1116,7 +1116,6 @@ fn yaml_root(events: &[Event]) -> YamlRoot {
     let root = match events.get(index) {
         Some(Event::SequenceStart(..)) => YamlRoot::Sequence,
         Some(Event::MappingStart(..)) => YamlRoot::Mapping,
-        Some(Event::Scalar(value, ..)) if value.is_empty() => YamlRoot::Empty,
         Some(Event::Scalar(..) | Event::Alias(..)) => YamlRoot::Other,
         _ => return YamlRoot::Other,
     };
@@ -1188,7 +1187,17 @@ fn yaml_has_id_value(events: &[Event], needle: &str) -> bool {
     if matches!(events.get(index), Some(Event::DocumentStart)) {
         index += 1;
     }
-    scan_yaml_id(events, index, needle).0
+    if scan_yaml_id(events, index, needle).0 {
+        return true;
+    }
+    let anchored: Vec<usize> = events
+        .iter()
+        .filter_map(|event| match event {
+            Event::Scalar(value, _, anchor, _) if value == needle && *anchor != 0 => Some(*anchor),
+            _ => None,
+        })
+        .collect();
+    events.iter().any(|event| matches!(event, Event::Alias(anchor) if anchored.contains(anchor)))
 }
 
 fn skip_yaml_node(events: &[Event], mut index: usize) -> Option<usize> {
@@ -1241,6 +1250,16 @@ fn root_mapping_key_count(events: &[Event], needle: &str) -> usize {
     count
 }
 
+/// Whether the source is only blank lines, comments and document-start
+/// markers. Such a file is empty for editing even though YAML represents its
+/// document as an empty scalar; an explicit `""` or `...` is not the same.
+fn empty_document_source(yaml: &str) -> bool {
+    yaml.lines().all(|line| {
+        let text = line.trim();
+        text.is_empty() || text.starts_with('#') || text == "---"
+    })
+}
+
 /// The override file's YAML guard: valid syntax, one root sequence, and
 /// whether the scalar `id` appears anywhere in it. The last answer is only a
 /// conservative unsupported-shape check — if the line parser cannot find that
@@ -1249,7 +1268,7 @@ fn override_yaml_guard(yaml: &str, id: &str) -> Option<(bool, bool)> {
     let events = yaml_events(yaml)?;
     let root = yaml_root(&events);
     Some((
-        matches!(root, YamlRoot::Empty | YamlRoot::Sequence),
+        empty_document_source(yaml) || matches!(root, YamlRoot::Empty | YamlRoot::Sequence),
         yaml_has_id_value(&events, id),
     ))
 }
@@ -1630,7 +1649,7 @@ pub fn allow_build(home: &Path, package: &str) -> Result<(), HarnessError> {
     let block = allow_builds(&yaml);
     match yaml_events(&yaml).map(|events| {
         (
-            matches!(yaml_root(&events), YamlRoot::Empty | YamlRoot::Mapping),
+            empty_document_source(&yaml) || matches!(yaml_root(&events), YamlRoot::Empty | YamlRoot::Mapping),
             root_mapping_key_count(&events, "allowBuilds"),
         )
     }) {
@@ -2537,6 +2556,14 @@ mod tests {
             ),
             // Appending `- id:` under a mapping root would corrupt the document.
             ("a mapping root", "rows:\n  - id: dyn\n"),
+            // An id reachable only through an alias is still outside line editing.
+            (
+                "an aliased id",
+                "- title: &name dyn\n- id: *name\n",
+            ),
+            // Explicit empty scalars and end-document markers are not blank files.
+            ("an explicit empty scalar", "\"\"\n"),
+            ("a closed empty document", "---\n...\n"),
             // Malformed YAML is never edited by line positions.
             ("malformed yaml", "- id: dyn\n  disabled: [true\n"),
         ] {
