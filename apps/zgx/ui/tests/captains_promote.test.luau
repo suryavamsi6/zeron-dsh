@@ -123,3 +123,41 @@ test("captains_promote: Cancel sends nothing and leaves the chat a chat", functi
 	menu(app)
 	expect(app:has('role:menuitem "Promote to Captain…"')).to_be(true)
 end)
+
+
+test("captains_promote: demotion invalidates the digest strip cache and closes Captain pages", function()
+	local app = shell()
+	menu(app)
+	promote(app, "Billing")
+	pause(app)
+	app:set_state("captain_digest.captains", { a1 = { chatId = "a1", name = "Billing" } })
+	app:set_state("captain_digest.drives", { a1 = { digest = "# Digest", reports = {} } })
+	app:set_state("panel_sessions", {
+		["chat:a1"] = {
+			tabs = {
+				{ id = "tab1", kind = "captain_digest", chat = "a1" },
+				{ id = "tab2", kind = "files" },
+				{ id = "tab3", kind = "captain_drive", chat = "a1" },
+			},
+			active = "tab1",
+			visited = { "tab1", "tab2", "tab3" },
+		},
+	})
+	app:frames(8)
+	menu(app)
+	expect(app:has('role:menuitem "Demote to chat"')).to_be(true)
+	app:click('role:menuitem "Demote to chat"')
+	pause(app, 300)
+	app:click('role:button "Demote to chat"')
+	pause(app)
+
+	local captains = (app:state("captain_digest.captains") :: any) or {}
+	local drives = (app:state("captain_digest.drives") :: any) or {}
+	expect(captains["a1"]).to_be(nil)
+	expect(drives["a1"]).to_be(nil)
+	local panels = (app:state("panel_sessions") :: any) or {}
+	local kept = panels["chat:a1"].tabs
+	expect(#kept).to_be(1)
+	expect(kept[1].kind).to_be("files")
+	expect(panels["chat:a1"].active).to_be("tab2")
+end)

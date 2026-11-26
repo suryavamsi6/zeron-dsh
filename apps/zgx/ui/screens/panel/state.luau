@@ -227,6 +227,24 @@ function M.find(key: string, id: string): Tab?
 	return nil
 end
 
+-- Close every Captain-only page open for `chat`, in whichever session's
+-- panel holds it. The caller is the roster mutation: these kinds have no
+-- meaning once the chat is no longer a Captain. (They hold no outside
+-- resource, so closing here needs no kind-specific cleanup.)
+function M.close_captain_pages(chat: string)
+	for key, session in M.sessions:peek() do
+		local closing: { string } = {}
+		for _, tab in session.tabs do
+			if (tab.kind == "captain_digest" or tab.kind == "captain_drive") and tab.chat == chat then
+				table.insert(closing, tab.id)
+			end
+		end
+		for _, id in closing do
+			M.close(key, id)
+		end
+	end
+end
+
 function M.close(key: string, id: string)
 	local s = copy(peek(key))
 	local at = nil

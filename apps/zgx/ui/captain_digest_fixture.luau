@@ -12,6 +12,7 @@ ds.setup()
 local store = require("@app/screens/chat/store")
 local CaptainDigest = require("@app/screens/chat/captain_digest")
 local Panel = require("@app/screens/panel")
+local panel_state = require("@app/screens/panel/state")
 
 local C = require("./captain_drive_contract")
 
@@ -49,8 +50,13 @@ local function settle(value: any): any
 	}
 end
 
+local demoted = false
 CaptainDigest.roster = function(): any
-	return settle(C.roster_answer())
+	local answer = C.roster_answer()
+	if demoted then
+		answer.captains[1].archived = true
+	end
+	return settle(answer)
 end
 CaptainDigest.drive = function(_chat: string): any
 	return settle(drive)
@@ -97,6 +103,19 @@ ui.command {
 	title = "Empty the Drive",
 	run = function()
 		drive.digest, drive.needsYou, drive.reports = nil, nil, {}
+		CaptainDigest.reload(CHAT)
+	end,
+}
+
+-- Demote the Captain: the roster keeps an archived record, while the open
+-- strip/tab invalidate as the sidebar's successful demotion makes them.
+ui.command {
+	id = "demote_captain",
+	title = "Demote the Captain",
+	run = function()
+		demoted = true
+		CaptainDigest.forget(CHAT)
+		panel_state.close_captain_pages(CHAT)
 		CaptainDigest.reload(CHAT)
 	end,
 }

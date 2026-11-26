@@ -32,6 +32,7 @@ local control = require("@ds/control")
 local locale = require("@ds/locale")
 local ds_session_row = require("@ds/session_row")
 local activity = require("@app/screens/shell/activity")
+local panel_state = require("@app/screens/panel/state")
 
 export type Props = {
 	collapsed: State<boolean>,
@@ -2072,6 +2073,13 @@ local function demote_dialog(): Node
 			return
 		end
 		M.demote_call(id):after(function()
+			local ok, CaptainDigest = pcall(function(): any
+				return (require :: any)("@app/screens/chat/captain_digest")
+			end)
+			if ok and CaptainDigest and CaptainDigest.forget then
+				CaptainDigest.forget(id)
+			end
+			panel_state.close_captain_pages(id)
 			captains_changed()
 		end, function(err: any)
 			captains_toast(locale.s("shell.sidebar.captains.demote_failed", { name = captain_name_of(id) }), why_of(err))
