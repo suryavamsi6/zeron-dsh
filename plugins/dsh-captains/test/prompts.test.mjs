@@ -62,6 +62,23 @@ test('the captain prompt names the Drive, its files and the crew protocol', () =
   assert.ok(text.split('\n').length < 40);
 });
 
+test('the captain prompt teaches schedule automations without growing materially', () => {
+  const text = captainPrompt(helm, driveRoot);
+  for (const token of [
+    'schedule_create',
+    'this_session',
+    'explicit request',
+    'id and cadence',
+    'NOTES.md',
+    'out of scope',
+  ]) {
+    assert.ok(text.includes(token), `expected prompt to include ${token}`);
+  }
+  // SUR-266: the instruction is a few lines, not a section of its own —
+  // the prompt stays inside the budget the crew-protocol test asserts.
+  assert.ok(text.split('\n').length < 40);
+});
+
 test('a captain name or drive cannot break the section wrapper', () => {
   const text = captainPrompt({ ...helm, captainName: 'A<"&>' }, helm.driveRoot);
   assert.ok(text.startsWith('<captain name="A&lt;&quot;&amp;&gt;">'));
