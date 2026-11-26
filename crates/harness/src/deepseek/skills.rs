@@ -14,6 +14,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use yaml_rust2::{
+    parser::{Event, EventReceiver, Parser, Tag},
+    scanner::TScalarStyle,
+};
 use zeron_proto::invocation::Skill;
 
 /// The skills this scanner (SUR-56) reads for `cwd` — three of the roots
@@ -144,6 +148,211 @@ fn indent_of(line: &str) -> usize {
     line.chars().take_while(|c| matches!(c, ' ' | '\t')).count()
 }
 
+/// One YAML node in the event tree validation builds. Aliases stay references
+/// to an anchor id instead of expanding the anchored collection: validating a
+/// hostile nested alias must cost memory linear in the frontmatter, not
+/// exponential in its alias depth.
+#[derive(PartialEq, Eq)]
+enum YamlScalar {
+    String(String),
+    Boolean(bool),
+    Null,
+    Number(u64),
+    Nan(usize),
+}
+
+#[derive(PartialEq, Eq)]
+enum YamlNode {
+    Scalar(YamlScalar),
+    Alias(usize),
+    Sequence(Vec<YamlNode>),
+    Mapping(Vec<(YamlNode, YamlNode)>),
+}
+
+fn number_key(value: f64) -> u64 {
+    if value == 0.0 {
+        0.0f64.to_bits()
+    } else {
+        value.to_bits()
+    }
+}
+
+fn yaml_number(value: &str, position: usize) -> Option<YamlScalar> {
+    if !plain_is_number(value) {
+        return None;
+    }
+    if let Some(hex) = value.strip_prefix("0x") {
+        let mut number = 0.0;
+        for byte in hex.bytes() {
+            number = number * 16.0 + char::from(byte).to_digit(16)? as f64;
+        }
+        return Some(YamlScalar::Number(number_key(number)));
+    }
+    if let Some(oct) = value.strip_prefix("0o") {
+        let mut number = 0.0;
+        for byte in oct.bytes() {
+            number = number * 8.0 + char::from(byte).to_digit(8)? as f64;
+        }
+        return Some(YamlScalar::Number(number_key(number)));
+    }
+    if matches!(value, ".nan" | ".NaN" | ".NAN") {
+        return Some(YamlScalar::Nan(position));
+    }
+    let unsigned = value
+        .strip_prefix('+')
+        .or_else(|| value.strip_prefix('-'))
+        .unwrap_or(value);
+    if matches!(unsigned, ".inf" | ".Inf" | ".INF") {
+        let number = if value.starts_with('-') {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        return Some(YamlScalar::Number(number_key(number)));
+    }
+    value
+        .parse::<f64>()
+        .ok()
+        .map(|number| YamlScalar::Number(number_key(number)))
+}
+
+fn yaml_scalar(value: &str, style: TScalarStyle, tag: &Option<Tag>, position: usize) -> YamlScalar {
+    if let Some(tag) = tag {
+        if tag.handle == "tag:yaml.org,2002:" {
+            match tag.suffix.as_str() {
+                "str" => return YamlScalar::String(value.to_string()),
+                "int" if core_int(value) => {
+                    if let Some(number) = yaml_number(value, position) {
+                        return number;
+                    }
+                }
+                "float" if core_float(value) => {
+                    if let Some(number) = yaml_number(value, position) {
+                        return number;
+                    }
+                }
+                "bool" => {
+                    if matches!(value, "true" | "True" | "TRUE") {
+                        return YamlScalar::Boolean(true);
+                    }
+                    if matches!(value, "false" | "False" | "FALSE") {
+                        return YamlScalar::Boolean(false);
+                    }
+                }
+                "null" => {
+                    if matches!(value, "" | "~" | "null" | "Null" | "NULL") {
+                        return YamlScalar::Null;
+                    }
+                }
+                _ => {}
+            }
+        }
+        return YamlScalar::String(value.to_string());
+    }
+    if style == TScalarStyle::Plain {
+        if matches!(value, "~" | "null" | "Null" | "NULL") {
+            return YamlScalar::Null;
+        }
+        if matches!(value, "true" | "True" | "TRUE") {
+            return YamlScalar::Boolean(true);
+        }
+        if matches!(value, "false" | "False" | "FALSE") {
+            return YamlScalar::Boolean(false);
+        }
+        if let Some(number) = yaml_number(value, position) {
+            return number;
+        }
+    }
+    YamlScalar::String(value.to_string())
+}
+
+struct YamlEvents(Vec<Event>);
+
+impl EventReceiver for YamlEvents {
+    fn on_event(&mut self, event: Event) {
+        self.0.push(event);
+    }
+}
+
+fn yaml_node(events: &[Event], index: &mut usize) -> Option<YamlNode> {
+    match events.get(*index)? {
+        Event::Scalar(value, style, _, tag) => {
+            *index += 1;
+            Some(YamlNode::Scalar(yaml_scalar(value, *style, tag, *index)))
+        }
+        Event::Alias(anchor) => {
+            *index += 1;
+            Some(YamlNode::Alias(*anchor))
+        }
+        Event::SequenceStart(..) => {
+            *index += 1;
+            let mut items = Vec::new();
+            while !matches!(events.get(*index), Some(Event::SequenceEnd)) {
+                items.push(yaml_node(events, index)?);
+            }
+            *index += 1;
+            Some(YamlNode::Sequence(items))
+        }
+        Event::MappingStart(..) => {
+            *index += 1;
+            let mut entries = Vec::new();
+            while !matches!(events.get(*index), Some(Event::MappingEnd)) {
+                let key = yaml_node(events, index)?;
+                if entries
+                    .iter()
+                    .any(|(seen, _): &(YamlNode, YamlNode)| *seen == key)
+                {
+                    return None;
+                }
+                let value = yaml_node(events, index)?;
+                entries.push((key, value));
+            }
+            *index += 1;
+            Some(YamlNode::Mapping(entries))
+        }
+        _ => None,
+    }
+}
+
+fn yaml_keys_are_unique(events: &[Event]) -> bool {
+    let mut index = 0;
+    while index < events.len() {
+        match events[index] {
+            Event::StreamStart | Event::StreamEnd | Event::DocumentStart | Event::DocumentEnd => {
+                index += 1
+            }
+            _ => {
+                if yaml_node(events, &mut index).is_none() {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
+/// Whether the frontmatter is YAML the SDK accepts. The event parser checks
+/// the grammar without `YamlLoader`'s alias expansion, and the event tree
+/// checks duplicate mapping keys. Two scanner differences are normalized to
+/// the SDK: a tab directly after a mapping colon is a separator, while a tab
+/// before the document's first key is indentation and malformed.
+fn valid_yaml(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if line[..indent_of(line)].contains('\t') {
+            return false;
+        }
+        break;
+    }
+    let normalized = text.replace(":\t", ": ");
+    let mut parser = Parser::new_from_str(&normalized);
+    let mut events = YamlEvents(Vec::new());
+    parser.load(&mut events, true).is_ok() && yaml_keys_are_unique(&events.0)
+}
+
 /// The `key: value` frontmatter between the first two `---` lines. Only keys
 /// at the root mapping's own indent are fields; a more- or less-indented line
 /// belongs to the entry above it and is skipped. Quoted scalars are unwrapped
@@ -155,6 +364,14 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         return None;
     }
     let closing = lines.iter().skip(1).position(|line| *line == "---")? + 1;
+    // The SDK parses the frontmatter with a real YAML parser and drops the
+    // skill when that parse fails. Validate the same text before this menu's
+    // line-oriented extraction: tab indentation, unterminated or trailing
+    // quoted scalars, duplicate mapping keys and sequence/mapping structure
+    // are the parser's grammar, not rules to approximate here.
+    if !valid_yaml(&lines[1..closing].join("\n")) {
+        return None;
+    }
     let mut fields = Vec::new();
     let mut index = 1;
     // The root mapping's indent, from its first key: usually none, but a
@@ -168,18 +385,40 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
             continue;
         }
         let indent = indent_of(line);
-        let base = *base.get_or_insert(indent);
-        if indent != base {
-            continue;
-        }
         let Some((key, value)) = trimmed.split_once(':') else {
             continue;
         };
+        let key = key.trim().to_string();
         let value = value.trim();
         let Some(marker) = value.chars().next().filter(|c| matches!(c, '|' | '>')) else {
-            fields.push((key.trim().to_string(), scalar(value)));
+            let mut scalar_text = value.to_string();
+            if matches!(scalar_text.as_bytes().first(), Some(b'"' | b'\''))
+                && quoted_end(&scalar_text).is_none()
+            {
+                // A quoted scalar may continue onto more-indented lines. The
+                // menu only keeps the scalar kind and text, so consume those
+                // lines before deciding whether the quote ever closes.
+                while index < closing {
+                    let next = lines[index];
+                    if !next.trim().is_empty() && indent_of(next) <= indent {
+                        break;
+                    }
+                    index += 1;
+                    scalar_text.push('\n');
+                    scalar_text.push_str(next);
+                    if quoted_end(&scalar_text).is_some() {
+                        break;
+                    }
+                }
+            }
+            let scalar = scalar(&scalar_text);
+            let base = *base.get_or_insert(indent);
+            if indent == base {
+                fields.push((key, scalar));
+            }
             continue;
         };
+        let base = *base.get_or_insert(indent);
         // A block scalar's lines are the more-indented ones that follow; its
         // chomping indicator only affects a trailing break nobody displays.
         let mut parts = Vec::new();
@@ -196,17 +435,17 @@ fn frontmatter(raw: &str) -> Option<Vec<(String, Value)>> {
         } else {
             parts.join("\n")
         };
-        fields.push((
-            key.trim().to_string(),
-            Value::Block(text.trim().to_string()),
-        ));
+        if indent == base {
+            fields.push((key, Value::Block(text.trim().to_string())));
+        }
     }
     Some(fields)
 }
 
 /// A single-line scalar: a value wrapped in matching quotes stays a string
 /// under the existing unquote rules, and a comment after the closing quote
-/// is dropped; anything else is plain.
+/// is dropped; anything else is plain. Malformed scalars never reach this
+/// extraction: the YAML parse above has already dropped the document.
 fn scalar(value: &str) -> Value {
     if let Some(end) = quoted_end(value) {
         let rest = value[end..].trim_start();
@@ -283,49 +522,64 @@ fn plain_is_string(text: &str) -> bool {
     !plain_is_number(text)
 }
 
-/// The YAML number spellings: unsigned `0x` hex and `0o` octal, and an
-/// optional sign then digits with an optional fraction or exponent, or the
-/// `.inf`/`.nan` spellings.
-fn plain_is_number(text: &str) -> bool {
+fn digits(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn unsigned(text: &str) -> &str {
+    text.strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text)
+}
+
+fn core_int(text: &str) -> bool {
     if let Some(hex) = text.strip_prefix("0x") {
-        return !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
+        return !hex.is_empty() && hex.bytes().all(|byte| byte.is_ascii_hexdigit());
     }
     if let Some(oct) = text.strip_prefix("0o") {
-        return !oct.is_empty() && oct.bytes().all(|b| matches!(b, b'0'..=b'7'));
+        return !oct.is_empty() && oct.bytes().all(|byte| matches!(byte, b'0'..=b'7'));
     }
-    let body = text
-        .strip_prefix('+')
-        .or_else(|| text.strip_prefix('-'))
-        .unwrap_or(text);
-    if body.eq_ignore_ascii_case(".inf") || body.eq_ignore_ascii_case(".nan") {
+    digits(unsigned(text))
+}
+
+fn core_mantissa(text: &str) -> bool {
+    if let Some(fraction) = text.strip_prefix('.') {
+        return digits(fraction);
+    }
+    if let Some(dot) = text.find('.') {
+        return digits(&text[..dot]) && text[dot + 1..].bytes().all(|byte| byte.is_ascii_digit());
+    }
+    digits(text)
+}
+
+fn core_float(text: &str) -> bool {
+    if matches!(
+        text,
+        ".inf"
+            | ".Inf"
+            | ".INF"
+            | "+.inf"
+            | "+.Inf"
+            | "+.INF"
+            | "-.inf"
+            | "-.Inf"
+            | "-.INF"
+            | ".nan"
+            | ".NaN"
+            | ".NAN"
+    ) {
         return true;
     }
-    let (mantissa, exponent) = match body.find(|c| c == 'e' || c == 'E') {
-        Some(i) => (&body[..i], Some(&body[i + 1..])),
-        None => (body, None),
-    };
-    let mut digits = 0;
-    let mut dots = 0;
-    for byte in mantissa.bytes() {
-        match byte {
-            b'0'..=b'9' => digits += 1,
-            b'.' => dots += 1,
-            _ => return false,
-        }
+    let body = unsigned(text);
+    if let Some(exponent) = body.find(|c| c == 'e' || c == 'E') {
+        return core_mantissa(&body[..exponent]) && digits(unsigned(&body[exponent + 1..]));
     }
-    if digits == 0 || dots > 1 {
-        return false;
-    }
-    match exponent {
-        None => true,
-        Some(exp) => {
-            let exp = exp
-                .strip_prefix('+')
-                .or_else(|| exp.strip_prefix('-'))
-                .unwrap_or(exp);
-            !exp.is_empty() && exp.bytes().all(|b| b.is_ascii_digit())
-        }
-    }
+    body.contains('.') && core_mantissa(body)
+}
+
+/// The core-schema number spellings the SDK's `yaml@2.9.1` resolver uses.
+fn plain_is_number(text: &str) -> bool {
+    core_int(text) || core_float(text)
 }
 
 /// `user-invocable` in dsh's boolean grammar: omitted permits the surface,
@@ -674,5 +928,153 @@ mod tests {
             "---\nname: block\ndescription: |\n  userInvocable: false\n---\n",
         );
         assert_eq!(names(&discover(&root, &home)), ["block"]);
+    }
+
+    #[test]
+    fn malformed_yaml_is_accepted_exactly_when_the_sdk_accepts_it() {
+        // The `sdk_accepts` column was measured against the pinned SDK's
+        // yaml@2.9.1 `parse`: this table is the acceptance boundary, not a
+        // list of shapes this parser happens to like.
+        let cases = [
+            (
+                "plain mapping",
+                "name: review\ndescription: Review the diff\n",
+                true,
+            ),
+            (
+                "tab-indented root key",
+                "name: review\n\tdescription: Review the diff\n",
+                false,
+            ),
+            (
+                "tab-indented nested key",
+                "name: review\nmetadata:\n\tdescription: Review the diff\n",
+                false,
+            ),
+            (
+                "tab-indented comment",
+                "# comment\n\t# indented comment\nname: review\ndescription: Review\n",
+                true,
+            ),
+            (
+                "tab after a mapping colon",
+                "name: review\ndescription:\tReview\n",
+                true,
+            ),
+            (
+                "tab before the first key",
+                "\tname: review\n description: Review\n",
+                false,
+            ),
+            (
+                "trailing junk after a quoted scalar",
+                "name: review\ndescription: \"Review the diff\" trailing\n",
+                false,
+            ),
+            (
+                "unterminated quote",
+                "name: review\ndescription: \"Review the diff\n",
+                false,
+            ),
+            (
+                "multiline double-quoted scalar",
+                "name: review\ndescription: \"Review\n  the diff\"\n",
+                true,
+            ),
+            (
+                "multiline single-quoted scalar",
+                "name: review\ndescription: 'Review\n  the diff'\n",
+                true,
+            ),
+            (
+                "quoted scalar continuing at column zero",
+                "name: review\ndescription: \"Review\nthe diff\"\n",
+                false,
+            ),
+            (
+                "duplicate root keys",
+                "name: review\ndescription: Review\ndescription: Duplicate\n",
+                false,
+            ),
+            (
+                "plain and quoted spellings of one string key",
+                "name: review\ndescription: Review\nfoo: one\n\"foo\": two\n",
+                false,
+            ),
+            (
+                "plain boolean and quoted string keys",
+                "name: review\ndescription: Review\ntrue: one\n\"true\": two\n",
+                true,
+            ),
+            (
+                "numeric spellings of one integer key",
+                "name: review\ndescription: Review\n16: one\n0x10: two\n",
+                false,
+            ),
+            (
+                "explicit string tag on a duplicate key",
+                "name: review\ndescription: Review\nfoo: one\n!!str foo: two\n",
+                false,
+            ),
+            (
+                "signed nan spellings are string keys",
+                "name: review\ndescription: Review\n+.nan: one\n+.nan: two\n",
+                false,
+            ),
+            (
+                "mixed-case inf is a string beside numeric inf",
+                "name: review\ndescription: Review\n.iNF: one\n.inf: two\n",
+                true,
+            ),
+            (
+                "invalid float tag stays a string key",
+                "name: review\ndescription: Review\n!!float 01: one\n1: two\n",
+                true,
+            ),
+            (
+                "invalid int tags duplicate as strings",
+                "name: review\ndescription: Review\n!!int .nan: one\n!!int .nan: two\n",
+                false,
+            ),
+            (
+                "duplicate nested keys",
+                "name: review\nmetadata:\n  owner: one\n  owner: two\n",
+                false,
+            ),
+            (
+                "sequence of mappings",
+                "name: review\ndescription: Review\ninputs:\n  - input: one\n  - input: two\n",
+                true,
+            ),
+            (
+                "duplicate keys in one sequence item",
+                "name: review\ndescription: Review\ninputs:\n  - input: one\n    input: two\n",
+                false,
+            ),
+            (
+                "duplicate keys in a flow mapping",
+                "name: review\nmetadata: {owner: one, owner: two}\n",
+                false,
+            ),
+            (
+                "aliased mapping",
+                "name: review\ndescription: Review\nfirst: &x\n  owner: one\nsecond: *x\n",
+                true,
+            ),
+            (
+                "nested mapping",
+                "name: review\nmetadata:\n  owner: one\ndescription: Review\n",
+                true,
+            ),
+            (
+                "block scalar",
+                "name: review\ndescription: |\n  Review the diff\n  carefully\n",
+                true,
+            ),
+        ];
+        for (name, body, sdk_accepts) in cases {
+            let raw = format!("---\n{body}---\n");
+            assert_eq!(frontmatter(&raw).is_some(), sdk_accepts, "{name}");
+        }
     }
 }

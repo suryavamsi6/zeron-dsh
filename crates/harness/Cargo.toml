@@ -23,6 +23,7 @@ tracing.workspace = true
 sha2.workspace = true
 chrono.workspace = true
 reqwest.workspace = true
+yaml-rust2 = "0.10"
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
