@@ -844,6 +844,18 @@ impl SessionsEngine {
         self.inner.set_status(chat_id, status, true);
     }
 
+    /// Test-only: settle `chat_id` as having completed assistant turn `entry`.
+    #[cfg(test)]
+    pub(crate) fn seed_completed(&self, chat_id: &str, entry: &str) {
+        self.inner.set_status_with_completion(
+            chat_id,
+            SessionStatus::Idle,
+            false,
+            Some(entry.to_string()),
+            Some(DoneStatus::Completed),
+        );
+    }
+
     pub fn session_status(&self, chat_id: &str) -> Option<Session> {
         lock(&self.inner.statuses).get(chat_id).cloned()
     }

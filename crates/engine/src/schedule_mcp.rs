@@ -744,7 +744,13 @@ mod tests {
     struct Recorder;
     impl Deliver for Recorder {
         fn deliver(&self, _task: &Task) -> Result<Delivery, crate::EngineError> {
-            Ok(Delivery::Delivered("chat-x".into()))
+            Ok(Delivery::Delivered {
+                session: "chat-x".into(),
+                row: "row-x".into(),
+            })
+        }
+        fn pending(&self, _session: &str, _row: &str) -> Result<bool, crate::EngineError> {
+            Ok(false)
         }
     }
 

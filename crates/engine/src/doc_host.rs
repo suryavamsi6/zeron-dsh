@@ -4698,6 +4698,69 @@ impl DocHost {
         Ok(id)
     }
 
+    /// Whether queued row `row` still owes `chat_id` its turn: waiting in the
+    /// queue, or already the chat's latest user message (a dispatched row
+    /// keeps its id) while a turn runs and no turn has completed since it —
+    /// a wake turn after the answer does not count; a recovered turn that
+    /// never finished does. Turn state is live (the host's fresh
+    /// session row when another device hosts the chat), so after a restart
+    /// a dispatched row owes nothing.
+    pub fn queued_row_pending(&self, chat_id: &str, row: &str) -> Result<bool, EngineError> {
+        let handle = self.open(chat_id)?;
+        if handle.doc.read_queue()?.iter().any(|item| item.id == row) {
+            return Ok(true);
+        }
+        let Some(session) = self.running_session(chat_id) else {
+            return Ok(false);
+        };
+        let entries = handle.doc.read_entries_shared()?;
+        let Some(at) = entries
+            .iter()
+            .rposition(|entry| entry.role == MessageRole::User)
+        else {
+            return Ok(false);
+        };
+        if entries[at].id != row {
+            return Ok(false);
+        }
+        // Answered unless the last completed turn is one from before the row
+        // (a silent turn leaves no entry, so one not found counts as after):
+        // when unsure, deliver rather than suppress.
+        let answered = session.last_completed_turn.as_deref().is_some_and(|turn| {
+            !entries[..at]
+                .iter()
+                .any(|entry| entry.id == turn || entry.continuation_of.as_deref() == Some(turn))
+        });
+        Ok(!answered)
+    }
+
+    /// The session row of the turn `chat_id` is running, wherever the chat is
+    /// hosted: this engine's status, or the host device's row unless its
+    /// heartbeat has gone stale.
+    fn running_session(&self, chat_id: &str) -> Option<zeron_proto::Session> {
+        let active = |session: &zeron_proto::Session| {
+            matches!(
+                session.status,
+                zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+            )
+        };
+        if self.is_host(chat_id) {
+            return self.sessions()?.session_status(chat_id).filter(active);
+        }
+        let now = chrono::Utc::now();
+        self.workspace()?
+            .watch_session_rows()
+            .borrow()
+            .iter()
+            .filter(|session| {
+                session.chat_id == chat_id
+                    && active(session)
+                    && !zeron_proto::view::session_stale(session, now)
+            })
+            .max_by_key(|session| session.updated_at)
+            .cloned()
+    }
+
     /// Retype a queued message. Empty text deletes the row — emptying the box
     /// is how you say "drop it". `false` when the row is already gone.
     pub fn update_queued_message(
