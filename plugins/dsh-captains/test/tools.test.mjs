@@ -183,7 +183,7 @@ function gated(config, origin) {
 test('only the root agent registers the Drive tools', async t => {
   const root = await drive(t);
   const config = captain(root);
-  assert.deepEqual(gated(config, 'root').sort(), ['captain_drive_read', 'captain_drive_write']);
+  assert.deepEqual(gated(config, 'root').sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
   const crew = { ...config, role: 'crew', chatId: 'crew-1' };
   assert.deepEqual(gated(crew, 'root'), [], 'a crew chat registered a Drive tool');
   assert.deepEqual(gated(config, 'subagent'), [], 'a native child inherited the Drive tools');
@@ -225,11 +225,11 @@ test('an already-created root agent is latched once, not twice', async t => {
     on(event, handler) { if (event === 'agent/created') created = handler; },
   }, captain(root));
   assert.equal(sections.length, 1, 'a root created before the listener settled was not latched');
-  assert.deepEqual([...tools].sort(), ['captain_drive_read', 'captain_drive_write']);
+  assert.deepEqual([...tools].sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
   // The event arrives for the same agent afterwards: the latch must not double-register.
   created({ agent });
   assert.equal(sections.length, 1, 'the latch and the event double-registered the section');
-  assert.equal(tools.length, 2, 'the latch and the event doubled the Drive tools');
+  assert.equal(tools.length, 3, 'the latch and the event doubled the Drive tools');
 });
 
 test('the stamped drive root is the drive itself, not its parent', async t => {
@@ -252,4 +252,80 @@ test('the stamped drive root is the drive itself, not its parent', async t => {
   assert.deepEqual((await readdir(parent)).sort(), ['captains']);
   assert.deepEqual((await readdir(join(parent, 'captains'))).sort(), ['captain-1']);
   assert.deepEqual((await readdir(root)).sort(), ['notes']);
+});
+
+// ── SUR-207: captain_ship_ready writes machine-exact receipts ────────
+
+import { execFileSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
+
+function gitRepo(t) {
+  return (async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'ship-ready-repo-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const git = args => execFileSync('git', args, { cwd: dir, encoding: 'utf8' }).trim();
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'user.email', 'crew@example.com']);
+    git(['config', 'user.name', 'Crew']);
+    git(['config', 'commit.gpgsign', 'false']);
+    await writeFile(join(dir, 'file.txt'), 'one');
+    git(['add', 'file.txt']);
+    git(['commit', '-q', '-m', 'first']);
+    return { dir, git };
+  })();
+}
+
+function shipReady(root) {
+  return driveToolSpecs(captain(root)).find(tool => tool.name === 'captain_ship_ready');
+}
+
+test('captain_ship_ready writes a receipt whose git fields come from the worktree', async t => {
+  const root = await drive(t);
+  const { dir, git } = await gitRepo(t);
+  const head = git(['rev-parse', 'HEAD']);
+  const result = await shipReady(root).execute({
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+    baseSha: head, gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+  });
+  assert.match(result, /ready receipt written for crew-a/);
+  const receipt = JSON.parse(await readFile(join(root, 'state', 'ready', 'crew-a.json'), 'utf8'));
+  assert.equal(receipt.headSha, head, 'the receipt names the worktree tip, not a parameter');
+  assert.equal(receipt.treeSha, git(['rev-parse', 'HEAD^{tree}']));
+  assert.equal(receipt.baseSha, head);
+  assert.equal(receipt.gateCommand, 'cargo nextest run');
+  assert.equal(receipt.diffTier, 'standard');
+  assert.deepEqual(receipt.failedOrSkipped, []);
+  assert.equal(receipt.slug, 'crew-a-change');
+  assert.equal(receipt.crewId, 'crew-a');
+  assert.equal(receipt.pr, 100);
+});
+
+test('captain_ship_ready refuses a base that is not an ancestor of the tip', async t => {
+  const root = await drive(t);
+  const { dir } = await gitRepo(t);
+  await assert.rejects(
+    shipReady(root).execute({
+      crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+      baseSha: '0'.repeat(40), gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+    }),
+    /not an ancestor/,
+  );
+  assert.deepEqual((await readdir(root)), [], 'no receipt landed');
+});
+
+test('captain_ship_ready refuses a hand-asserted shape before touching git', async t => {
+  const root = await drive(t);
+  const { dir } = await gitRepo(t);
+  const tool = shipReady(root);
+  const base = {
+    crewId: 'crew-a', repo: dir, pr: 100, branch: 'crew/crew-a',
+    baseSha: 'a'.repeat(40), gateCommand: 'cargo nextest run', diffTier: 'standard', slug: 'crew-a-change',
+  };
+  await assert.rejects(tool.execute({ ...base, crewId: '../x' }), /bare file name/);
+  await assert.rejects(tool.execute({ ...base, repo: 'relative' }), /absolute path/);
+  await assert.rejects(tool.execute({ ...base, pr: 0 }), /pull request number/);
+  await assert.rejects(tool.execute({ ...base, baseSha: 'abc' }), /full commit SHA/);
+  await assert.rejects(tool.execute({ ...base, gateCommand: ' ' }), /gate/);
+  await assert.rejects(tool.execute({ ...base, diffTier: 'risky' }), /diffTier/);
+  await assert.rejects(tool.execute({ ...base, slug: 'UPPER' }), /slug/);
 });

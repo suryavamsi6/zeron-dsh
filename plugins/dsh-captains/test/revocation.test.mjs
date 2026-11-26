@@ -154,7 +154,7 @@ test('promote → demote → promote does not strand the chat', async () => {
   assert.equal(promoted.sections.length, 1);
   assert.equal(promoted.sections[0].name, 'zeron-captains:role');
   assert.match(promoted.sections[0].text(), /<captain name="Helm">/);
-  assert.deepEqual(promoted.tools.sort(), ['captain_drive_read', 'captain_drive_write']);
+  assert.deepEqual(promoted.tools.sort(), ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
   assert.equal((await promoted.step()).startsRequestSeries, undefined, 'a captain turn rebased');
 
   const demoted = harness({ role: 'none' }, () => [systemMessage(retired)]);

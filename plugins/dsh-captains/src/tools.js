@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const OUTSIDE = 'path is outside the Captain Drive';
 const READ_CAP = 64 * 1024;
@@ -165,6 +166,92 @@ export function driveToolSpecs(cfg) {
           throw error;
         }
         return `wrote ${display} (${bytes} bytes)`;
+      },
+    },
+    {
+      name: 'captain_ship_ready',
+      description: 'Write the merge-queue receipt for a crew branch whose pull request is ready to land; the git-derived fields are read from the worktree itself, never taken on trust',
+      parameters: {
+        crewId: { type: 'string', required: true, description: 'The crew chat whose branch this is; names state/ready/<crewId>.json' },
+        repo: { type: 'string', required: true, description: 'Absolute path of the crew worktree the branch tip is read from' },
+        pr: { type: 'number', required: true, description: 'The pull request number' },
+        branch: { type: 'string', required: true, description: 'The branch the pull request is opened from' },
+        baseSha: { type: 'string', required: true, description: 'The commit the branch built on; verified as an ancestor of the branch tip' },
+        gateCommand: { type: 'string', required: true, description: 'The gate the branch survived, e.g. "cargo nextest run" or "zgx test ui"' },
+        diffTier: { type: 'string', required: true, description: '"docs", "standard" or "s1"' },
+        failedOrSkipped: { type: 'array', required: false, description: 'Gate legs that failed or were skipped, if any' },
+        slug: { type: 'string', required: true, description: 'The changelog.d/<slug>.md fragment this branch adds' },
+      },
+      output,
+      async execute({ crewId, repo, pr, branch, baseSha, gateCommand, diffTier, failedOrSkipped, slug }) {
+        if (process.env.DSH_PERMISSION_MODE === 'read-only') {
+          throw new Error('the Captain Drive is read-only in this run');
+        }
+        // Every shape rule mirrors the engine's ReadyReceipt::validate — a
+        // receipt the engine would reject is refused here, at the write.
+        if (!/^[A-Za-z0-9_-]+$/.test(crewId)) throw new Error('crewId must be a bare file name');
+        if (!path.isAbsolute(repo)) throw new Error('repo must be an absolute path');
+        if (!Number.isInteger(pr) || pr < 1) throw new Error('pr must be a pull request number');
+        if (!/^[A-Za-z0-9][A-Za-z0-9/_-]*$/.test(branch) || branch.includes('..') || branch.endsWith('/')) {
+          throw new Error('branch is not a safe git branch name');
+        }
+        if (!/^[0-9a-f]{40}$/.test(baseSha)) throw new Error('baseSha must be a full commit SHA');
+        if (typeof gateCommand !== 'string' || gateCommand.trim() === '') {
+          throw new Error('gateCommand must name the gate the branch survived');
+        }
+        if (!['docs', 'standard', 's1'].includes(diffTier)) throw new Error('diffTier must be "docs", "standard" or "s1"');
+        if (!/^[a-z0-9-]+$/.test(slug)) throw new Error('slug must be lowercase letters, digits and dashes');
+        const skipped = Array.isArray(failedOrSkipped) ? failedOrSkipped : [];
+        if (skipped.some(leg => typeof leg !== 'string')) throw new Error('failedOrSkipped must be a list of gate leg names');
+
+        // headSha and treeSha are read from the worktree, never taken as
+        // parameters: the receipt can only ever name the commit that is
+        // actually there, and the engine re-checks both before it merges.
+        const git = args => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8' }).trim();
+        let headSha, treeSha;
+        try {
+          headSha = git(['rev-parse', 'HEAD']);
+          treeSha = git(['rev-parse', 'HEAD^{tree}']);
+        } catch (error) {
+          throw new Error(`could not read the worktree's tip: ${error.message}`);
+        }
+        try {
+          git(['merge-base', '--is-ancestor', baseSha, 'HEAD']);
+        } catch {
+          throw new Error('baseSha is not an ancestor of the branch tip — the branch was rebased since, or the base is wrong');
+        }
+
+        const receipt = {
+          crewId,
+          repo,
+          pr,
+          branch,
+          headSha,
+          treeSha,
+          baseSha,
+          gateCommand,
+          diffTier,
+          failedOrSkipped: skipped,
+          slug,
+        };
+        const rel = `state/ready/${crewId}.json`;
+        const { realTarget } = resolveInDrive(drive, rel);
+        const dir = path.dirname(realTarget);
+        fs.mkdirSync(dir, { recursive: true });
+        const content = JSON.stringify(receipt, null, 2) + '\n';
+        const tmp = path.join(dir, `.${path.basename(realTarget)}.${process.pid}.${tmpCounter++}.tmp`);
+        try {
+          fs.writeFileSync(tmp, content);
+          fs.renameSync(tmp, realTarget);
+        } catch (error) {
+          try {
+            fs.unlinkSync(tmp);
+          } catch {
+            // the temp file never landed or the rename already moved it
+          }
+          throw error;
+        }
+        return `ready receipt written for ${crewId} at ${headSha.slice(0, 12)} (tree ${treeSha.slice(0, 12)})`;
       },
     },
   ];
