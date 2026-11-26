@@ -4700,49 +4700,62 @@ impl DocHost {
 
     /// Whether queued row `row` still owes `chat_id` its turn: waiting in the
     /// queue, or already the chat's latest user message (a dispatched row
-    /// keeps its id) answered by the turn running now — one that started
-    /// with it, not a later wake turn with no user message of its own. Turn
-    /// state is live (the host's session row when another device hosts the
-    /// chat), so after a restart a dispatched row owes nothing.
+    /// keeps its id) while a turn runs that has not yet completed an answer
+    /// to it — a wake turn after the answer does not count; a recovered turn
+    /// that never finished does. Turn state is live (the host's fresh
+    /// session row when another device hosts the chat), so after a restart
+    /// a dispatched row owes nothing.
     pub fn queued_row_pending(&self, chat_id: &str, row: &str) -> Result<bool, EngineError> {
-        /// How far a turn's start may trail its user message's stamp.
-        const TURN_START_SLACK_MS: i64 = 5_000;
         let handle = self.open(chat_id)?;
         if handle.doc.read_queue()?.iter().any(|item| item.id == row) {
             return Ok(true);
         }
-        let Some(started) = self.running_turn_started_ms(chat_id) else {
+        let Some(session) = self.running_session(chat_id) else {
             return Ok(false);
         };
-        Ok(handle
-            .doc
-            .read_entries_shared()?
+        let entries = handle.doc.read_entries_shared()?;
+        let Some(at) = entries
             .iter()
-            .rev()
-            .find(|entry| entry.role == MessageRole::User)
-            .is_some_and(|entry| entry.id == row && started <= entry.created_at + TURN_START_SLACK_MS))
+            .rposition(|entry| entry.role == MessageRole::User)
+        else {
+            return Ok(false);
+        };
+        if entries[at].id != row {
+            return Ok(false);
+        }
+        let answered = session.last_completed_turn.as_deref().is_some_and(|turn| {
+            entries[at + 1..]
+                .iter()
+                .any(|entry| entry.id == turn || entry.continuation_of.as_deref() == Some(turn))
+        });
+        Ok(!answered)
     }
 
-    /// When the turn `chat_id` is running started (epoch ms), wherever the
-    /// chat is hosted: this engine's status, or the host device's session row.
-    fn running_turn_started_ms(&self, chat_id: &str) -> Option<i64> {
+    /// The session row of the turn `chat_id` is running, wherever the chat is
+    /// hosted: this engine's status, or the host device's row unless its
+    /// heartbeat has gone stale.
+    fn running_session(&self, chat_id: &str) -> Option<zeron_proto::Session> {
+        let active = |session: &zeron_proto::Session| {
+            matches!(
+                session.status,
+                zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
+            )
+        };
         if self.is_host(chat_id) {
-            return self.sessions()?.turn_started_ms(chat_id);
+            return self.sessions()?.session_status(chat_id).filter(active);
         }
+        let now = chrono::Utc::now();
         self.workspace()?
             .watch_session_rows()
             .borrow()
             .iter()
             .filter(|session| {
                 session.chat_id == chat_id
-                    && matches!(
-                        session.status,
-                        zeron_proto::SessionStatus::Working | zeron_proto::SessionStatus::AwaitingInput
-                    )
+                    && active(session)
+                    && !zeron_proto::view::session_stale(session, now)
             })
-            .filter_map(|session| session.started_at)
-            .map(|started| started.timestamp_millis())
-            .max()
+            .max_by_key(|session| session.updated_at)
+            .cloned()
     }
 
     /// Retype a queued message. Empty text deletes the row — emptying the box

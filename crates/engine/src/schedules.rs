@@ -1427,14 +1427,23 @@ mod tests {
             workspace: core.workspace.clone(),
             data_dir: dir.clone(),
         };
-        assert!(deliver.pending(session, &row).unwrap(), "its own turn runs");
-        let stale = format!("{row}-old");
-        let mut old = user_row(now_ms() - 3_600_000);
-        old.id = stale.clone();
-        doc.doc().push_message(&old).unwrap();
         assert!(
-            !deliver.pending(session, &stale).unwrap(),
-            "a turn started long after the row is not its turn"
+            deliver.pending(session, &row).unwrap(),
+            "its own turn runs (or a recovered one that never finished)"
+        );
+        // Answered, then a background-work wake turn runs: the row is done.
+        let answer = zeron_doc::SessionMessageEntry {
+            id: new_id(),
+            role: zeron_doc::MessageRole::Assistant,
+            ..user_row(now_ms())
+        };
+        doc.doc().push_message(&answer).unwrap();
+        core.sessions.seed_completed(session, &answer.id);
+        core.sessions
+            .seed_status(session, zeron_proto::SessionStatus::Working);
+        assert!(
+            !deliver.pending(session, &row).unwrap(),
+            "a wake turn after the answer is not the row's turn"
         );
         // A demoted Captain owes no wake: the next occurrence ends the task.
         core.captains.demote(session).expect("Captain demotes");
