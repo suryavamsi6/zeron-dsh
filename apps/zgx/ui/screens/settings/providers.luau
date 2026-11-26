@@ -837,6 +837,7 @@ local function devin_row(remote: () -> boolean): Node
 			agents.set_enabled("devin", true)
 			busy:set(false)
 			agents.load()
+			chat.load_catalog()
 		end
 		return ds.Settings.Row {
 			compact = true,
