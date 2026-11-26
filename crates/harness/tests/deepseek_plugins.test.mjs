@@ -256,7 +256,8 @@ function applyAs(config, origin) {
   return registered;
 }
 
-// Crew and ordinary sessions register zero Drive tools; a Captain gets exactly two.
+// Crew and ordinary sessions register zero Drive tools; a Captain gets the two
+// Drive tools and captain_ship_ready.
 assert.deepEqual(applyAs(crew, 'root'), [], 'a crew chat registers no Drive tools');
 assert.deepEqual(applyAs({ role: 'none' }, 'root'), [], 'an ordinary chat registered a tool');
 assert.deepEqual(applyAs(captain, 'subagent'), [], 'a native child inherited the Drive tools');
@@ -265,7 +266,8 @@ assert.throws(() => plugin.apply({ on: () => {} },
   { role: 'captain', chatId: 'captain-1', captainId: 'captain-1', captainName: 'B', driveRoot: 'relative' }), /driveRoot/);
 
 const registered = applyAs(captain, 'root');
-assert.deepEqual(registered.map(definition => definition.name).sort(), ['captain_drive_read', 'captain_drive_write']);
+assert.deepEqual(registered.map(definition => definition.name).sort(),
+  ['captain_drive_read', 'captain_drive_write', 'captain_ship_ready']);
 const read = registered.find(definition => definition.name === 'captain_drive_read');
 const write = registered.find(definition => definition.name === 'captain_drive_write');
 const outside = /path is outside the Captain Drive/;
