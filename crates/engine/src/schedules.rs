@@ -519,10 +519,11 @@ impl Deliver for SessionDeliver {
         Ok(Delivery::Delivered { session, row })
     }
 
-    /// A hidden or demoted Captain owes no wake: the occurrence goes to
-    /// `deliver`, which skips or ends the task for it.
+    /// A demoted Captain owes no wake: the occurrence goes to `deliver`,
+    /// which ends the task. A hidden one keeps its queued row, so it still
+    /// coalesces rather than queue a second copy for when it is restored.
     fn pending(&self, session: &str, row: &str) -> Result<bool, EngineError> {
-        if self.captain_outcome(session)?.is_some() {
+        if matches!(self.captain_outcome(session)?, Some(Delivery::Ended)) {
             return Ok(false);
         }
         self.doc_host.queued_row_pending(session, row)
