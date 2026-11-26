@@ -470,7 +470,12 @@ impl Deliver for SessionDeliver {
             Target::NewOnce {
                 session: Some(session),
                 ..
-            } => session.clone(),
+            } => {
+                if let Some(outcome) = self.captain_outcome(session)? {
+                    return Ok(outcome);
+                }
+                session.clone()
+            }
             Target::NewOnce { cwd, .. } | Target::New { cwd, .. } => {
                 let session = new_id();
                 self.workspace.create_chat(
