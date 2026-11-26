@@ -1,0 +1,1 @@
+Settings → Automation tasks now marks whether each schedule fires on this device or at the edge, and explains that a device-local task fires only while the app is running — with the latest missed run firing once when the app starts again (SUR-270).

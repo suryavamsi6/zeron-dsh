@@ -78,9 +78,11 @@ test("Automation tasks lists each task's name, when it runs, its next run, and w
 	expect(app:has(`{PAGE} >> "Weekly digest"`)).to_be(true)
 	expect(app:has(`{PAGE} >> "Paused"`)).to_be(true)
 	local tree = app:tree(PAGE)
-	expect(tree).to_contain("Every day at 09:00 UTC")
+	expect(tree).to_contain("On this device · Every day at 09:00 UTC")
 	expect(tree).to_contain("Next")
-	expect(tree).to_contain("Every Mon at 07:30 UTC")
+	expect(tree).to_contain("At the edge · Every Mon at 07:30 UTC")
+	expect(tree).to_contain("Local tasks fire only while this app is running")
+	expect(tree).to_contain("latest missed run fires once")
 	-- Asked once, as the page opened.
 	expect(asked(app, "Schedules")).to_be(1)
 end)
@@ -166,6 +168,7 @@ test("Automation tasks edits keep a task's id, its target and the chat a new_onc
 	expect(task.target.kind).to_be("new_once")
 	expect(task.target.cwd).to_be("/work/atlas")
 	expect(task.target.session).to_be("a2")
+	expect(task.origin).to_be("edge")
 	expect(task.rrule:find("T073000Z\nRRULE:FREQ=WEEKLY;BYDAY=MO;BYHOUR=7;BYMINUTE=30", 1, true)).never.to_be_nil()
 end)
 

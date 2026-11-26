@@ -444,11 +444,12 @@ local Row = ui.component(function(props: {
 		end,
 		description = function(): string
 			local t = task()
+			local origin = ui.t(if t.origin == "edge" then "settings.schedules.origin.edge" else "settings.schedules.origin.local"):get()
 			local at = frequency(parse(t.rrule))
 			if type(t.nextAt) == "number" then
-				return `{at} · {ui.t("settings.schedules.next_run", { when = locale.exact(t.nextAt / 1000) }):get()}`
+				return `{origin} · {at} · {ui.t("settings.schedules.next_run", { when = locale.exact(t.nextAt / 1000) }):get()}`
 			end
-			return at
+			return `{origin} · {at}`
 		end,
 		detail = function(): string?
 			return problem:get() or note:get()
@@ -670,6 +671,9 @@ function M.view(): Node
 		}
 		if task and type(task.id) == "string" then
 			next.id = task.id
+		end
+		if task and type(task.origin) == "string" then
+			next.origin = task.origin
 		end
 		busy:set(true)
 		problem:set(nil)
