@@ -3275,6 +3275,12 @@ fn perform_merge(
             head
         } else {
             let before_publish = |rebased_head: &str| {
+                // The gate runs for minutes; a commit made in the crew
+                // worktree meanwhile invalidates the receipt before the
+                // rebased head is pushed over the crew branch.
+                runner
+                    .validate_receipt(repo, receipt)
+                    .map_err(|error| format!("stale ready receipt: {error}"))?;
                 write_merge_progress(
                     &progress_path,
                     &receipt.head_sha,
@@ -6489,6 +6495,7 @@ mod tests {
         rebase_calls: std::sync::atomic::AtomicUsize,
         release: std::sync::atomic::AtomicUsize,
         land_calls: std::sync::atomic::AtomicUsize,
+        publish_calls: std::sync::atomic::AtomicUsize,
         move_target: std::sync::atomic::AtomicBool,
         receipt_error: Mutex<Option<String>>,
     }
@@ -6508,6 +6515,7 @@ mod tests {
                 rebase_calls: std::sync::atomic::AtomicUsize::new(0),
                 release: std::sync::atomic::AtomicUsize::new(0),
                 land_calls: std::sync::atomic::AtomicUsize::new(0),
+                publish_calls: std::sync::atomic::AtomicUsize::new(0),
                 move_target: std::sync::atomic::AtomicBool::new(false),
                 receipt_error: Mutex::new(None),
             }
@@ -6574,6 +6582,7 @@ mod tests {
             bytes[39] = b'0' + (call as u8 % 10);
             let new_head = String::from_utf8(bytes).unwrap();
             before_publish(&new_head)?;
+            self.publish_calls.fetch_add(1, Ordering::SeqCst);
             Ok(new_head)
         }
 
@@ -6734,6 +6743,29 @@ mod tests {
             0,
             "a stale receipt never enters the gate"
         );
+    }
+
+    /// A commit made in the crew worktree while the gate runs invalidates the
+    /// receipt before the rebased head is pushed over the crew branch.
+    #[test]
+    fn helm_ready_receipt_a_commit_during_the_gate_stops_the_publish() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = Arc::new(FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]));
+        runner.release.store(1, Ordering::SeqCst);
+        *runner.on_rebase.lock().unwrap() = Some(Box::new({
+            let runner = runner.clone();
+            move || *runner.receipt_error.lock().unwrap() = Some("the worktree moved".into())
+        }));
+        let outcomes = process_ready_receipts_with(drive.path(), runner.as_ref(), None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("stale ready receipt"), "{}", outcomes[0].reason);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.publish_calls.load(Ordering::SeqCst), 0, "nothing was pushed");
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
 
     fn outcome_at(drive: &Path, crew: &str) -> MergeOutcome {
