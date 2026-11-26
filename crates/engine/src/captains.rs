@@ -2075,7 +2075,6 @@ impl CaptainsRpc<'_> {
                 let existing = registry
                     .captain_of_crew(&params.chat_id)
                     .filter(|owner| owner.chat_id == params.captain_id)
-                    .and_then(|_| registry.captain_of_crew(&params.chat_id))
                     .and_then(|owner| owner.crew_meta.get(&params.chat_id))
                     .cloned()
                     .unwrap_or_default();

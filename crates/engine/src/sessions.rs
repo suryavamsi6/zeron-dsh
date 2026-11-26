@@ -1360,6 +1360,13 @@ impl SessionsEngine {
                 return;
             }
         };
+        if let crate::captains::RunRole::Crew {
+            worktree: Some(worktree),
+            ..
+        } = registry.run_role(chat_id)
+        {
+            request.cwd = worktree;
+        }
         if let Some(value) = crate::captains::captains_env(&registry, home, chat_id) {
             request.env.insert(CAPTAINS_ENV.to_owned(), value);
         } else {

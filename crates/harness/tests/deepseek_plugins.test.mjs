@@ -1177,6 +1177,13 @@ test('crew owns globs gate workspace edits before dispatch', () => {
     'reads are not ownership-gated');
   assert.equal(ownsDenial(exec('write', { file_path: 'crates/other.rs' }), { ...captains, owns: [] }), undefined,
     'a crew member with no owns metadata is unchanged');
+  assert.match(ownsDenial(exec('bash', { command: 'echo x > crates/other.rs' }), captains) ?? '', /may not use shell/);
+  if (process.platform !== 'win32') {
+    assert.match(ownsDenial(exec('write', { file_path: 'src\\owned.js' }), captains) ?? '', /outside its owns globs/,
+      'a POSIX backslash is a filename character, not a directory separator');
+  }
+  const indentedPatch = '*** Begin Patch\n  *** Update File: src/owned.js  \n@@\n*** End Patch\n';
+  assert.equal(ownsDenial(exec('apply_patch', { input: indentedPatch }), captains), undefined);
 });
 
 test('crew owns enforcement rejects out-of-scope writes before disk and allows scoped writes', { timeout: 300000 }, async t => {
