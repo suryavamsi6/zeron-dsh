@@ -2333,6 +2333,8 @@ struct MergeProgress {
     original_head: String,
     rebased_head: String,
     target_sha: String,
+    #[serde(default)]
+    published_heads: Vec<String>,
 }
 
 /// A fresh roster check. The closure is evaluated both before the expensive
@@ -2411,6 +2413,7 @@ pub(crate) trait MergeRunner: Send + Sync {
     fn branch_sha(&self, repo: &Path, branch: &str) -> Result<String, String>;
     fn pull_request_base(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn pull_request_state(&self, repo: &Path, pr: u64) -> Result<String, String>;
+    fn pull_request_head(&self, repo: &Path, pr: u64) -> Result<String, String>;
     fn changed_files(&self, repo: &Path, base: &str, head: &str) -> Result<Vec<String>, String>;
     fn file_exists_at(&self, repo: &Path, head: &str, path: &str) -> Result<bool, String>;
     /// Rebase `head` onto `origin/main` in `scratch`, run the local gates,
@@ -2462,8 +2465,8 @@ impl MergeRunner for ShellMergeRunner {
             &[
                 "fetch".into(),
                 "origin".into(),
-                "main".into(),
-                branch.to_string(),
+                "+refs/heads/main:refs/remotes/origin/main".into(),
+                format!("+refs/heads/{branch}:refs/remotes/origin/{branch}"),
             ],
         )
         .map(|_| ())
@@ -2511,6 +2514,22 @@ impl MergeRunner for ShellMergeRunner {
                 "state".into(),
                 "--jq".into(),
                 ".state".into(),
+            ],
+        )
+    }
+
+    fn pull_request_head(&self, repo: &Path, pr: u64) -> Result<String, String> {
+        Self::command(
+            repo,
+            "gh",
+            &[
+                "pr".into(),
+                "view".into(),
+                pr.to_string(),
+                "--json".into(),
+                "headRefOid".into(),
+                "--jq".into(),
+                ".headRefOid".into(),
             ],
         )
     }
@@ -2726,6 +2745,7 @@ fn write_merge_progress(
     original_head: &str,
     rebased_head: &str,
     target_sha: &str,
+    published_heads: &[String],
 ) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -2735,6 +2755,7 @@ fn write_merge_progress(
         original_head: original_head.into(),
         rebased_head: rebased_head.into(),
         target_sha: target_sha.into(),
+        published_heads: published_heads.to_vec(),
     };
     let json = serde_json::to_string(&progress)
         .map_err(|error| format!("could not encode merge progress: {error}"))?;
@@ -2762,36 +2783,55 @@ fn perform_merge(
     };
     let repo = Path::new(&receipt.repo);
     let result = (|| {
+        let base = runner.pull_request_base(repo, receipt.pr)?;
+        if base != "main" {
+            return Err(format!("crew merge queue only lands pull requests targeting main, not {base}"));
+        }
+        let progress_path = scratch.join("progress.json");
+        let progress = read_merge_progress(&progress_path)
+            .filter(|progress| progress.original_head == receipt.head_sha);
         match runner.pull_request_state(repo, receipt.pr)?.as_str() {
             // A crash can happen after `gh pr merge` has already landed the
-            // PR. Recover that attempt as success instead of failing on the
-            // deleted branch or replaying the whole gate.
+            // PR. Count that as recovery only when GitHub's final head is the
+            // reviewed commit or a rebased head this queue recorded; otherwise
+            // a maintainer merged a different revision and the Captain must
+            // reconcile that divergence instead of receiving a false success.
             "MERGED" => {
-                return Ok(MergeOutcome {
-                    crew_id: receipt.crew_id.clone(),
-                    status: MergeOutcomeStatus::Landed,
-                    reason: "pull request was already merged".into(),
-                    landed_head: None,
-                });
+                let merged_head = runner.pull_request_head(repo, receipt.pr)?;
+                let reviewed = merged_head == receipt.head_sha
+                    || progress.as_ref().is_some_and(|progress| {
+                        merged_head == progress.rebased_head
+                            || progress.published_heads.iter().any(|head| head == &merged_head)
+                    });
+                if reviewed {
+                    return Ok(MergeOutcome {
+                        crew_id: receipt.crew_id.clone(),
+                        status: MergeOutcomeStatus::Landed,
+                        reason: "pull request was already merged".into(),
+                        landed_head: Some(merged_head),
+                    });
+                }
+                return Err(format!(
+                    "pull request was already merged from unreviewed head {merged_head}"
+                ));
             }
             "CLOSED" => return Err("pull request is closed without merging".into()),
             _ => {}
         }
         runner.fetch(repo, &receipt.branch)?;
-        let base = runner.pull_request_base(repo, receipt.pr)?;
-        if base != "main" {
-            return Err(format!("crew merge queue only lands pull requests targeting main, not {base}"));
-        }
         let current_target = runner.target_sha(repo)?;
         let remote_head = runner.branch_sha(repo, &receipt.branch)?;
-        let progress_path = scratch.join("progress.json");
-        let progress = read_merge_progress(&progress_path)
-            .filter(|progress| progress.original_head == receipt.head_sha);
         let mut published = None;
         let mut lease = receipt.head_sha.clone();
         let mut before = current_target;
+        let mut published_heads = progress
+            .as_ref()
+            .map(|progress| progress.published_heads.clone())
+            .unwrap_or_default();
+        let mut remote_is_self_published = false;
         if let Some(progress) = &progress {
             if remote_head == progress.rebased_head {
+                remote_is_self_published = true;
                 if progress.target_sha == before {
                     published = Some(progress.rebased_head.clone());
                     before = progress.target_sha.clone();
@@ -2801,10 +2841,17 @@ fn perform_merge(
                     // and lease only that known self-published tip.
                     lease = remote_head.clone();
                 }
+            } else if progress.published_heads.iter().any(|head| head == &remote_head) {
+                // A replacement push can fail after progress advanced. The
+                // branch then still points at an older queue-published head;
+                // that tip is safe to lease even though it is no longer the
+                // latest candidate recorded in progress.
+                remote_is_self_published = true;
+                lease = remote_head.clone();
             } else if remote_head != receipt.head_sha {
                 return Err(format!(
-                    "crew branch tip {remote_head} matches neither the reviewed head {} nor the published head {}",
-                    receipt.head_sha, progress.rebased_head
+                    "crew branch tip {remote_head} matches neither the reviewed head {} nor a queue-published head",
+                    receipt.head_sha
                 ));
             }
         } else if remote_head != receipt.head_sha {
@@ -2812,6 +2859,9 @@ fn perform_merge(
                 "crew branch tip {remote_head} no longer matches the reviewed head {}",
                 receipt.head_sha
             ));
+        }
+        if remote_is_self_published && !published_heads.iter().any(|head| head == &remote_head) {
+            published_heads.push(remote_head.clone());
         }
         let files = runner.changed_files(repo, &before, &receipt.head_sha)?;
         let fragment = format!("changelog.d/{}.md", receipt.slug);
@@ -2828,6 +2878,7 @@ fn perform_merge(
                     &receipt.head_sha,
                     rebased_head,
                     &before,
+                    &published_heads,
                 )
             };
             runner.rebase_gate_publish(
@@ -6018,6 +6069,7 @@ mod tests {
         target: Mutex<String>,
         base: Mutex<String>,
         state: Mutex<String>,
+        pr_head: Mutex<String>,
         remote_head: Mutex<String>,
         files: Vec<String>,
         on_rebase: Mutex<Option<Box<dyn Fn() + Send + Sync>>>,
@@ -6035,6 +6087,7 @@ mod tests {
                 target: Mutex::new("a".repeat(40)),
                 base: Mutex::new("main".into()),
                 state: Mutex::new("OPEN".into()),
+                pr_head: Mutex::new("c".repeat(40)),
                 remote_head: Mutex::new("c".repeat(40)),
                 files: files.iter().map(|file| file.to_string()).collect(),
                 on_rebase: Mutex::new(None),
@@ -6067,6 +6120,10 @@ mod tests {
 
         fn pull_request_state(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
             Ok(self.state.lock().unwrap().clone())
+        }
+
+        fn pull_request_head(&self, _repo: &Path, _pr: u64) -> Result<String, String> {
+            Ok(self.pr_head.lock().unwrap().clone())
         }
 
         fn changed_files(&self, _repo: &Path, _base: &str, _head: &str) -> Result<Vec<String>, String> {
@@ -6342,6 +6399,7 @@ mod tests {
             &"c".repeat(40),
             &rebased,
             &"a".repeat(40),
+            &[],
         )
         .unwrap();
         let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
@@ -6376,11 +6434,65 @@ mod tests {
             &"c".repeat(40),
             &stale,
             &"a".repeat(40),
+            &[],
         )
         .unwrap();
         let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
         *runner.remote_head.lock().unwrap() = stale;
         *runner.target.lock().unwrap() = "e".repeat(40);
+        runner.release.store(1, Ordering::SeqCst);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.land_calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// A merged PR is not automatic success: if its final head is neither
+    /// the reviewed commit nor one of this queue's recorded rebased heads, a
+    /// maintainer merged a different revision and the receipt must fail.
+    #[test]
+    fn helm_merge_queue_rejects_an_unreviewed_already_merged_head() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.state.lock().unwrap() = "MERGED".into();
+        *runner.pr_head.lock().unwrap() = "f".repeat(40);
+        let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].status, MergeOutcomeStatus::Failed);
+        assert!(outcomes[0].reason.contains("unreviewed head"), "{}", outcomes[0].reason);
+        assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// When a replacement push is interrupted, the branch can remain on an
+    /// older queue-published head while progress names the newer candidate.
+    /// The older head is still known-safe progress and must be leasable for
+    /// the next rebase rather than rejected as foreign.
+    #[test]
+    fn helm_merge_queue_recovers_an_interrupted_replacement_push() {
+        use std::sync::atomic::Ordering;
+        let drive = tempfile::tempdir().unwrap();
+        let repo = tempfile::tempdir().unwrap();
+        ready_receipt(drive.path(), "crew-a", repo.path());
+        let scratch = drive
+            .path()
+            .join("state")
+            .join(MERGE_QUEUE_DIR)
+            .join("crew-a");
+        let previous = "d".repeat(40);
+        write_merge_progress(
+            &scratch.join("progress.json"),
+            &"c".repeat(40),
+            &"e".repeat(40),
+            &"a".repeat(40),
+            std::slice::from_ref(&previous),
+        )
+        .unwrap();
+        let runner = FakeMergeRunner::new(&["changelog.d/crew-a-change.md"]);
+        *runner.remote_head.lock().unwrap() = previous;
         runner.release.store(1, Ordering::SeqCst);
         let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
         assert_eq!(outcomes.len(), 1);
@@ -6404,7 +6516,7 @@ mod tests {
         let outcomes = process_ready_receipts_with(drive.path(), &runner, None);
         assert_eq!(outcomes.len(), 1);
         assert_eq!(outcomes[0].status, MergeOutcomeStatus::Landed);
-        assert_eq!(outcomes[0].landed_head, None);
+        assert_eq!(outcomes[0].landed_head.as_deref(), Some("c".repeat(40).as_str()));
         assert_eq!(runner.rebase_calls.load(Ordering::SeqCst), 0);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 0);
     }
