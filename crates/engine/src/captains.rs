@@ -5856,40 +5856,52 @@ mod tests {
     #[test]
     fn helm_merge_queue_concurrent_ready_receipts_serialize() {
         use std::sync::atomic::Ordering;
-        let drive = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let drive1 = root.path().join("captains").join("cap-a");
+        let drive2 = root.path().join("captains").join("cap-b");
+        std::fs::create_dir_all(&drive1).unwrap();
+        std::fs::create_dir_all(&drive2).unwrap();
         let repo = tempfile::tempdir().unwrap();
-        ready_receipt(drive.path(), "crew-a", repo.path());
-        ready_receipt(drive.path(), "crew-b", repo.path());
+        // Only the first receipt exists before the first scan. The second is
+        // written while that scan is parked inside its gate, so the second
+        // scanner is guaranteed to be the one to claim it. Without the shared
+        // Captain-root mutex it would enter the gate immediately and make
+        // `rebase_calls` two.
+        ready_receipt(&drive1, "crew-a", repo.path());
         let runner = Arc::new(FakeMergeRunner::new(&[
             "changelog.d/crew-a-change.md",
             "changelog.d/crew-b-change.md",
         ]));
-        let barrier = Arc::new(std::sync::Barrier::new(2));
-        let mut threads = Vec::new();
-        for _ in 0..2 {
-            let drive_path = drive.path().to_path_buf();
+        let first = {
+            let drive_path = drive1.clone();
             let runner = runner.clone();
-            let barrier = barrier.clone();
-            threads.push(std::thread::spawn(move || {
-                barrier.wait();
-                process_ready_receipts_with(&drive_path, runner.as_ref(), None)
-            }));
-        }
+            std::thread::spawn(move || process_ready_receipts_with(&drive_path, runner.as_ref(), None))
+        };
         while runner.rebase_calls.load(Ordering::SeqCst) < 1 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
+        ready_receipt(&drive2, "crew-b", repo.path());
+        let second = {
+            let drive_path = drive2.clone();
+            let runner = runner.clone();
+            std::thread::spawn(move || process_ready_receipts_with(&drive_path, runner.as_ref(), None))
+        };
         std::thread::sleep(std::time::Duration::from_millis(30));
         assert_eq!(
-            runner.active.load(Ordering::SeqCst),
+            runner.rebase_calls.load(Ordering::SeqCst),
             1,
             "a second ready receipt entered the merge gate while the mutex was held"
         );
+        assert_eq!(runner.active.load(Ordering::SeqCst), 1);
         runner.release.store(1, Ordering::SeqCst);
         while runner.rebase_calls.load(Ordering::SeqCst) < 2 {
             std::thread::sleep(std::time::Duration::from_millis(1));
         }
         runner.release.store(2, Ordering::SeqCst);
-        let outcomes: Vec<_> = threads.into_iter().map(|thread| thread.join().unwrap()).collect();
+        let outcomes: Vec<_> = [first, second]
+            .into_iter()
+            .map(|thread| thread.join().unwrap())
+            .collect();
         assert_eq!(
             outcomes.iter().flatten().count(),
             2,
@@ -5897,8 +5909,8 @@ mod tests {
         );
         assert_eq!(runner.max_active.load(Ordering::SeqCst), 1);
         assert_eq!(runner.land_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(outcome_at(drive.path(), "crew-a").status, MergeOutcomeStatus::Landed);
-        assert_eq!(outcome_at(drive.path(), "crew-b").status, MergeOutcomeStatus::Landed);
+        assert_eq!(outcome_at(&drive1, "crew-a").status, MergeOutcomeStatus::Landed);
+        assert_eq!(outcome_at(&drive2, "crew-b").status, MergeOutcomeStatus::Landed);
     }
 
     /// The queue rechecks `origin/main` after the local gate. A target branch
