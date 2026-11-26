@@ -326,6 +326,7 @@ return {
 	["ds.code_editor.soft_wrap"] = "Soft Wrap",
 	["ds.sidebar.unknown_device"] = "Unknown device",
 	["ds.sidebar.captains"] = "Captains",
+	["ds.sidebar.captain_badge"] = "Captain",
 	["ds.sidebar.crew"] = "{n} crew",
 	["ds.sidebar.pr.open"] = "Open",
 	["ds.sidebar.pr.merged"] = "Merged",

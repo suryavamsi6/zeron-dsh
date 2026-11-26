@@ -445,6 +445,11 @@ route.narrowed_project(function(): string?
 	return nil
 end)
 
+-- (Forward: the roster's Captain ids, filled in below with its readers —
+-- `session_of` already marks each chat's row so a promoted thread carries
+-- its star tile and badge in every list, not only in the Captains group.)
+local captains: any
+
 -- A chat as the list draws it (a session row's data). Shared by a project's
 -- sessions and a Captain's crew (SUR-89), so a crew chat's row says the same
 -- as it would have said in its project.
@@ -474,6 +479,9 @@ local function session_of(c: any): any
 		rank = if act then activity.rank(c, on_shelf) else nil,
 		created = c.created,
 		agent = c.agent :: any,
+		-- (A Captain's mark: the roster read below. Read, not peeked — a
+		-- promotion or a demotion rebuilds the row it lands on.)
+		captain = if captains and captains:get()[c.id] then true else nil,
 		device = names[c.device] or locale.s("shell.sidebar.unknown_device"),
 		branch = c.branch,
 		-- (Its side chats working count as its subagents do, as its lanes'
@@ -934,7 +942,7 @@ local M = {}
 -- when a menu opens and again after a promotion or a demotion. A page
 -- without the host's actions (a fixture, an older build) has none, and every
 -- chat offers Promote.
-local captains = ui.state("shell_captains", {} :: { [string]: boolean })
+captains = ui.state("shell_captains", {} :: { [string]: boolean })
 local captain_names = ui.state("shell_captains_names", {} :: { [string]: string })
 -- (Which chat is in whose crew, and the roster's rows: `crew_of` and
 -- `captain_rows`, declared above the list. A member's menu offers Remove

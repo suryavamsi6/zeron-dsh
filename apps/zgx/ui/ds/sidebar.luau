@@ -32,6 +32,7 @@
 -- each row keeping its node (its hover, a menu open on it).
 
 local tree_line = require("@self/tree_line")
+local badge = require("@self/badge")
 local Icon = require("@self/icon")
 local Mark = require("@self/mark")
 local status = require("@self/status")
@@ -75,6 +76,10 @@ export type Session = {
 	-- 3h, 1d, 2w), or text as it should read.
 	time: (number | string)?,
 	agent: Mark.Name?,
+	-- A Captain (SUR-89's roster, read by the shell): its row carries the
+	-- star tile and the Captain badge wherever it stands, so a promoted
+	-- thread reads as the bot it is and not as one more chat.
+	captain: boolean?,
 	-- Regular's second line: where it runs and on what.
 	device: string?,
 	branch: string?,
@@ -1089,6 +1094,24 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 	local function agent(s: Session, strong: () -> boolean, cur: (() -> Session)?): Node
 		return SessionRow.mark(cur or now_of(s), strong)
 	end
+	-- A Captain's slot: its star on amber, full ink even at rest — the mark
+	-- is the identity, not a harness's letter. The harness still speaks in
+	-- the row's detail line.
+	local function captain_glyph(): Node
+		return Tile {
+			inside = Icon { name = "star-bold", size = 9 },
+			hue = "amber",
+			size = 16,
+		}
+	end
+	-- The word after a Captain's title, in the tile's hue: small, never
+	-- fading with the title — the row's statement of what it is.
+	local function captain_badge(): Node
+		return ui.div {
+			shrink = 0,
+			badge.Badge { locale.t("ds.sidebar.captain_badge") :: any, tone = "warning", icon = "star-bold" },
+		}
+	end
 	-- A session's slot: its agent; collapsed, its state (if it has one, its
 	-- corner unseen).
 	local function session_glyph(s: Session, strong: () -> boolean, row: (() -> Session)?): Node
@@ -1107,9 +1130,19 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 					size = 16,
 				}
 			),
-			ui.show(function(): boolean
-				return not railed() or cur().status == nil
-			end, agent(s, strong, cur)),
+			ui.show(
+				function(): boolean
+					return not railed() or cur().status == nil
+				end,
+				ui.div {
+					ui.show(function(): boolean
+						return cur().captain == true
+					end, captain_glyph()),
+					ui.show(function(): boolean
+						return cur().captain ~= true
+					end, agent(s, strong, cur)),
+				}
+			),
 		}
 	end
 	-- Whether a session asks to be seen: in a state, or the one open.
@@ -1402,12 +1435,15 @@ local places: State<Places> = props.places or ui.use_state({ pinned = pinned_ids
 			end,
 			wide = in_flyout,
 			hovered = hovered,
-			lead = if in_flyout then agent(s, strong, cur) else session_glyph(s, strong, cur),
+			lead = session_glyph(s, strong, cur),
 			words = ui.column {
 				w_full = true,
 				gap = "$zeron.space.hair",
 				line(
 					title,
+					ui.show(function(): boolean
+						return cur().captain == true
+					end, captain_badge()),
 					if s.pr then ui.show(details.pr, pr_badge(s.pr)) else nil,
 					subagents_pill(function(): number
 						return cur().subagents or 0

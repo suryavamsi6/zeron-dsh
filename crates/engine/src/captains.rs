@@ -607,13 +607,35 @@ pub fn ensure_drive(
     }
     write_starter(
         &drive.join("AGENTS.md"),
-        &format!("# {captain_name}: Captain rules\n\nCrew chats never read this file.\n"),
+        &format!(
+            "# {captain_name}: Captain rules\n\n\
+             These are your standing rules — edit them as the person sharpens how you work.\n\
+             Crew chats never read this file; what every crew must know goes in CREW.md.\n\n\
+             - Open every turn by reading this file, NOTES.md and DIGEST.md before acting.\n\
+             - Keep NOTES.md the living plan: what is in flight, what is blocked, what comes\n\
+             \x20 next. Rewrite it whenever the plan moves.\n\
+             - One crew chat per piece of work; write its brief in handoffs/ first, and\n\
+             \x20 archive the chat once the work is done.\n\
+             - The digest is the person's window onto the crew: anything that needs them\n\
+             \x20 goes under ## Needs you, one bullet per item, and you repeat those bullets\n\
+             \x20 at the end of your reply.\n"
+        ),
     )?;
     write_starter(
         &drive.join("CREW.md"),
-        "# Crew rules\n\nEvery crew chat reads this file on every turn.\n",
+        "# Crew rules\n\n\
+         Every crew chat reads this file on every turn.\n\n\
+         - Your brief in handoffs/ is your mission: work what it asks, nothing wider, and\n\
+         \x20 tell the Captain when it is ambiguous rather than guessing.\n\
+         - When a turn of work completes, file your report: the outcome, what changed and\n\
+         \x20 what is next — it is how the Captain's digest learns about you.\n\
+         - Never edit VERSION or CHANGELOG.md directly; each branch adds one\n\
+         \x20 changelog.d/<slug>.md fragment instead.\n",
     )?;
-    write_starter(&drive.join("NOTES.md"), "# Plan and notes\n")?;
+    write_starter(
+        &drive.join("NOTES.md"),
+        "# Plan and notes\n\nThe living plan: in flight, blocked, and what comes next.\n",
+    )?;
     write_starter(
         &drive.join("DIGEST.md"),
         "## Needs you\n\n## New\n\n## In progress\n\n",
